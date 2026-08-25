@@ -28,7 +28,7 @@ services:
       - odontologia_network
 
   evolution-whatsapp:
-    image: atendai/evolution-api:v2.1.1
+    image: evoapicloud/evolution-api:v2.1.1
     container_name: evolution_whatsapp
     ports:
       - "8080:8080"
