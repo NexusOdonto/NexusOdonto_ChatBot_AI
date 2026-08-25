@@ -13,34 +13,34 @@ services:
     networks:
       - odontologia_network
 
-  backend-api:
-    build:
-      context: ./Backend_Odontologia
-      dockerfile: Dockerfile
-    container_name: backend-api
-    ports:
-      - "5000:5000"
-    environment:
-      - ASPNETCORE_HTTP_PORTS=5000
-    depends_on:
-      - oracle-db
-    networks:
-      - odontologia_network
+  # backend-api:
+  #   build:
+  #     context: ./Backend_Odontologia
+  #     dockerfile: Dockerfile
+  #   container_name: backend-api
+  #   ports:
+  #     - "5000:5000"
+  #   environment:
+  #     - ASPNETCORE_HTTP_PORTS=5000
+  #   depends_on:
+  #     - oracle-db
+  #   networks:
+  #     - odontologia_network
 
-  evolution-whatsapp:
-    image: atendai/evolution-api:v2.1.1
-    container_name: evolution_whatsapp
-    ports:
-      - "8080:8080"
-    environment:
-      - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
-      - WEBHOOK_GLOBAL_ENABLED=true
-      - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
-      - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
-    volumes:
-      - evolution_instances:/evolution/instances
-    networks:
-      - odontologia_network
+  # evolution-whatsapp:
+  #   image: atendai/evolution-api:v2.1.1
+  #   container_name: evolution_whatsapp
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
+  #     - WEBHOOK_GLOBAL_ENABLED=true
+  #     - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
+  #     - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+  #   volumes:
+  #     - evolution_instances:/evolution/instances
+  #   networks:
+  #     - odontologia_network
 
   qdrant-db:
     image: qdrant/qdrant:v1.11.0
@@ -58,14 +58,12 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - DOTNET_API_URL=http://backend-api:5000/api/v1
     depends_on:
-      - oracle-db
       - qdrant-db
-      - evolution-whatsapp
-      - backend-api
     networks:
       - odontologia_network
 
