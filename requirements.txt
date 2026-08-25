@@ -1,0 +1,22 @@
+# Orquestación de Agente y LLM
+langchain==0.2.14
+langchain-core==0.2.35
+langchain-community==0.2.12
+langgraph==0.2.14
+langchain-openai==0.1.22
+
+# Base de Datos Vectorial
+qdrant-client==1.11.0
+langchain-qdrant==0.1.3
+
+# Servidor Web y API
+fastapi==0.112.1
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+httpx==0.27.0
+python-dotenv==1.0.1
+
+# Procesamiento Documental y Tokenización
+tiktoken==0.7.0
+pypdf==4.3.1
+python-docx==1.1.2
