@@ -1,5 +1,6 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from app.agents.tools.qdrant_tool import initialize_qdrant
@@ -35,6 +36,14 @@ app.add_middleware(
 
 # Registro de rutas
 app.include_router(webhook_router, tags=["WhatsApp Webhook"])
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Error interno no controlado en la ruta {request.url.path}: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "Error interno del servidor."}
+    )
 
 
 @app.on_event("startup")
