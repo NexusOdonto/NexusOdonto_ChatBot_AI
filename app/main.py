@@ -2,6 +2,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from app.agents.tools.qdrant_tool import initialize_qdrant
 
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
@@ -34,6 +35,12 @@ app.add_middleware(
 
 # Registro de rutas
 app.include_router(webhook_router, tags=["WhatsApp Webhook"])
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    # Comprueba la conexión y prepara la colección antes de atender solicitudes.
+    initialize_qdrant()
 
 @app.get("/health", tags=["Health Check"])
 async def health_check():
