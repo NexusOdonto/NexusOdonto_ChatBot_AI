@@ -23,6 +23,7 @@ class DotNetClient:
         }
         if self.secret_token:
             headers["Authorization"] = f"Bearer {self.secret_token}"
+            headers["X-Api-Key"] = self.secret_token
             headers["x-api-key"] = self.secret_token
         return headers
 
