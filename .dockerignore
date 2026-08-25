@@ -1,0 +1,41 @@
+# Git
+.git/
+.gitignore
+
+# Secretos y configuracion local
+.env
+.env.*
+!.env.example
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editores y sistema
+.vscode/
+.idea/
+.DS_Store
+
+# Logs y archivos temporales
+*.log
+*.tmp
+*.swp
+
+# Pruebas y cobertura
+.coverage
+htmlcov/
+
+# Datos locales y volumenes
+*.sqlite3
+*.db
+qdrant_storage/
