@@ -5,9 +5,9 @@ services:
     environment:
       - ORACLE_PASSWORD=Admin123Password!
       - APP_USER=odontologia_user
-      - APP_PASSWORD=Odontologia123!
+      - APP_USER_PASSWORD=Odontologia123!
     ports:
-      - "1521:1521"
+      - "1522:1521"
     volumes:
       - oracle_data:/opt/oracle/oradata
     networks:
@@ -34,11 +34,28 @@ services:
       - "8080:8080"
     environment:
       - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution_user:evolution_password@evolution-postgres:5432/evolution
       - WEBHOOK_GLOBAL_ENABLED=true
       - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+    depends_on:
+      - evolution-postgres
     volumes:
       - evolution_instances:/evolution/instances
+    networks:
+      - odontologia_network
+
+  evolution-postgres:
+    image: postgres:15-alpine
+    container_name: evolution_postgres
+    environment:
+      - POSTGRES_USER=evolution_user
+      - POSTGRES_PASSWORD=evolution_password
+      - POSTGRES_DB=evolution
+    volumes:
+      - evolution_postgres_data:/var/lib/postgresql/data
     networks:
       - odontologia_network
   # evolution-whatsapp:
@@ -84,6 +101,7 @@ services:
 volumes:
   oracle_data:
   evolution_instances:
+  evolution_postgres_data:
 
 networks:
   odontologia_network:
