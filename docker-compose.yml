@@ -27,6 +27,20 @@ services:
   #   networks:
   #     - odontologia_network
 
+  evolution-whatsapp:
+    image: evoapicloud/evolution-api:v2.1.1
+    container_name: evolution_whatsapp
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
+      - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - odontologia_network
   # evolution-whatsapp:
   #   image: atendai/evolution-api:v2.1.1
   #   container_name: evolution_whatsapp
