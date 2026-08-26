@@ -5,6 +5,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
+from sentence_transformers import CrossEncoder
 
 from app.core.config import settings
 
@@ -55,20 +56,44 @@ def _ensure_collection(client: QdrantClient) -> None:
 
 
 def get_clinical_retriever():
-	# Devuelve el retriever que busca los cuatro resultados más relevantes.
-	return get_vector_store().as_retriever(search_kwargs={"k": 4})
+	# Devuelve el retriever base que obtiene los candidatos iniciales desde Qdrant.
+	return get_vector_store().as_retriever(search_kwargs={"k": settings.rag_candidate_count})
+
+
+@lru_cache(maxsize=1)
+def get_reranker() -> CrossEncoder:
+	# El modelo se carga una sola vez y se reutiliza en todas las preguntas.
+	return CrossEncoder(settings.reranker_model)
+
+
+def _score_to_confidence(score: float) -> float:
+	# Convierte el logit del Cross-Encoder a un rango 0..1 para el escalamiento.
+	if score >= 0:
+		return 1.0 / (1.0 + pow(2.718281828, -score))
+	return pow(2.718281828, score) / (1.0 + pow(2.718281828, score))
 
 
 def retrieve_clinical_knowledge(query: str) -> str:
 	# Busca información clínica y la convierte en texto para el agente.
-	# El score se incluye para que el webhook pueda detectar baja confianza del RAG.
-	documents_with_scores = get_vector_store().similarity_search_with_score(query, k=4)
+	# Primero Qdrant recupera candidatos por similitud vectorial.
+	documents_with_scores = get_vector_store().similarity_search_with_score(
+		query,
+		k=settings.rag_candidate_count,
+	)
 	if not documents_with_scores:
 		return "[RAG_SCORE:0.0]\nNo se encontro informacion clinica relevante."
 
-	best_score = max(float(score) for _, score in documents_with_scores)
-	content = "\n\n".join(document.page_content for document, _ in documents_with_scores)
-	return f"[RAG_SCORE:{best_score}]\n{content}"
+	# Después el Cross-Encoder compara la pregunta con cada documento completo.
+	pairs = [(query, document.page_content) for document, _ in documents_with_scores]
+	reranker_scores = get_reranker().predict(pairs)
+	ranked_documents = sorted(
+		zip((document for document, _ in documents_with_scores), reranker_scores),
+		key=lambda item: float(item[1]),
+		reverse=True,
+	)
+	best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
+	content = "\n\n".join(document.page_content for document, _ in ranked_documents)
+	return f"[RAG_SCORE:{best_confidence}]\n{content}"
 
 
 # Herramienta que LangGraph puede incluir junto con sus demás herramientas.

@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
     rag_min_confidence: float = 0.65
+    rag_candidate_count: int = 5
+    reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     allowed_origins: str = "*"
 
     # Carga las variables desde .env y permite ignorar variables adicionales.
