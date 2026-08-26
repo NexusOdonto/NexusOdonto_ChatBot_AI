@@ -9,6 +9,8 @@ from app.security.webhook_signature import is_valid_webhook_signature, restore_r
 from app.agents.tools.qdrant_tool import initialize_qdrant
 from app.core.config import settings
 from app.services.appointment_reminders import enviar_recordatorios_citas
+from app.graph.builder import create_graph
+from app.session.postgres_checkpointer import PostgresCheckpointer
 
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
@@ -32,6 +34,7 @@ app = FastAPI(
 
 scheduler = AsyncIOScheduler(timezone=settings.reminder_timezone)
 # APScheduler ejecutará el job dentro del ciclo de vida de FastAPI.
+checkpoint_store: PostgresCheckpointer | None = None
 
 
 @app.middleware("http")
@@ -79,10 +82,16 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 async def startup() -> None:
+    global checkpoint_store
+    # PostgreSQL se prepara antes de aceptar mensajes para recuperar threads existentes.
+    checkpoint_store = PostgresCheckpointer(settings.postgres_checkpoint_url)
+    await checkpoint_store.start()
+    create_graph(checkpoint_store.saver)
+
     # Comprueba la conexión y prepara la colección antes de atender solicitudes.
     initialize_qdrant()
     scheduler.add_job(
-		# El job consulta las citas de mañana y envía los recordatorios.
+                # El job consulta las citas de mañana y envía los recordatorios.
         enviar_recordatorios_citas,
         CronTrigger(
             hour=settings.reminder_schedule_hour,
@@ -108,6 +117,8 @@ async def shutdown() -> None:
     # Cerrar el scheduler evita tareas huérfanas al detener el servidor.
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    if checkpoint_store is not None:
+        await checkpoint_store.stop()
 
 @app.get("/health", tags=["Health Check"])
 async def health_check():

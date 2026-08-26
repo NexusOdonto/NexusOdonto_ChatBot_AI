@@ -72,6 +72,20 @@ services:
     networks:
       - odontologia_network
 
+  bot-memory-db:
+    image: postgres:15-alpine
+    container_name: bot_memory_postgres
+    environment:
+      - POSTGRES_USER=bot_user
+      - POSTGRES_PASSWORD=bot_password
+      - POSTGRES_DB=bot_memory
+    ports:
+      - "5433:5432"
+    volumes:
+      - bot_memory_data:/var/lib/postgresql/data
+    networks:
+      - odontologia_network
+
   agente-python:
     build:
       context: .
@@ -85,10 +99,12 @@ services:
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=CLAVE_SECRETA_ODONTO_2026
       - DOTNET_API_URL=http://backend-api:5000/api/v1
+      - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_SIGNATURE_HEADER=${WEBHOOK_SIGNATURE_HEADER:-x-webhook-signature}
     depends_on:
       - qdrant-db
+      - bot-memory-db
     networks:
       - odontologia_network
 
@@ -96,6 +112,7 @@ volumes:
   oracle_data:
   evolution_instances:
   evolution_postgres_data:
+  bot_memory_data:
 
 networks:
   odontologia_network:
