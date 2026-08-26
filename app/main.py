@@ -38,18 +38,21 @@ scheduler = AsyncIOScheduler(timezone=settings.reminder_timezone)
 async def validate_evolution_webhook(request: Request, call_next):
     """Bloquea webhooks falsos antes de que alcancen el router o LangGraph."""
     if request.url.path == "/webhook/whatsapp" and request.method == "POST":
-        # La firma se calcula sobre los bytes originales, antes de parsear JSON.
-        body = await request.body()
-        signature = request.headers.get(settings.webhook_signature_header)
-        if not is_valid_webhook_signature(body, signature or "", settings.webhook_secret):
-            logger.warning("Webhook rechazado: firma ausente o inválida")
+        # Evolution API no soporta HMAC nativamente, así que validamos un token estático
+        auth_header = request.headers.get("Authorization", "")
+        apikey_header = request.headers.get("apikey", "")
+        
+        logger.info(f"Headers recibidos: {request.headers}")
+        
+        # Validar si el secreto está presente en los headers de autenticación
+        if settings.webhook_secret not in auth_header and settings.webhook_secret != apikey_header:
+            logger.warning("Webhook rechazado: token ausente o inválido")
             return JSONResponse(
                 status_code=403,
-                content={"status": "forbidden", "message": "Firma de webhook inválida."},
+                content={"status": "forbidden", "message": "Token de webhook inválido."},
             )
-
-        # El endpoint necesita leer el mismo payload después de esta validación.
-        request._receive = lambda: restore_request_body(body)
+        
+        # Ya no necesitamos leer el body anticipadamente ni sobreescribir _receive
 
     return await call_next(request)
 
