@@ -31,20 +31,21 @@ class EvolutionClient:
         """
         url = f"{self.base_url}/message/sendText/{self.instance_name}"
         
-        # Limpieza básica del número para dejar solo dígitos
-        numero_limpio = "".join(filter(str.isdigit, numero))
-
+        # Dejamos el número como viene del webhook (puede contener sufijos útiles internamente)
         payload = {
-            "number": numero_limpio,
-            "text": texto,
-            "delay": delay
+            "number": numero,
+            "options": {
+                "delay": delay,
+                "presence": "composing"
+            },
+            "text": texto
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(url, json=payload, headers=self._get_headers())
                 response.raise_for_status()
-                logger.info(f"[Evolution API] Mensaje enviado exitosamente a {numero_limpio}")
+                logger.info(f"[Evolution API] Mensaje enviado exitosamente a {numero}")
                 return response.json()
             except httpx.HTTPStatusError as e:
                 logger.error(f"[Evolution API] Error HTTP {e.response.status_code} al enviar mensaje: {e.response.text}")

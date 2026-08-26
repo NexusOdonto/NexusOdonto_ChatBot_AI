@@ -74,9 +74,9 @@ async def receive_whatsapp_message(request: Request):
         if payload.data and payload.data.message:
             data = payload.data
             
-            # Extraer número del paciente
+            # Extraer número del paciente completo (con el sufijo de whatsapp)
             if data.key and data.key.remoteJid:
-                numero_paciente = data.key.remoteJid.split("@")[0]
+                numero_paciente = data.key.remoteJid
             
             # Extraer texto del mensaje
             mensaje_texto = ""
@@ -121,13 +121,7 @@ async def receive_whatsapp_message(request: Request):
                             return {"status": "escalated", "reason": "low_rag_confidence"}
                         await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
                         return {"status": "error", "reason": "ticket_not_created"}
-                    assistant_message = next(
-                        (message for message in reversed(result["messages"])
-                         if isinstance(message, AIMessage) and isinstance(message.content, str)),
-                        None,
-                    )
-                    if assistant_message:
-                        await evolution_client.enviar_mensaje(numero_paciente, assistant_message.content)
+                    # El envío de la respuesta ya fue gestionado internamente por el nodo del grafo (chatbot_node)
                 except Exception as service_err:
                     logger.error(f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}")
                     # Notificar al paciente por WhatsApp

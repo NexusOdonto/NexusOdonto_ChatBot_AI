@@ -28,7 +28,7 @@ services:
   #     - odontologia_network
 
   evolution-whatsapp:
-    image: evoapicloud/evolution-api:v2.1.1
+    image: evoapicloud/evolution-api:latest
     container_name: evolution_whatsapp
     ports:
       - "8080:8080"
@@ -37,6 +37,10 @@ services:
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
       - DATABASE_CONNECTION_URI=postgresql://evolution_user:evolution_password@evolution-postgres:5432/evolution
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+      - REDIS_ENABLED=false
+      - WEBSOCKET_ENABLED=false
       - WEBHOOK_GLOBAL_ENABLED=true
       - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
@@ -92,6 +96,7 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
+      - EVOLUTION_API_KEY=CLAVE_SECRETA_ODONTO_2026
       - DOTNET_API_URL=http://backend-api:5000/api/v1
     depends_on:
       - qdrant-db
