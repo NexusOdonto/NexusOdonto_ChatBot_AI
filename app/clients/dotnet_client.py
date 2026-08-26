@@ -16,6 +16,8 @@ class DotNetClient:
         self.timeout: float = float(os.getenv("DOTNET_API_TIMEOUT", "10.0"))
 
     def _get_headers(self) -> Dict[str, str]:
+
+        # El backend definirá si valida JWT, API key o ambos encabezados.
         """Encabezados con token de seguridad para que C# permita el acceso."""
         headers = {
             "Content-Type": "application/json",
@@ -38,14 +40,17 @@ class DotNetClient:
         Maneja timeouts y errores de conexión.
         """
         if profesional_id is None:
+			# Sin profesional no es posible calcular sus espacios disponibles.
             logger.error("[.NET Client] profesional_id es obligatorio para consultar horarios")
             return None
 
         url = f"{self.base_url}/profesionales/{profesional_id}/horarios-disponibles"
         params: Dict[str, Any] = {}
         if fecha:
+			# La fecha limita la búsqueda a un día específico del calendario.
             params["fecha"] = fecha
         if servicio_id:
+			# El servicio determina la duración necesaria del espacio.
             params["servicioId"] = servicio_id
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -86,6 +91,7 @@ class DotNetClient:
                 page = 1
                 all_items: List[Dict[str, Any]] = []
                 while True:
+					# Se recorren todas las páginas para no dejar citas sin recordar.
                     response = await client.get(
                         url,
                         params={"fecha": fecha, "page": page, "pageSize": 100},
@@ -101,6 +107,7 @@ class DotNetClient:
 
                     items = payload.get("items", [])
                     if isinstance(items, list):
+						# Se normaliza la respuesta paginada a una única colección local.
                         all_items.extend(item for item in items if isinstance(item, dict))
 
                     total_pages = payload.get("totalPages", page)
@@ -112,6 +119,22 @@ class DotNetClient:
             return None
         except httpx.RequestError as e:
             logger.error(f"[.NET Client] Error de conexión/timeout al consultar citas: {str(e)}")
+            return None
+
+    async def crear_ticket_soporte(self, datos_ticket: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Crea un ticket para que recepción atienda una conversación escalada."""
+        url = f"{self.base_url}/tickets-soporte"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+				# El ticket permite que recepción vea la alerta en el frontend.
+                response = await client.post(url, json=datos_ticket, headers=self._get_headers())
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[.NET Client] Error HTTP al crear ticket ({e.response.status_code}): {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"[.NET Client] Error de conexión/timeout al crear ticket: {str(e)}")
             return None
 
 # Instancia reutilizable para el bot y las tools

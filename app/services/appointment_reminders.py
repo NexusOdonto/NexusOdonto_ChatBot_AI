@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def _first_value(appointment: Dict[str, Any], *names: str) -> str:
+    # Busca un campo aceptando diferencias de mayúsculas entre DTOs .NET.
     for name in names:
         value = appointment.get(name)
         if value is None:
@@ -24,6 +25,7 @@ def _first_value(appointment: Dict[str, Any], *names: str) -> str:
 
 
 def _nested_value(appointment: Dict[str, Any], parent_names: tuple[str, ...], *names: str) -> str:
+    # Permite leer datos como paciente.nombre o servicio.name.
     for parent_name in parent_names:
         parent = next(
             (value for key, value in appointment.items() if key.lower() == parent_name.lower()),
@@ -37,6 +39,7 @@ def _nested_value(appointment: Dict[str, Any], parent_names: tuple[str, ...], *n
 
 
 def _appointment_items(response: Any) -> Iterable[Dict[str, Any]]:
+    # Admite tanto listas directas como envoltorios usados por respuestas paginadas.
     if isinstance(response, list):
         return (item for item in response if isinstance(item, dict))
     if isinstance(response, dict):
@@ -58,6 +61,7 @@ async def enviar_recordatorios_citas() -> None:
         return
 
     for appointment in _appointment_items(response):
+		# Cada cita debe aportar los datos mínimos para construir un WhatsApp válido.
         patient = _first_value(
             appointment, "nombrePaciente", "pacienteNombre", "patientName", "nombre"
         ) or _nested_value(appointment, ("paciente", "patient"), "nombre", "nombreCompleto", "name")
@@ -74,6 +78,6 @@ async def enviar_recordatorios_citas() -> None:
 
         message = (
             f"Hola {patient}, te recordamos tu cita de {service} para mañana. "
-            "Si necesitas reprogramarla, responde a este mensaje."
+            "Si necesitas reprogramarla o tienes alguna duda, responde a este mensaje."
         )
         await evolution_client.enviar_mensaje(phone, message)

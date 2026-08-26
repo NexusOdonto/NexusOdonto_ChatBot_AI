@@ -30,6 +30,7 @@ app = FastAPI(
 )
 
 scheduler = AsyncIOScheduler(timezone=settings.reminder_timezone)
+# APScheduler ejecutará el job dentro del ciclo de vida de FastAPI.
 
 # Configuración de CORS
 app.add_middleware(
@@ -57,6 +58,7 @@ async def startup() -> None:
     # Comprueba la conexión y prepara la colección antes de atender solicitudes.
     initialize_qdrant()
     scheduler.add_job(
+		# El job consulta las citas de mañana y envía los recordatorios.
         enviar_recordatorios_citas,
         CronTrigger(
             hour=settings.reminder_schedule_hour,
@@ -79,6 +81,7 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    # Cerrar el scheduler evita tareas huérfanas al detener el servidor.
     if scheduler.running:
         scheduler.shutdown(wait=False)
 

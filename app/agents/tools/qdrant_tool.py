@@ -61,10 +61,14 @@ def get_clinical_retriever():
 
 def retrieve_clinical_knowledge(query: str) -> str:
 	# Busca información clínica y la convierte en texto para el agente.
-	documents = get_clinical_retriever().invoke(query)
-	if not documents:
-		return "No se encontro informacion clinica relevante."
-	return "\n\n".join(document.page_content for document in documents)
+	# El score se incluye para que el webhook pueda detectar baja confianza del RAG.
+	documents_with_scores = get_vector_store().similarity_search_with_score(query, k=4)
+	if not documents_with_scores:
+		return "[RAG_SCORE:0.0]\nNo se encontro informacion clinica relevante."
+
+	best_score = max(float(score) for _, score in documents_with_scores)
+	content = "\n\n".join(document.page_content for document, _ in documents_with_scores)
+	return f"[RAG_SCORE:{best_score}]\n{content}"
 
 
 # Herramienta que LangGraph puede incluir junto con sus demás herramientas.
