@@ -11,6 +11,12 @@ Estado: provisional, pendiente de validacion contra Swagger ejecutable.
 - Las respuestas de listados usan paginacion mediante `items`, `page`, `pageSize`, `totalItems` y `totalPages`.
 - El bot no accede directamente a Oracle.
 
+## 1.1 Seguridad del webhook de Evolution
+
+El endpoint `POST /webhook/whatsapp` exige el encabezado configurado en `WEBHOOK_SIGNATURE_HEADER` y una firma HMAC-SHA256 calculada sobre el body JSON original usando `WEBHOOK_SECRET`. Se acepta la firma hexadecimal directa o con el prefijo `sha256=`.
+
+Las solicitudes sin firma, con firma incorrecta o con un payload alterado reciben `403` y se rechazan antes de llegar al webhook o a LangGraph. El secreto debe ser el mismo en Evolution API y en el contenedor del agente, y nunca debe registrarse en logs.
+
 ## 2. Autenticacion tecnica
 
 Todas las rutas operativas requieren autenticacion. El bot debe usar una identidad tecnica con los permisos minimos necesarios.

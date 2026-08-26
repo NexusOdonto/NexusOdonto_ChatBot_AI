@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from app.security.webhook_signature import is_valid_webhook_signature, restore_request_body
 from app.agents.tools.qdrant_tool import initialize_qdrant
 from app.core.config import settings
 from app.services.appointment_reminders import enviar_recordatorios_citas
@@ -31,6 +32,26 @@ app = FastAPI(
 
 scheduler = AsyncIOScheduler(timezone=settings.reminder_timezone)
 # APScheduler ejecutará el job dentro del ciclo de vida de FastAPI.
+
+
+@app.middleware("http")
+async def validate_evolution_webhook(request: Request, call_next):
+    """Bloquea webhooks falsos antes de que alcancen el router o LangGraph."""
+    if request.url.path == "/webhook/whatsapp" and request.method == "POST":
+        # La firma se calcula sobre los bytes originales, antes de parsear JSON.
+        body = await request.body()
+        signature = request.headers.get(settings.webhook_signature_header)
+        if not is_valid_webhook_signature(body, signature or "", settings.webhook_secret):
+            logger.warning("Webhook rechazado: firma ausente o inválida")
+            return JSONResponse(
+                status_code=403,
+                content={"status": "forbidden", "message": "Firma de webhook inválida."},
+            )
+
+        # El endpoint necesita leer el mismo payload después de esta validación.
+        request._receive = lambda: restore_request_body(body)
+
+    return await call_next(request)
 
 # Configuración de CORS
 app.add_middleware(
