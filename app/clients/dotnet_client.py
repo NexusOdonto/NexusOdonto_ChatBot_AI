@@ -28,18 +28,25 @@ class DotNetClient:
         return headers
 
     async def consultar_disponibilidad(
-        self, profesional_id: Optional[int] = None, fecha: Optional[str] = None
+        self,
+        profesional_id: Optional[int] = None,
+        fecha: Optional[str] = None,
+        servicio_id: Optional[int] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Consulta horarios disponibles en el backend .NET.
         Maneja timeouts y errores de conexión.
         """
-        url = f"{self.base_url}/citas/disponibilidad"
+        if profesional_id is None:
+            logger.error("[.NET Client] profesional_id es obligatorio para consultar horarios")
+            return None
+
+        url = f"{self.base_url}/profesionales/{profesional_id}/horarios-disponibles"
         params: Dict[str, Any] = {}
-        if profesional_id:
-            params["profesionalId"] = profesional_id
         if fecha:
             params["fecha"] = fecha
+        if servicio_id:
+            params["servicioId"] = servicio_id
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
@@ -70,6 +77,42 @@ class DotNetClient:
             except httpx.RequestError as e:
                 logger.error(f"[.NET Client] Error de conexión/timeout al agendar cita: {str(e)}")
                 return None
+
+    async def consultar_citas(self, fecha: str) -> Optional[Any]:
+        """Consulta las citas de una fecha en el backend .NET."""
+        url = f"{self.base_url}/citas"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                page = 1
+                all_items: List[Dict[str, Any]] = []
+                while True:
+                    response = await client.get(
+                        url,
+                        params={"fecha": fecha, "page": page, "pageSize": 100},
+                        headers=self._get_headers(),
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+
+                    if isinstance(payload, list):
+                        return payload
+                    if not isinstance(payload, dict):
+                        return payload
+
+                    items = payload.get("items", [])
+                    if isinstance(items, list):
+                        all_items.extend(item for item in items if isinstance(item, dict))
+
+                    total_pages = payload.get("totalPages", page)
+                    if page >= total_pages or not items:
+                        return {**payload, "items": all_items, "totalItems": len(all_items)}
+                    page += 1
+        except httpx.HTTPStatusError as e:
+            logger.error(f"[.NET Client] Error HTTP {e.response.status_code}: {e.response.text}")
+            return None
+        except httpx.RequestError as e:
+            logger.error(f"[.NET Client] Error de conexión/timeout al consultar citas: {str(e)}")
+            return None
 
 # Instancia reutilizable para el bot y las tools
 dotnet_client = DotNetClient()

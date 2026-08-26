@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     dotnet_max_retries: int = 3
     dotnet_retry_backoff_seconds: float = 0.5
 
+    # Hora local para enviar recordatorios de citas del día siguiente.
+    reminder_schedule_hour: int = 8
+    reminder_schedule_minute: int = 0
+    reminder_timezone: str = "America/Bogota"
+
     # Configuración de memoria, tiempo de sesión y flujo conversacional.
     session_store: str = "memory"
     session_ttl_seconds: int = 3600

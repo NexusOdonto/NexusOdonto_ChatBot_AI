@@ -1,9 +1,13 @@
 import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from app.agents.tools.qdrant_tool import initialize_qdrant
+from app.core.config import settings
+from app.services.appointment_reminders import enviar_recordatorios_citas
 
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
@@ -24,6 +28,8 @@ app = FastAPI(
     description="Servidor de integración con Evolution API y LangGraph para atención odontológica",
     version="1.0.0"
 )
+
+scheduler = AsyncIOScheduler(timezone=settings.reminder_timezone)
 
 # Configuración de CORS
 app.add_middleware(
@@ -50,6 +56,31 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup() -> None:
     # Comprueba la conexión y prepara la colección antes de atender solicitudes.
     initialize_qdrant()
+    scheduler.add_job(
+        enviar_recordatorios_citas,
+        CronTrigger(
+            hour=settings.reminder_schedule_hour,
+            minute=settings.reminder_schedule_minute,
+            timezone=settings.reminder_timezone,
+        ),
+        id="appointment-reminders",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.start()
+    logger.info(
+        "Recordatorios programados diariamente a las %02d:%02d (%s)",
+        settings.reminder_schedule_hour,
+        settings.reminder_schedule_minute,
+        settings.reminder_timezone,
+    )
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
 @app.get("/health", tags=["Health Check"])
 async def health_check():
