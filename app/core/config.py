@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     evolution_api_key: str = ""
     instance_name: str = "Nexus_Odonto"
 
+    # Secreto y encabezado usados para autenticar webhooks de Evolution API.
+    webhook_secret: str = ""
+    webhook_signature_header: str = "x-webhook-signature"
+
     # Configuración de la API externa y reintentos de comunicación.
     agent_internal_secret: str = ""
     dotnet_api_timeout: int = 30
