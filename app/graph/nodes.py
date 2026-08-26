@@ -1,6 +1,6 @@
 from functools import lru_cache
-
-from langchain_core.messages import SystemMessage
+import re
+from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from app.agents.tools.qdrant_tool import clinical_knowledge_tool
@@ -43,4 +43,13 @@ def chatbot_node(state: AgentState) -> dict[str, list]:
 	"""Procesa el historial actual y agrega la respuesta del asistente."""
 	messages = [SYSTEM_MESSAGE, *state["messages"]]
 	response = get_llm_with_tools().invoke(messages)
-	return {"messages": [response]}
+	confidence = state.get("rag_confidence", 1.0)
+	for message in reversed(state["messages"]):
+		# Recuperamos el último score producido por la herramienta clínica.
+		if isinstance(message, ToolMessage) and isinstance(message.content, str):
+			match = re.search(r"\[RAG_SCORE:([0-9.]+)\]", message.content)
+			if match:
+				# El score se guarda en el estado para decidir si hay que escalar.
+				confidence = float(match.group(1))
+				break
+	return {"messages": [response], "rag_confidence": confidence}

@@ -9,3 +9,5 @@ class AgentState(TypedDict):
 
 	# add_messages conserva el historial y agrega los mensajes nuevos.
 	messages: Annotated[list[AnyMessage], add_messages] # Lista de mensajes que conforman el historial de la conversación. Cada mensaje puede ser del tipo HumanMessage, AIMessage, SystemMessage, o ToolMessage.
+	conversation_status: str
+	rag_confidence: float

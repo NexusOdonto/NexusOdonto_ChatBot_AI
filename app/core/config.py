@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 3600
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
+    rag_min_confidence: float = 0.65
     allowed_origins: str = "*"
 
     # Carga las variables desde .env y permite ignorar variables adicionales.
