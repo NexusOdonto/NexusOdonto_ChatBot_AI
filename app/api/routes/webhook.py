@@ -119,16 +119,17 @@ async def receive_whatsapp_message(request: Request):
                             return {"status": "escalated", "reason": "low_rag_confidence"}
                         await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
                         return {"status": "error", "reason": "ticket_not_created"}
-                    # Enviar la respuesta del bot al paciente por WhatsApp
-                    messages = result.get("messages", [])
-                    if messages:
-                        last_message = messages[-1]
-                        if isinstance(last_message, AIMessage) and last_message.content:
-                            await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+                    # Enviar la respuesta del bot al paciente por WhatsApp si no está bloqueada (ya se envió en el nodo de seguridad)
+                    if result.get("conversation_status") != "BLOQUEADA":
+                        messages = result.get("messages", [])
+                        if messages:
+                            last_message = messages[-1]
+                            if isinstance(last_message, AIMessage) and last_message.content:
+                                await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+                            else:
+                                logger.warning(f"La última respuesta no es de tipo AIMessage o está vacía: {last_message}")
                         else:
-                            logger.warning(f"La última respuesta no es de tipo AIMessage o está vacía: {last_message}")
-                    else:
-                        logger.warning("No se encontraron mensajes en el resultado del grafo.")
+                            logger.warning("No se encontraron mensajes en el resultado del grafo.")
                 except Exception as service_err:
                     logger.error(f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}")
                     # Notificar al paciente por WhatsApp
