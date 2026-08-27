@@ -137,5 +137,101 @@ class DotNetClient:
             logger.error(f"[.NET Client] Error de conexión/timeout al crear ticket: {str(e)}")
             return None
 
+    async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:
+        """Obtiene la lista de servicios activos de la clínica."""
+        url = f"{self.base_url}/servicios"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.get(url, headers=self._get_headers())
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items", [])
+                return None
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al obtener servicios: {str(e)}")
+                return None
+
+    async def obtener_profesionales(self, especialidad_id: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
+        """Obtiene la lista de profesionales, opcionalmente filtrados por especialidad."""
+        url = f"{self.base_url}/profesionales"
+        params = {}
+        if especialidad_id is not None:
+            params["especialidadId"] = especialidad_id
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.get(url, params=params, headers=self._get_headers())
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items", [])
+                return None
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al obtener profesionales: {str(e)}")
+                return None
+
+    async def obtener_especialidades(self) -> Optional[List[Dict[str, Any]]]:
+        """Obtiene la lista de especialidades de la clínica."""
+        url = f"{self.base_url}/especialidades"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.get(url, headers=self._get_headers())
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items", [])
+                return None
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al obtener especialidades: {str(e)}")
+                return None
+
+    async def obtener_contexto_conversacion(self, conversacion_chatbot_id: str) -> Optional[Dict[str, Any]]:
+        """Obtiene el contexto de una conversación de chatbot, incluyendo el paciente vinculado si existe."""
+        url = f"{self.base_url}/conversaciones-chatbot/{conversacion_chatbot_id}"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.get(url, headers=self._get_headers())
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al obtener contexto de conversación: {str(e)}")
+                return None
+
+    async def buscar_pacientes(self, search: str) -> Optional[List[Dict[str, Any]]]:
+        """Busca pacientes por teléfono, nombre o documento."""
+        url = f"{self.base_url}/pacientes"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.get(url, params={"search": search}, headers=self._get_headers())
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items", [])
+                return None
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al buscar pacientes: {str(e)}")
+                return None
+
+    async def vincular_paciente(self, conversacion_chatbot_id: str, paciente_id: int) -> bool:
+        """Vincula un paciente a una conversación de chatbot."""
+        url = f"{self.base_url}/conversaciones-chatbot/{conversacion_chatbot_id}/paciente"
+        payload = {"pacienteId": paciente_id}
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.patch(url, json=payload, headers=self._get_headers())
+                response.raise_for_status()
+                return True
+            except Exception as e:
+                logger.error(f"[.NET Client] Error al vincular paciente: {str(e)}")
+                return False
+
 # Instancia reutilizable para el bot y las tools
 dotnet_client = DotNetClient()
