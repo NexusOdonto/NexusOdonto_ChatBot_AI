@@ -7,7 +7,7 @@ from app.schemas.chat import EvolutionWebhookPayload
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
-from app.graph.builder import graph
+from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
 
 logger = logging.getLogger(__name__)
@@ -37,9 +37,9 @@ def _is_escalation_request(message: str) -> bool:
     return bool(ESCALAMIENTO_RE.search(normalized)) or "hablar con una persona" in normalized
 
 
-def _is_escalated(thread_id: str) -> bool:
+async def _is_escalated(thread_id: str) -> bool:
     # El estado persistido evita que el bot responda mientras recepción atiende.
-    state = graph.get_state(get_thread_config(thread_id))
+    state = await get_graph().aget_state(get_thread_config(thread_id))
     return state.values.get("conversation_status") == "ESCALADA"
 
 
@@ -58,7 +58,7 @@ async def _escalate_conversation(thread_id: str, phone_number: str, message: str
         return False
 
     config = get_thread_config(thread_id)
-    graph.update_state(config, {"conversation_status": "ESCALADA"})
+    await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
     return True
 
@@ -92,7 +92,7 @@ async def receive_whatsapp_message(request: Request):
             if numero_paciente and mensaje_texto:
                 logger.info(f"[Webhook] Mensaje de {numero_paciente}: {mensaje_texto}")
 
-                if _is_escalated(numero_paciente):
+                if await _is_escalated(numero_paciente):
 					# Una conversación escalada queda bajo control exclusivo del humano.
                     return {"status": "ignored", "reason": "conversation_escalated"}
 
@@ -105,9 +105,7 @@ async def receive_whatsapp_message(request: Request):
                 
                 try:
                     config = get_thread_config(numero_paciente)
-                    result = await asyncio.to_thread(
-						# LangGraph es síncrono; moverlo a otro hilo mantiene libre el event loop.
-                        graph.invoke,
+                    result = await get_graph().ainvoke(
                         {
                             "messages": [HumanMessage(content=mensaje_texto)],
                             "conversation_status": "ACTIVA",
@@ -121,7 +119,16 @@ async def receive_whatsapp_message(request: Request):
                             return {"status": "escalated", "reason": "low_rag_confidence"}
                         await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
                         return {"status": "error", "reason": "ticket_not_created"}
-                    # El envío de la respuesta ya fue gestionado internamente por el nodo del grafo (chatbot_node)
+                    # Enviar la respuesta del bot al paciente por WhatsApp
+                    messages = result.get("messages", [])
+                    if messages:
+                        last_message = messages[-1]
+                        if isinstance(last_message, AIMessage) and last_message.content:
+                            await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+                        else:
+                            logger.warning(f"La última respuesta no es de tipo AIMessage o está vacía: {last_message}")
+                    else:
+                        logger.warning("No se encontraron mensajes en el resultado del grafo.")
                 except Exception as service_err:
                     logger.error(f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}")
                     # Notificar al paciente por WhatsApp

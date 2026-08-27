@@ -1,13 +1,13 @@
 from functools import lru_cache
 import re
-import asyncio
 from langchain_core.messages import SystemMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from app.agents.tools.qdrant_tool import clinical_knowledge_tool
+
 from app.agents.tools.agenda_tools import consultar_disponibilidad_tool, agendar_cita_tool
 from app.clients.evolution_client import evolution_client
+
 from app.core.config import settings
 from app.graph.state import AgentState
 
@@ -64,6 +64,13 @@ def chatbot_node(state: AgentState, config: RunnableConfig) -> dict[str, list]:
 	
 	messages = [SYSTEM_MESSAGE, context_message, *state["messages"]]
 	response = get_llm_with_tools().invoke(messages)
+
+async def chatbot_node(state: AgentState) -> dict[str, list]:
+	"""Procesa el historial actual y agrega la respuesta del asistente."""
+	messages = [SYSTEM_MESSAGE, *state["messages"]]
+	# ainvoke mantiene todo el grafo compatible con el saver PostgreSQL async.
+	response = await get_llm_with_tools().ainvoke(messages)
+
 	confidence = state.get("rag_confidence", 1.0)
 	for message in reversed(state["messages"]):
 		# Recuperamos el último score producido por la herramienta clínica.
@@ -73,10 +80,4 @@ def chatbot_node(state: AgentState, config: RunnableConfig) -> dict[str, list]:
 				# El score se guarda en el estado para decidir si hay que escalar.
 				confidence = float(match.group(1))
 				break
-	
-	# Enviar el mensaje generado directamente a WhatsApp si tiene texto
-	if isinstance(response.content, str) and response.content.strip():
-		thread_id = config["configurable"]["thread_id"]
-		asyncio.run(evolution_client.enviar_mensaje(thread_id, response.content))
-		
 	return {"messages": [response], "rag_confidence": confidence}

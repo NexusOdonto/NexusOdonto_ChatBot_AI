@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 3600
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
+    postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
     rag_min_confidence: float = 0.65
     rag_candidate_count: int = 5
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
