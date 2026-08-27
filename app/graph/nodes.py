@@ -1,4 +1,5 @@
 from functools import lru_cache
+import logging
 import re
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -10,6 +11,17 @@ from app.clients.evolution_client import evolution_client
 
 from app.core.config import settings
 from app.graph.state import AgentState
+
+logger = logging.getLogger(__name__)
+
+# Umbral de mensajes a partir del cual se activa la compresión del historial.
+# Cuando el hilo supera este valor, el nodo summarize_conversation_node
+# condensa los mensajes antiguos en un único párrafo de contexto.
+SUMMARY_THRESHOLD: int = 20
+
+# Número de mensajes recientes que se preservan intactos después del resumen.
+# Estos mensajes son los más relevantes para el turno actual de conversación.
+RECENT_MESSAGES_KEEP: int = 4
 
 
 # Define el rol, tono y límites de seguridad del asistente.
@@ -100,6 +112,84 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
 		pass
 		
 	return {"conversation_status": "ACTIVA"}
+
+
+async def summarize_conversation_node(state: AgentState) -> dict:
+	"""Comprime el historial antiguo cuando supera SUMMARY_THRESHOLD mensajes.
+
+	Solo se ejecuta cuando el router detect\u00f3 que es necesario. Toma todos los
+	mensajes excepto los RECENT_MESSAGES_KEEP m\u00e1s recientes, los resume en un
+	p\u00e1rrafo corto y reemplaza la lista completa con [SystemMessage(resumen),
+	*mensajes_recientes], reduciendo dr\u00e1sticamente los tokens enviados a OpenAI.
+	"""
+	messages = state.get("messages", [])
+	total = len(messages)
+
+	# Separar los mensajes hist\u00f3ricos de los recientes.
+	historic_messages = messages[: total - RECENT_MESSAGES_KEEP]
+	recent_messages = messages[total - RECENT_MESSAGES_KEEP :]
+
+	# Construir la transcripci\u00f3n del historial a resumir.
+	lines: list[str] = []
+	for msg in historic_messages:
+		if isinstance(msg, HumanMessage):
+			lines.append(f"Paciente: {msg.content}")
+		elif isinstance(msg, AIMessage) and msg.content:
+			lines.append(f"Asistente: {msg.content}")
+		# Los SystemMessage y ToolMessage internos se omiten intencionalmente;
+		# solo interesan los turnos que el resumen debe preservar.
+
+	previous_summary = state.get("conversation_summary") or ""
+	transcript = "\n".join(lines)
+
+	summarizer_llm = ChatOpenAI(
+		# gpt-4o-mini mantiene el costo bajo para esta tarea de compresión.
+		model="gpt-4o-mini",
+		temperature=0,
+		api_key=settings.openai_api_key,
+	)
+
+	prompt_parts = [
+		"Eres un asistente que genera res\u00famenes concisos de conversaciones de WhatsApp "
+		"entre un paciente y el chatbot del consultorio odontol\u00f3gico Nexus Odonto. "
+		"Genera un \u00fanico p\u00e1rrafo corto (m\u00e1ximo 120 palabras) en espa\u00f1ol que capture:"
+		" el nombre del paciente (si fue mencionado), los servicios o especialidades que "
+		"consult\u00f3, las citas agendadas o canceladas, y cualquier informaci\u00f3n relevante "
+		"para continuar la atenci\u00f3n. No incluyas saludos ni explicaciones extra.",
+	]
+	if previous_summary:
+		prompt_parts.append(
+			f"\n\nResumen previo (ya comprimido anteriormente):\n{previous_summary}"
+		)
+	prompt_parts.append(f"\n\nTranscripci\u00f3n a resumir:\n{transcript}")
+
+	try:
+		response = await summarizer_llm.ainvoke(
+			[SystemMessage(content="".join(prompt_parts))]
+		)
+		new_summary: str = response.content.strip()
+		logger.info(
+			"[Summarizer] Historial comprimido: %d mensajes → resumen de %d chars",
+			len(historic_messages),
+			len(new_summary),
+		)
+	except Exception as exc:
+		# Si el resumen falla, conservamos el anterior para no perder contexto.
+		logger.warning("[Summarizer] Error al resumir historial: %s", exc)
+		new_summary = previous_summary or "Conversaci\u00f3n previa sin resumen disponible."
+
+	# El SystemMessage de resumen pasa como primer "mensaje" del hilo reducido;
+	# los nodos siguientes lo ver\u00e1n como contexto hist\u00f3rico en el prompt.
+	summary_message = SystemMessage(
+		content=f"[RESUMEN DE CONVERSACI\u00d3N PREVIA]\n{new_summary}"
+	)
+
+	# Se reemplaza la lista completa. add_messages acumula, por eso devolvemos
+	# el campo como una nueva lista usando la clave especial que borra el estado.
+	return {
+		"messages": [summary_message, *recent_messages],
+		"conversation_summary": new_summary,
+	}
 
 
 async def chatbot_node(state: AgentState) -> dict[str, list]:

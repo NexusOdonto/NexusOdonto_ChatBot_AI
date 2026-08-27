@@ -11,3 +11,6 @@ class AgentState(TypedDict):
 	messages: Annotated[list[AnyMessage], add_messages] # Lista de mensajes que conforman el historial de la conversación. Cada mensaje puede ser del tipo HumanMessage, AIMessage, SystemMessage, o ToolMessage.
 	conversation_status: NotRequired[Optional[str]]
 	rag_confidence: NotRequired[float]
+	# Resumen comprimido del historial antiguo. Se actualiza automáticamente
+	# cada vez que el nodo summarize_conversation_node reduce el historial.
+	conversation_summary: NotRequired[Optional[str]]
