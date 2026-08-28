@@ -2,7 +2,7 @@ import logging
 import re
 import asyncio
 from fastapi import APIRouter, Request
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from app.schemas.chat import EvolutionWebhookPayload
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
@@ -29,6 +29,37 @@ ESCALAMIENTO_RE = re.compile(
     r"\b(persona|humano|asesor|recepcionista)\b.*\b(hablar|comunicarme|contactar|atenderme)\b",
     re.IGNORECASE,
 )
+
+COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
+
+
+def _is_reset_request(message: str) -> bool:
+    return message.strip().lower() in COMMANDS_RESET
+
+
+async def _reset_conversation(phone_number: str) -> None:
+    config = get_thread_config(phone_number)
+    state = await get_graph().aget_state(config)
+
+    # Eliminar mensajes anteriores usando RemoveMessage de LangGraph
+    messages = state.values.get("messages", [])
+    remove_actions = [RemoveMessage(id=m.id) for m in messages if getattr(m, "id", None)]
+
+    # Actualizar estado a ACTIVA y vaciar variables
+    await get_graph().aupdate_state(
+        config,
+        {
+            "messages": remove_actions,
+            "conversation_status": "ACTIVA",
+            "conversation_summary": None,
+            "rag_confidence": 1.0,
+        },
+    )
+    logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
+    await evolution_client.enviar_mensaje(
+        phone_number,
+        "🔄 Memoria reiniciada con éxito. ¡Hola! Soy el asistente virtual de Nexus Odonto. ¿En qué puedo colaborarte hoy?"
+    )
 
 
 def _is_escalation_request(message: str) -> bool:
@@ -71,6 +102,11 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
     Evolution API reciba el HTTP 200 de inmediato y no genere un error de timeout.
     """
     try:
+        # 1. Comandos de reinicio de conversación
+        if _is_reset_request(mensaje_texto):
+            await _reset_conversation(numero_paciente)
+            return
+
         if await _is_escalated(numero_paciente):
             # Una conversación escalada queda bajo control exclusivo del usuario.
             logger.info(f"[BG] Mensaje ignorado – conversación escalada: {numero_paciente}")
