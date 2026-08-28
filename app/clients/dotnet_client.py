@@ -44,20 +44,29 @@ class DotNetClient:
             logger.error("[.NET Client] profesional_id es obligatorio para consultar horarios")
             return None
 
-        url = f"{self.base_url}/profesionales/{profesional_id}/horarios-disponibles"
+        url = f"{self.base_url}/Availabilities"
         params: Dict[str, Any] = {}
+        if profesional_id:
+            params["profesionalId"] = profesional_id
         if fecha:
-			# La fecha limita la búsqueda a un día específico del calendario.
             params["fecha"] = fecha
         if servicio_id:
-			# El servicio determina la duración necesaria del espacio.
             params["servicioId"] = servicio_id
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, params=params, headers=self._get_headers())
+                if response.status_code == 404:
+                    # Fallback to secondary route
+                    fallback_url = f"{self.base_url}/Professionals/{profesional_id}/availabilities"
+                    response = await client.get(fallback_url, params=params, headers=self._get_headers())
                 response.raise_for_status()
-                return response.json()
+                payload = response.json()
+                if isinstance(payload, list):
+                    return payload
+                if isinstance(payload, dict):
+                    return payload.get("items", [])
+                return None
             except httpx.HTTPStatusError as e:
                 logger.error(f"[.NET Client] Error HTTP {e.response.status_code}: {e.response.text}")
                 return None
@@ -70,7 +79,7 @@ class DotNetClient:
         Registra una cita en el backend .NET.
         Maneja timeouts y errores de conexión.
         """
-        url = f"{self.base_url}/citas"
+        url = f"{self.base_url}/Appointments"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(url, json=datos_cita, headers=self._get_headers())
@@ -85,13 +94,12 @@ class DotNetClient:
 
     async def consultar_citas(self, fecha: str) -> Optional[Any]:
         """Consulta las citas de una fecha en el backend .NET."""
-        url = f"{self.base_url}/citas"
+        url = f"{self.base_url}/Appointments"
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 page = 1
                 all_items: List[Dict[str, Any]] = []
                 while True:
-					# Se recorren todas las páginas para no dejar citas sin recordar.
                     response = await client.get(
                         url,
                         params={"fecha": fecha, "page": page, "pageSize": 100},
@@ -107,7 +115,6 @@ class DotNetClient:
 
                     items = payload.get("items", [])
                     if isinstance(items, list):
-						# Se normaliza la respuesta paginada a una única colección local.
                         all_items.extend(item for item in items if isinstance(item, dict))
 
                     total_pages = payload.get("totalPages", page)
@@ -123,7 +130,7 @@ class DotNetClient:
 
     async def crear_ticket_soporte(self, telefono: str, motivo: str, prioridad: str = "MEDIA") -> Optional[Dict[str, Any]]:
         """Crea un ticket en la API de .NET. Si falla, no interrumpe el chatbot."""
-        url = f"{self.base_url}/tickets"
+        url = f"{self.base_url}/SupportTickets"
         payload = {
             "telefono": telefono,
             "motivo": motivo,
@@ -140,10 +147,12 @@ class DotNetClient:
 
     async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de servicios activos de la clínica."""
-        url = f"{self.base_url}/servicios"
+        url = f"{self.base_url}/Services"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, headers=self._get_headers())
+                if response.status_code == 404:
+                    response = await client.get(f"{self.base_url}/servicios", headers=self._get_headers())
                 response.raise_for_status()
                 payload = response.json()
                 if isinstance(payload, list):
@@ -157,13 +166,15 @@ class DotNetClient:
 
     async def obtener_profesionales(self, especialidad_id: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de profesionales, opcionalmente filtrados por especialidad."""
-        url = f"{self.base_url}/profesionales"
+        url = f"{self.base_url}/Professionals"
         params = {}
         if especialidad_id is not None:
             params["especialidadId"] = especialidad_id
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, params=params, headers=self._get_headers())
+                if response.status_code == 404:
+                    response = await client.get(f"{self.base_url}/profesionales", params=params, headers=self._get_headers())
                 response.raise_for_status()
                 payload = response.json()
                 if isinstance(payload, list):
@@ -177,10 +188,12 @@ class DotNetClient:
 
     async def obtener_especialidades(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de especialidades de la clínica."""
-        url = f"{self.base_url}/especialidades"
+        url = f"{self.base_url}/Specialties"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, headers=self._get_headers())
+                if response.status_code == 404:
+                    response = await client.get(f"{self.base_url}/especialidades", headers=self._get_headers())
                 response.raise_for_status()
                 payload = response.json()
                 if isinstance(payload, list):
@@ -194,7 +207,7 @@ class DotNetClient:
 
     async def obtener_contexto_conversacion(self, conversacion_chatbot_id: str) -> Optional[Dict[str, Any]]:
         """Obtiene el contexto de una conversación de chatbot, incluyendo el paciente vinculado si existe."""
-        url = f"{self.base_url}/conversaciones-chatbot/{conversacion_chatbot_id}"
+        url = f"{self.base_url}/ChatbotConversations/{conversacion_chatbot_id}"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, headers=self._get_headers())
@@ -206,10 +219,12 @@ class DotNetClient:
 
     async def buscar_pacientes(self, search: str) -> Optional[List[Dict[str, Any]]]:
         """Busca pacientes por teléfono, nombre o documento."""
-        url = f"{self.base_url}/pacientes"
+        url = f"{self.base_url}/Patients"
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.get(url, params={"search": search}, headers=self._get_headers())
+                if response.status_code == 404:
+                    response = await client.get(f"{self.base_url}/pacientes", params={"search": search}, headers=self._get_headers())
                 response.raise_for_status()
                 payload = response.json()
                 if isinstance(payload, list):
@@ -223,7 +238,7 @@ class DotNetClient:
 
     async def vincular_paciente(self, conversacion_chatbot_id: str, paciente_id: int) -> bool:
         """Vincula un paciente a una conversación de chatbot."""
-        url = f"{self.base_url}/conversaciones-chatbot/{conversacion_chatbot_id}/paciente"
+        url = f"{self.base_url}/ChatbotConversations/{conversacion_chatbot_id}/paciente"
         payload = {"pacienteId": paciente_id}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
