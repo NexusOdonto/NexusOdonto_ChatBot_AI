@@ -2,13 +2,14 @@ import logging
 import re
 import asyncio
 from fastapi import APIRouter, Request
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from app.schemas.chat import EvolutionWebhookPayload
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
 from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
+from app.session.postgres_checkpointer import get_checkpointer_instance
 
 logger = logging.getLogger(__name__)
 
@@ -38,23 +39,13 @@ def _is_reset_request(message: str) -> bool:
 
 
 async def _reset_conversation(phone_number: str) -> None:
-    config = get_thread_config(phone_number)
-    state = await get_graph().aget_state(config)
+    # 1. Purgar checkpoints de PostgreSQL directamente para ese thread_id
+    checkpointer = get_checkpointer_instance()
+    if checkpointer:
+        await checkpointer.clear_thread(phone_number)
+    else:
+        logger.warning(f"[Reset] No se encontró la instancia del checkpointer para {phone_number}")
 
-    # Eliminar mensajes anteriores usando RemoveMessage de LangGraph
-    messages = state.values.get("messages", [])
-    remove_actions = [RemoveMessage(id=m.id) for m in messages if getattr(m, "id", None)]
-
-    # Actualizar estado a ACTIVA y vaciar variables
-    await get_graph().aupdate_state(
-        config,
-        {
-            "messages": remove_actions,
-            "conversation_status": "ACTIVA",
-            "conversation_summary": None,
-            "rag_confidence": 1.0,
-        },
-    )
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     await evolution_client.enviar_mensaje(
         phone_number,
