@@ -1,3 +1,4 @@
+import logging
 from functools import lru_cache
 
 from langchain_core.tools import Tool
@@ -8,6 +9,8 @@ from qdrant_client.http import models
 from sentence_transformers import CrossEncoder
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -74,26 +77,30 @@ def _score_to_confidence(score: float) -> float:
 
 
 def retrieve_clinical_knowledge(query: str) -> str:
-	# Busca información clínica y la convierte en texto para el agente.
-	# Primero Qdrant recupera candidatos por similitud vectorial.
-	documents_with_scores = get_vector_store().similarity_search_with_score(
-		query,
-		k=settings.rag_candidate_count,
-	)
-	if not documents_with_scores:
-		return "[RAG_SCORE:0.0]\nNo se encontro informacion clinica relevante."
+	try:
+		# Busca información clínica y la convierte en texto para el agente.
+		# Primero Qdrant recupera candidatos por similitud vectorial.
+		documents_with_scores = get_vector_store().similarity_search_with_score(
+			query,
+			k=settings.rag_candidate_count,
+		)
+		if not documents_with_scores:
+			return "[RAG_SCORE:0.0]\nNo se encontro informacion clinica relevante."
 
-	# Después el Cross-Encoder compara la pregunta con cada documento completo.
-	pairs = [(query, document.page_content) for document, _ in documents_with_scores]
-	reranker_scores = get_reranker().predict(pairs)
-	ranked_documents = sorted(
-		zip((document for document, _ in documents_with_scores), reranker_scores),
-		key=lambda item: float(item[1]),
-		reverse=True,
-	)
-	best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
-	content = "\n\n".join(document.page_content for document, _ in ranked_documents)
-	return f"[RAG_SCORE:{best_confidence}]\n{content}"
+		# Después el Cross-Encoder compara la pregunta con cada documento completo.
+		pairs = [(query, document.page_content) for document, _ in documents_with_scores]
+		reranker_scores = get_reranker().predict(pairs)
+		ranked_documents = sorted(
+			zip((document for document, _ in documents_with_scores), reranker_scores),
+			key=lambda item: float(item[1]),
+			reverse=True,
+		)
+		best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
+		content = "\n\n".join(document.page_content for document, _ in ranked_documents)
+		return f"[RAG_SCORE:{best_confidence}]\n{content}"
+	except Exception as exc:
+		logger.error(f"Error al recuperar conocimiento clinico: {exc}", exc_info=True)
+		return "[RAG_SCORE:0.0]\nNo fue posible acceder a la base de conocimiento clinico en este momento debido a problemas de conexion."
 
 
 # Herramienta que LangGraph puede incluir junto con sus demás herramientas.
