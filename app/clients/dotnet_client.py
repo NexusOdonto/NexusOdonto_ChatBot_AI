@@ -121,20 +121,21 @@ class DotNetClient:
             logger.error(f"[.NET Client] Error de conexión/timeout al consultar citas: {str(e)}")
             return None
 
-    async def crear_ticket_soporte(self, datos_ticket: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Crea un ticket para que recepción atienda una conversación escalada."""
-        url = f"{self.base_url}/tickets-soporte"
+    async def crear_ticket_soporte(self, telefono: str, motivo: str, prioridad: str = "MEDIA") -> Optional[Dict[str, Any]]:
+        """Crea un ticket en la API de .NET. Si falla, no interrumpe el chatbot."""
+        url = f"{self.base_url}/tickets"
+        payload = {
+            "telefono": telefono,
+            "motivo": motivo,
+            "prioridad": prioridad
+        }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-				# El ticket permite que recepción vea la alerta en el frontend.
-                response = await client.post(url, json=datos_ticket, headers=self._get_headers())
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                response = await client.post(url, json=payload, headers=self._get_headers())
                 response.raise_for_status()
                 return response.json()
-        except httpx.HTTPStatusError as e:
-            logger.error(f"[.NET Client] Error HTTP al crear ticket ({e.response.status_code}): {e.response.text}")
-            return None
-        except httpx.RequestError as e:
-            logger.error(f"[.NET Client] Error de conexión/timeout al crear ticket: {str(e)}")
+        except Exception as e:
+            logger.warning(f"[.NET Client] No se pudo registrar el ticket (servicio no disponible): {str(e)}")
             return None
 
     async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:

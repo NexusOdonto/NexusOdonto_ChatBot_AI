@@ -44,21 +44,22 @@ async def _is_escalated(thread_id: str) -> bool:
 
 
 async def _escalate_conversation(thread_id: str, phone_number: str, message: str) -> bool:
-    # Primero se crea el ticket; solo después se bloquea la conversación.
+    # Primero se intenta crear el ticket en el backend .NET
     ticket = await dotnet_client.crear_ticket_soporte(
-        {
-            "titulo": "Solicitud de atención humana por WhatsApp",
-            "descripcion": message,
-            "motivo": "SOLICITUD_USUARIO" if _is_escalation_request(message) else "BAJA_CONFIANZA_RAG",
-            "prioridad": "MEDIA",
-            "conversacionChatbotId": thread_id,
-        }
+        telefono=phone_number,
+        motivo="SOLICITUD_USUARIO" if _is_escalation_request(message) else "BAJA_CONFIANZA_RAG",
+        prioridad="MEDIA"
     )
     if ticket is None:
-        return False
+        logger.warning(
+            f"[BG] No se pudo crear el ticket de soporte en el backend .NET para {thread_id} (backend caído). "
+            f"Procediendo con escalamiento local de la conversación."
+        )
 
+    # De todas formas actualizamos el estado de la conversación local a ESCALADA en PostgreSQL
     config = get_thread_config(thread_id)
     await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+    # Y enviamos el mensaje amigable de escalamiento al paciente
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
     return True
 
@@ -77,8 +78,7 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
 
         if _is_escalation_request(mensaje_texto):
             # La solicitud explícita se atiende sin pasarla por el LLM.
-            if not await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+            await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             return
 
         config = get_thread_config(numero_paciente)
@@ -90,6 +90,16 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             },
             config,
         )
+
+        if result.get("conversation_status") == "ESCALADA":
+            # Escalado inmediato (ej: triage de urgencia detectado en security_check_node)
+            messages = result.get("messages", [])
+            if messages:
+                last_message = messages[-1]
+                if isinstance(last_message, AIMessage) and last_message.content:
+                    await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+            await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
+            return
 
         if result.get("rag_confidence", 1.0) < settings.rag_min_confidence:
             # No enviamos una respuesta posiblemente incorrecta: escalamos a recepción.
@@ -112,14 +122,23 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             else:
                 logger.warning("[BG] No se encontraron mensajes en el resultado del grafo.")
 
-    except Exception as exc:
+    except Exception as service_err:
         logger.error(
-            f"[BG] Fallo procesando mensaje de {numero_paciente}: {exc}",
+            f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}",
             exc_info=True,
         )
+        # Solo si el grafo falló por completo y no hay respuesta, se genera una salida amigable
         try:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
-        except Exception:
+            from langchain_core.messages import SystemMessage
+            from langchain_openai import ChatOpenAI
+            emergency_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=settings.openai_api_key)
+            resp = await emergency_llm.ainvoke([
+                SystemMessage(content="Eres el asistente virtual de Nexus Odonto. Responde cordialmente y ofrece asistencia básica o pide que nos contacte al +57 324 6030217."),
+                HumanMessage(content=mensaje_texto)
+            ])
+            await evolution_client.enviar_mensaje(numero_paciente, str(resp.content))
+        except Exception as e:
+            logger.error(f"Error crítico en fallback: {e}")
             pass
 
 
