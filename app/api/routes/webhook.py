@@ -62,22 +62,91 @@ async def _escalate_conversation(thread_id: str, phone_number: str, message: str
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
     return True
 
+
+async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) -> None:
+    """Procesa el mensaje del paciente en segundo plano.
+
+    Esta corutina se ejecuta desacoplada del ciclo request/response para que
+    Evolution API reciba el HTTP 200 de inmediato y no genere un error de timeout.
+    """
+    try:
+        if await _is_escalated(numero_paciente):
+            # Una conversación escalada queda bajo control exclusivo del usuario.
+            logger.info(f"[BG] Mensaje ignorado – conversación escalada: {numero_paciente}")
+            return
+
+        if _is_escalation_request(mensaje_texto):
+            # La solicitud explícita se atiende sin pasarla por el LLM.
+            if not await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
+                await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+            return
+
+        config = get_thread_config(numero_paciente)
+        result = await get_graph().ainvoke(
+            {
+                "messages": [HumanMessage(content=mensaje_texto)],
+                "conversation_status": "ACTIVA",
+                "rag_confidence": 1.0,
+            },
+            config,
+        )
+
+        if result.get("rag_confidence", 1.0) < settings.rag_min_confidence:
+            # No enviamos una respuesta posiblemente incorrecta: escalamos a recepción.
+            if not await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
+                await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+            return
+
+        # Enviar la respuesta del bot al paciente por WhatsApp si no está bloqueada
+        # (ya se envió en el nodo de seguridad cuando conversation_status == "BLOQUEADA").
+        if result.get("conversation_status") != "BLOQUEADA":
+            messages = result.get("messages", [])
+            if messages:
+                last_message = messages[-1]
+                if isinstance(last_message, AIMessage) and last_message.content:
+                    await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+                else:
+                    logger.warning(
+                        f"[BG] La última respuesta no es de tipo AIMessage o está vacía: {last_message}"
+                    )
+            else:
+                logger.warning("[BG] No se encontraron mensajes en el resultado del grafo.")
+
+    except Exception as exc:
+        logger.error(
+            f"[BG] Fallo procesando mensaje de {numero_paciente}: {exc}",
+            exc_info=True,
+        )
+        try:
+            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+        except Exception:
+            pass
+
+
 @router.post("/whatsapp")
 async def receive_whatsapp_message(request: Request):
-    numero_paciente = None
+    """Endpoint de webhook para Evolution API.
+
+    Retorna HTTP 200 de inmediato para evitar timeouts del proveedor.
+    El procesamiento del grafo y el envío de la respuesta ocurren en segundo plano
+    mediante asyncio.create_task, desacoplados del ciclo request/response de FastAPI.
+    """
     try:
         raw_json = await request.json()
-        
+
         # 1. Validar la estructura con Pydantic
         payload = EvolutionWebhookPayload(**raw_json)
-        
+
         if payload.data and payload.data.message:
             data = payload.data
-            
+
+            # Ignorar mensajes emitidos por el bot antes de cualquier procesamiento
+            if data.key and data.key.fromMe:
+                return {"status": "ignored", "reason": "self_message"}
+
             # Extraer número del paciente completo (con el sufijo de whatsapp)
-            if data.key and data.key.remoteJid:
-                numero_paciente = data.key.remoteJid
-            
+            numero_paciente = data.key.remoteJid if (data.key and data.key.remoteJid) else None
+
             # Extraer texto del mensaje
             mensaje_texto = ""
             if data.message.conversation:
@@ -85,64 +154,18 @@ async def receive_whatsapp_message(request: Request):
             elif data.message.extendedTextMessage and data.message.extendedTextMessage.text:
                 mensaje_texto = data.message.extendedTextMessage.text
 
-            # Ignorar mensajes emitidos por el bot
-            if data.key and data.key.fromMe:
-                return {"status": "ignored", "reason": "self_message"}
-
             if numero_paciente and mensaje_texto:
-                logger.info(f"[Webhook] Mensaje de {numero_paciente}: {mensaje_texto}")
+                logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
+                # Encolar el procesamiento pesado en segundo plano.
+                # asyncio.create_task garantiza que la corutina vive en el event-loop
+                # de FastAPI más allá del ciclo de vida de este request.
+                asyncio.create_task(
+                    _process_whatsapp_message(numero_paciente, mensaje_texto)
+                )
 
-                if await _is_escalated(numero_paciente):
-					# Una conversación escalada queda bajo control exclusivo del humano.
-                    return {"status": "ignored", "reason": "conversation_escalated"}
-
-                if _is_escalation_request(mensaje_texto):
-					# La solicitud explícita se atiende sin pasarla por el LLM.
-                    if await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                        return {"status": "escalated"}
-                    await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
-                    return {"status": "error", "reason": "ticket_not_created"}
-                
-                try:
-                    config = get_thread_config(numero_paciente)
-                    result = await get_graph().ainvoke(
-                        {
-                            "messages": [HumanMessage(content=mensaje_texto)],
-                            "conversation_status": "ACTIVA",
-                            "rag_confidence": 1.0,
-                        },
-                        config,
-                    )
-                    if result.get("rag_confidence", 1.0) < settings.rag_min_confidence:
-						# No enviamos una respuesta posiblemente incorrecta: escalamos a recepción.
-                        if await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                            return {"status": "escalated", "reason": "low_rag_confidence"}
-                        await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
-                        return {"status": "error", "reason": "ticket_not_created"}
-                    # Enviar la respuesta del bot al paciente por WhatsApp si no está bloqueada (ya se envió en el nodo de seguridad)
-                    if result.get("conversation_status") != "BLOQUEADA":
-                        messages = result.get("messages", [])
-                        if messages:
-                            last_message = messages[-1]
-                            if isinstance(last_message, AIMessage) and last_message.content:
-                                await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
-                            else:
-                                logger.warning(f"La última respuesta no es de tipo AIMessage o está vacía: {last_message}")
-                        else:
-                            logger.warning("No se encontraron mensajes en el resultado del grafo.")
-                except Exception as service_err:
-                    logger.error(f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}")
-                    # Notificar al paciente por WhatsApp
-                    await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
-                    return {"status": "fallback_sent"}
-
-        return {"status": "success"}
+        # Evolution API recibe HTTP 200 de inmediato, sin esperar el grafo.
+        return {"status": "queued"}
 
     except Exception as e:
-        logger.error(f"[Webhook Error] Fallo al procesar el webhook: {str(e)}")
-        if numero_paciente:
-            try:
-                await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
-            except Exception:
-                pass
+        logger.error(f"[Webhook Error] Fallo al procesar el webhook: {e}", exc_info=True)
         return {"status": "error", "message": "Error procesando el payload"}
