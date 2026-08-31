@@ -12,9 +12,9 @@ class EvolutionClient:
     def __init__(self):
         # Lectura de variables de entorno 
         self.base_url: str = os.getenv("EVOLUTION_API_URL", "http://localhost:8080").rstrip("/")
-        self.instance_name: str = os.getenv("EVOLUTION_INSTANCE_NAME", "clinica_odonto")
+        self.instance_name: str = os.getenv("EVOLUTION_INSTANCE_NAME", os.getenv("INSTANCE_NAME", "clinica_odonto"))
         self.api_key: str = os.getenv("EVOLUTION_API_KEY", "")
-        self.timeout: float = float(os.getenv("EVOLUTION_API_TIMEOUT", "10.0"))
+        self.timeout: float = float(os.getenv("EVOLUTION_API_TIMEOUT", "15.0"))
 
     def _get_headers(self) -> Dict[str, str]:
         """Encabezados requeridos por Evolution API."""
@@ -52,6 +52,32 @@ class EvolutionClient:
                 return None
             except httpx.RequestError as e:
                 logger.error(f"[Evolution API] Error de conexión/timeout con Evolution API (¿contenedor apagado?): {str(e)}")
+                return None
+
+    async def obtener_base64_media(self, message: Dict[str, Any], convert_to_mp4: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene el contenido binario/base64 de un mensaje multimedia desde Evolution API v2.
+        Endpoint: POST /chat/getBase64FromMediaMessage/{instance_name}
+        Payload: {"message": message, "convertToMp4": convert_to_mp4}
+        """
+        url = f"{self.base_url}/chat/getBase64FromMediaMessage/{self.instance_name}"
+        payload = {
+            "message": message,
+            "convertToMp4": convert_to_mp4
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(url, json=payload, headers=self._get_headers())
+                response.raise_for_status()
+                data = response.json()
+                logger.info("[Evolution API] Base64 multimedia obtenido exitosamente")
+                return data
+            except httpx.HTTPStatusError as e:
+                logger.error(f"[Evolution API] Error HTTP {e.response.status_code} al obtener base64: {e.response.text}")
+                return None
+            except httpx.RequestError as e:
+                logger.error(f"[Evolution API] Error de conexión al solicitar base64 multimedia: {str(e)}")
                 return None
 
 # Instancia singleton para reutilizar en el agente

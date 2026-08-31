@@ -3,13 +3,19 @@ import re
 import asyncio
 from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
-from app.schemas.chat import EvolutionWebhookPayload
+from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
 from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
 from app.session.postgres_checkpointer import get_checkpointer_instance
+from app.services.audio_service import (
+    extraer_bytes_audio,
+    transcribir_audio,
+    MENSAJE_AUDIO_NO_ENTENDIDO,
+    MENSAJE_ERROR_PROCESANDO_AUDIO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +29,12 @@ MENSAJE_FALLBACK_PACIENTE = (
 
 MENSAJE_ESCALAMIENTO = (
     "Entiendo. Un asesor de la clínica revisará tu solicitud y te contactará pronto."
+)
+
+MENSAJE_MEDIOS_NO_SOPORTADOS = (
+    "Por el momento no puedo procesar ni visualizar fotos, videos, documentos ni archivos directamente 📎📷.\n\n"
+    "Por favor, descríbeme detalladamente por texto o mediante una nota de voz lo que necesitas o lo que contiene tu archivo "
+    "(por ejemplo, el síntoma que presentas, el tratamiento o la orden médica) para poder ayudarte con mucho gusto."
 )
 
 ESCALAMIENTO_RE = re.compile(
@@ -84,6 +96,59 @@ async def _escalate_conversation(thread_id: str, phone_number: str, message: str
     # Y enviamos el mensaje amigable de escalamiento al paciente
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
     return True
+
+
+async def _process_whatsapp_unsupported_media(numero_paciente: str, caption: str = "") -> None:
+    """Gestiona la recepción de fotos, videos, documentos o archivos no procesables directamente."""
+    try:
+        if await _is_escalated(numero_paciente):
+            logger.info(f"[BG] Medio ignorado – conversación escalada: {numero_paciente}")
+            return
+
+        if caption:
+            if _is_reset_request(caption):
+                await _reset_conversation(numero_paciente)
+                return
+            if _is_escalation_request(caption):
+                await _escalate_conversation(numero_paciente, numero_paciente, caption)
+                return
+
+        await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_MEDIOS_NO_SOPORTADOS)
+    except Exception as e:
+        logger.error(f"[BG] Error al responder medio no soportado a {numero_paciente}: {e}", exc_info=True)
+
+
+async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, raw_message: dict) -> None:
+    """Descarga, transcribe con Whisper y procesa un mensaje de audio o nota de voz."""
+    try:
+        if await _is_escalated(numero_paciente):
+            logger.info(f"[BG] Audio ignorado – conversación escalada: {numero_paciente}")
+            return
+
+        # 1. Extraer los bytes del audio
+        audio_info = await extraer_bytes_audio(raw_payload_data, raw_message)
+        if not audio_info:
+            logger.warning(f"[BG] No se pudieron extraer los bytes de audio para {numero_paciente}")
+            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_ERROR_PROCESANDO_AUDIO)
+            return
+
+        audio_bytes, mimetype = audio_info
+
+        # 2. Transcribir con OpenAI Whisper
+        texto_transcrito = await transcribir_audio(audio_bytes, mimetype)
+        if not texto_transcrito:
+            logger.warning(f"[BG] La transcripción de audio resultó vacía para {numero_paciente}")
+            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_AUDIO_NO_ENTENDIDO)
+            return
+
+        logger.info(f"[BG] Audio de {numero_paciente} transcrito: '{texto_transcrito}'")
+
+        # 3. Procesar el texto transcrito con el agente conversacional
+        await _process_whatsapp_message(numero_paciente, texto_transcrito)
+
+    except Exception as e:
+        logger.error(f"[BG] Error procesando audio de {numero_paciente}: {e}", exc_info=True)
+        await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_ERROR_PROCESANDO_AUDIO)
 
 
 async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) -> None:
@@ -183,7 +248,7 @@ async def receive_whatsapp_message(request: Request):
         # 1. Validar la estructura con Pydantic
         payload = EvolutionWebhookPayload(**raw_json)
 
-        if payload.data and payload.data.message:
+        if payload.data:
             data = payload.data
 
             # Ignorar mensajes emitidos por el bot antes de cualquier procesamiento
@@ -192,24 +257,74 @@ async def receive_whatsapp_message(request: Request):
 
             # Extraer número del paciente completo (con el sufijo de whatsapp)
             numero_paciente = data.key.remoteJid if (data.key and data.key.remoteJid) else None
+            if not numero_paciente:
+                return {"status": "ignored", "reason": "no_remote_jid"}
 
-            # Extraer texto del mensaje
-            mensaje_texto = ""
-            if data.message.conversation:
-                mensaje_texto = data.message.conversation
-            elif data.message.extendedTextMessage and data.message.extendedTextMessage.text:
-                mensaje_texto = data.message.extendedTextMessage.text
+            raw_message = data.message or {}
+            unwrapped_message = unwrap_message_dict(raw_message)
+            message_type = data.messageType or ""
 
-            if numero_paciente and mensaje_texto:
-                logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
-                # Encolar el procesamiento pesado en segundo plano.
-                # asyncio.create_task garantiza que la corutina vive en el event-loop
-                # de FastAPI más allá del ciclo de vida de este request.
+            # 1. Detectar si es audio o nota de voz
+            is_audio = (
+                message_type == "audioMessage"
+                or "audioMessage" in unwrapped_message
+            )
+
+            # 2. Detectar si es medio no soportado (imagen, video, documento, sticker, contacto, ubicación)
+            unsupported_keys = {
+                "imageMessage",
+                "videoMessage",
+                "ptvMessage",
+                "documentMessage",
+                "documentWithCaptionMessage",
+                "stickerMessage",
+                "contactMessage",
+                "contactsArrayMessage",
+                "locationMessage",
+                "liveLocationMessage",
+            }
+            is_unsupported_media = (
+                message_type in unsupported_keys
+                or any(k in unwrapped_message for k in unsupported_keys)
+            )
+
+            if is_audio:
+                logger.info(f"[Webhook] Audio recibido de {numero_paciente}. Encolando transcripción y procesamiento...")
+                raw_payload_data = raw_json.get("data", {})
                 asyncio.create_task(
-                    _process_whatsapp_message(numero_paciente, mensaje_texto)
+                    _process_whatsapp_audio(numero_paciente, raw_payload_data, unwrapped_message)
                 )
+            elif is_unsupported_media:
+                caption = ""
+                for k in ["imageMessage", "videoMessage", "documentMessage"]:
+                    if k in unwrapped_message and isinstance(unwrapped_message[k], dict):
+                        caption = unwrapped_message[k].get("caption", "") or caption
 
-        # Evolution API recibe HTTP 200 de inmediato, sin esperar el grafo.
+                logger.info(f"[Webhook] Medio no soportado recibido de {numero_paciente} (caption: '{caption}'). Encolando aviso...")
+                asyncio.create_task(
+                    _process_whatsapp_unsupported_media(numero_paciente, caption)
+                )
+            else:
+                # Extraer texto del mensaje
+                mensaje_texto = ""
+                if "conversation" in unwrapped_message and unwrapped_message["conversation"]:
+                    mensaje_texto = unwrapped_message["conversation"]
+                elif "extendedTextMessage" in unwrapped_message:
+                    ext = unwrapped_message["extendedTextMessage"]
+                    if isinstance(ext, dict):
+                        mensaje_texto = ext.get("text", "")
+                    elif hasattr(ext, "text"):
+                        mensaje_texto = ext.text or ""
+
+                if mensaje_texto:
+                    logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
+                    asyncio.create_task(
+                        _process_whatsapp_message(numero_paciente, mensaje_texto)
+                    )
+                else:
+                    logger.warning(f"[Webhook] Mensaje no reconocido o vacío de {numero_paciente}: {unwrapped_message}")
+
+        # Evolution API recibe HTTP 200 de inmediato, sin esperar el procesamiento pesado
         return {"status": "queued"}
 
     except Exception as e:

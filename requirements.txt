@@ -6,6 +6,7 @@ jq==1.8.0
 langgraph==0.2.14
 langgraph-checkpoint-postgres
 langchain-openai==0.1.22
+openai>=1.0.0
 psycopg[binary,pool]
 
 # Base de Datos Vectorial
