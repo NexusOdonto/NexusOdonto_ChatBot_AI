@@ -6,7 +6,10 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from sentence_transformers import CrossEncoder
+try:
+	from sentence_transformers import CrossEncoder
+except ImportError:
+	CrossEncoder = None
 
 from app.core.config import settings
 

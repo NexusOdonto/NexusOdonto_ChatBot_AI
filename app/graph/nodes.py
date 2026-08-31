@@ -6,8 +6,15 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from app.agents.tools.qdrant_tool import clinical_knowledge_tool
-from app.agents.tools.agenda_tools import consultar_disponibilidad_tool, agendar_cita_tool
+from app.agents.tools.agenda_tools import (
+	consultar_disponibilidad_tool,
+	agendar_cita_tool,
+	consultar_doctores_tool,
+	consultar_servicios_y_precios_tool,
+)
+from app.clients.dotnet_client import dotnet_client
 from app.clients.evolution_client import evolution_client
+from app.security.emergency_detector import detect_severe_emergency, MENSAJE_EMERGENCIA_URGENCIAS
 
 from app.core.config import settings
 from app.graph.state import AgentState
@@ -34,14 +41,15 @@ SYSTEM_MESSAGE = SystemMessage(
 		"- Dirección: Cr 24 #35-12,Santander\n"
 		"- Horario general: Lunes a Sábado de 8:00 AM a 6:00 PM\n\n"
 		"Si te piden teléfono, contacto o dirección, bríndalos directamente sin necesidad de llamar a herramientas.\n"
-		"Usa la herramienta buscar_conocimiento_clinico antes de responder sobre "
-		"precios, servicios específicos o preparaciones clínicas. Nunca inventes "
-		"precios, horarios, políticas ni disponibilidad. "
-		"Para verificar disponibilidad real de citas en una fecha, debes llamar a consultar_disponibilidad_tool con la especialidad y fecha (formato YYYY-MM-DD).\n"
+		"HERRAMIENTAS CLAVE:\n"
+		"1. Si te preguntan por los doctores, odontólogos o profesionales disponibles en la clínica, usa consultar_doctores_tool.\n"
+		"2. Si te preguntan por los servicios que ofrecemos, especialidades o precios de los procedimientos, usa consultar_servicios_y_precios_tool.\n"
+		"3. Para verificar disponibilidad real de citas en una fecha, debes llamar a consultar_disponibilidad_tool con la especialidad y fecha (formato YYYY-MM-DD).\n"
+		"4. Usa buscar_conocimiento_clinico EXCLUSIVAMENTE para responder sobre dudas médicas clínicas, explicaciones de tratamientos o preparaciones odontológicas.\n"
 		"IMPORTANTE PARA AGENDAR CITAS: Antes de llamar a la herramienta agendar_cita_tool, debes proponer obligatoriamente los detalles específicos de la cita (Doctor, Especialidad/Servicio, Fecha y Hora) al paciente y solicitarle su confirmación explícita (ej. 'Por favor confirma si estás de acuerdo con esta cita...'). "
 		"SOLO si el paciente confirma de manera afirmativa y explícita, debes invocar la herramienta agendar_cita_tool. Nunca la invoques de forma anticipada sin confirmación.\n"
 		"Nunca des diagnósticos médicos ni reemplaces la evaluación de un odontólogo. "
-		"Ante síntomas o una urgencia, recomienda contactar directamente al consultorio o acudir a un servicio de urgencias."
+		"Ante síntomas o una urgencia severa, recomienda acudir a un servicio de urgencias."
 	)
 )
 
@@ -57,11 +65,69 @@ def get_llm_with_tools():
 		temperature=0,
 		api_key=settings.openai_api_key,
 	)
-	return llm.bind_tools([clinical_knowledge_tool, consultar_disponibilidad_tool, agendar_cita_tool])
+	return llm.bind_tools([
+		clinical_knowledge_tool,
+		consultar_disponibilidad_tool,
+		agendar_cita_tool,
+		consultar_doctores_tool,
+		consultar_servicios_y_precios_tool,
+	])
 
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+
+async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dict:
+	"""Evalúa si el mensaje del usuario describe una emergencia severa que requiera atención médica inmediata."""
+	messages = state.get("messages", [])
+	if not messages:
+		return {"conversation_status": state.get("conversation_status", "ACTIVA"), "emergency_detected": False}
+
+	# Obtener el último mensaje del usuario
+	last_message = messages[-1]
+	if not isinstance(last_message, HumanMessage):
+		return {"conversation_status": state.get("conversation_status", "ACTIVA"), "emergency_detected": False}
+
+	user_text = last_message.content
+	if not isinstance(user_text, str) or not user_text.strip():
+		return {"conversation_status": state.get("conversation_status", "ACTIVA"), "emergency_detected": False}
+
+	is_emergency, reason = await detect_severe_emergency(user_text)
+	if is_emergency:
+		logger.warning(f"[Emergency Detector] Emergencia detectada ({reason}) en mensaje: '{user_text}'")
+		thread_id = config.get("configurable", {}).get("thread_id")
+
+		# 1. Enviar alerta por WhatsApp inmediatamente
+		if thread_id:
+			try:
+				await evolution_client.enviar_mensaje(numero=thread_id, texto=MENSAJE_EMERGENCIA_URGENCIAS)
+			except Exception as e:
+				logger.error(f"[Emergency Detector] Error enviando alerta por WhatsApp a {thread_id}: {e}")
+
+		# 2. Escalar ticket a nivel CRÍTICO en .NET inmediatamente
+		if thread_id:
+			try:
+				await dotnet_client.crear_ticket_soporte(
+					telefono=thread_id,
+					motivo=f"EMERGENCIA_MEDICA: {reason}",
+					prioridad="CRITICO",
+				)
+			except Exception as e:
+				logger.warning(f"[Emergency Detector] Error registrando ticket CRÍTICO en .NET para {thread_id}: {e}")
+
+		emergency_message = AIMessage(content=MENSAJE_EMERGENCIA_URGENCIAS)
+		return {
+			"messages": [emergency_message],
+			"conversation_status": "ESCALADA",
+			"emergency_detected": True,
+			"emergency_reason": reason,
+		}
+
+	return {
+		"conversation_status": state.get("conversation_status", "ACTIVA"),
+		"emergency_detected": False,
+	}
 
 async def security_check_node(state: AgentState, config: RunnableConfig) -> dict:
 	"""Evalúa si el último mensaje del usuario es un intento de jailbreak, prompt injection o contenido tóxico."""

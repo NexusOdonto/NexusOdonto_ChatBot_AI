@@ -14,3 +14,5 @@ class AgentState(TypedDict):
 	# Resumen comprimido del historial antiguo. Se actualiza automáticamente
 	# cada vez que el nodo summarize_conversation_node reduce el historial.
 	conversation_summary: NotRequired[Optional[str]]
+	emergency_detected: NotRequired[bool]
+	emergency_reason: NotRequired[Optional[str]]

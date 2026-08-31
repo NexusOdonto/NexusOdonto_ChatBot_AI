@@ -1,253 +1,319 @@
 import os
 import logging
+import asyncio
 from typing import Optional, Dict, Any, List
 import httpx
 from dotenv import load_dotenv
+from app.core.config import settings
 
 # Cargar variables del entorno
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+
 class DotNetClient:
+    """Cliente HTTP asíncrono para consumir la API de backend .NET de Nexus Odonto."""
+
     def __init__(self):
-        self.base_url: str = os.getenv("DOTNET_API_URL", "http://localhost:5000/api").rstrip("/")
-        self.secret_token: str = os.getenv("AGENT_INTERNAL_SECRET", "")
-        self.timeout: float = float(os.getenv("DOTNET_API_TIMEOUT", "10.0"))
+        self.base_url: str = os.getenv("DOTNET_API_URL", settings.dotnet_api_url).rstrip("/")
+        self.auth_login: str = os.getenv("DOTNET_AUTH_LOGIN", settings.dotnet_auth_login)
+        self.auth_password: str = os.getenv("DOTNET_AUTH_PASSWORD", settings.dotnet_auth_password)
+        self.secret_token: str = os.getenv("AGENT_INTERNAL_SECRET", settings.agent_internal_secret)
+        self.timeout: float = float(os.getenv("DOTNET_API_TIMEOUT", settings.dotnet_api_timeout))
 
-    def _get_headers(self) -> Dict[str, str]:
+        self._jwt_token: Optional[str] = None
+        self._auth_lock = asyncio.Lock()
+        self._reasons_cache: Optional[List[Dict[str, Any]]] = None
+        self._priorities_cache: Optional[List[Dict[str, Any]]] = None
 
-        # El backend definirá si valida JWT, API key o ambos encabezados.
-        """Encabezados con token de seguridad para que C# permita el acceso."""
+    @property
+    def _auth_url(self) -> str:
+        """Calcula la URL base del servidor (quitando /api/v1 o /api) para las rutas de autenticación."""
+        url = self.base_url
+        if url.endswith("/api/v1"):
+            url = url[:-7]
+        elif url.endswith("/api"):
+            url = url[:-4]
+        return f"{url}/api/auth"
+
+    async def _get_valid_token(self, force_refresh: bool = False) -> str:
+        """Obtiene un token JWT válido iniciando sesión automáticamente en .NET si es necesario."""
+        if not force_refresh and self._jwt_token:
+            return self._jwt_token
+
+        async with self._auth_lock:
+            # Doble verificación tras adquirir el lock
+            if not force_refresh and self._jwt_token:
+                return self._jwt_token
+
+            # Si hay credenciales de usuario configuradas, iniciar sesión contra /api/auth/login
+            if self.auth_login and self.auth_password:
+                login_endpoint = f"{self._auth_url}/login"
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        response = await client.post(
+                            login_endpoint,
+                            json={"login": self.auth_login, "password": self.auth_password},
+                            headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            token = data.get("token")
+                            if token:
+                                self._jwt_token = token
+                                logger.info("[.NET Client] Sesión autenticada exitosamente con backend .NET (JWT)")
+                                return self._jwt_token
+                        else:
+                            logger.warning(
+                                f"[.NET Client] No se pudo autenticar en {login_endpoint}: {response.status_code} - {response.text}"
+                            )
+                except Exception as e:
+                    logger.warning(f"[.NET Client] Error al conectar con endpoint de login ({login_endpoint}): {e}")
+
+            # Fallback a token secreto estático
+            return self.secret_token or ""
+
+    async def _get_headers(self, force_refresh: bool = False) -> Dict[str, str]:
+        """Encabezados con token JWT de autorización para que C# permita el acceso."""
+        token = await self._get_valid_token(force_refresh=force_refresh)
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
         }
-        if self.secret_token:
-            headers["Authorization"] = f"Bearer {self.secret_token}"
-            headers["X-Api-Key"] = self.secret_token
-            headers["x-api-key"] = self.secret_token
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["X-Api-Key"] = token
+            headers["x-api-key"] = token
         return headers
 
-    async def consultar_disponibilidad(
-        self,
-        profesional_id: Optional[int] = None,
-        fecha: Optional[str] = None,
-        servicio_id: Optional[int] = None,
-    ) -> Optional[List[Dict[str, Any]]]:
-        """
-        Consulta horarios disponibles en el backend .NET.
-        Maneja timeouts y errores de conexión.
-        """
-        if profesional_id is None:
-			# Sin profesional no es posible calcular sus espacios disponibles.
-            logger.error("[.NET Client] profesional_id es obligatorio para consultar horarios")
-            return None
-
-        url = f"{self.base_url}/Availabilities"
-        params: Dict[str, Any] = {}
-        if profesional_id:
-            params["profesionalId"] = profesional_id
-        if fecha:
-            params["fecha"] = fecha
-        if servicio_id:
-            params["servicioId"] = servicio_id
-
+    async def _request_with_retry(
+        self, method: str, url: str, params: Optional[Dict[str, Any]] = None, json: Optional[Any] = None
+    ) -> Optional[httpx.Response]:
+        """Ejecuta una petición HTTP con manejo automático de reintentos en 401 (token expirado)."""
+        headers = await self._get_headers()
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.get(url, params=params, headers=self._get_headers())
-                if response.status_code == 404:
-                    # Fallback to secondary route
-                    fallback_url = f"{self.base_url}/Professionals/{profesional_id}/availabilities"
-                    response = await client.get(fallback_url, params=params, headers=self._get_headers())
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items", [])
+                response = await client.request(method, url, params=params, json=json, headers=headers)
+                if response.status_code == 401:
+                    logger.info("[.NET Client] Token JWT expirado o no válido (401). Renovando sesión...")
+                    self._jwt_token = None
+                    headers = await self._get_headers(force_refresh=True)
+                    response = await client.request(method, url, params=params, json=json, headers=headers)
+                return response
+            except Exception as e:
+                logger.error(f"[.NET Client] Error en {method} {url}: {e}")
                 return None
-            except httpx.HTTPStatusError as e:
-                logger.error(f"[.NET Client] Error HTTP {e.response.status_code}: {e.response.text}")
-                return None
-            except httpx.RequestError as e:
-                logger.error(f"[.NET Client] Error de conexión/timeout con backend .NET: {str(e)}")
-                return None
-
-    async def agendar_cita(self, datos_cita: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Registra una cita en el backend .NET.
-        Maneja timeouts y errores de conexión.
-        """
-        url = f"{self.base_url}/Appointments"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.post(url, json=datos_cita, headers=self._get_headers())
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as e:
-                logger.error(f"[.NET Client] Error HTTP {e.response.status_code}: {e.response.text}")
-                return None
-            except httpx.RequestError as e:
-                logger.error(f"[.NET Client] Error de conexión/timeout al agendar cita: {str(e)}")
-                return None
-
-    async def consultar_citas(self, fecha: str) -> Optional[Any]:
-        """Consulta las citas de una fecha en el backend .NET."""
-        url = f"{self.base_url}/Appointments"
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                page = 1
-                all_items: List[Dict[str, Any]] = []
-                while True:
-                    response = await client.get(
-                        url,
-                        params={"fecha": fecha, "page": page, "pageSize": 100},
-                        headers=self._get_headers(),
-                    )
-                    response.raise_for_status()
-                    payload = response.json()
-
-                    if isinstance(payload, list):
-                        return payload
-                    if not isinstance(payload, dict):
-                        return payload
-
-                    items = payload.get("items", [])
-                    if isinstance(items, list):
-                        all_items.extend(item for item in items if isinstance(item, dict))
-
-                    total_pages = payload.get("totalPages", page)
-                    if page >= total_pages or not items:
-                        return {**payload, "items": all_items, "totalItems": len(all_items)}
-                    page += 1
-        except httpx.HTTPStatusError as e:
-            logger.error(f"[.NET Client] Error HTTP {e.response.status_code}: {e.response.text}")
-            return None
-        except httpx.RequestError as e:
-            logger.error(f"[.NET Client] Error de conexión/timeout al consultar citas: {str(e)}")
-            return None
-
-    async def crear_ticket_soporte(self, telefono: str, motivo: str, prioridad: str = "MEDIA") -> Optional[Dict[str, Any]]:
-        """Crea un ticket en la API de .NET. Si falla, no interrumpe el chatbot."""
-        url = f"{self.base_url}/SupportTickets"
-        payload = {
-            "telefono": telefono,
-            "motivo": motivo,
-            "prioridad": prioridad
-        }
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                response = await client.post(url, json=payload, headers=self._get_headers())
-                response.raise_for_status()
-                return response.json()
-        except Exception as e:
-            logger.warning(f"[.NET Client] No se pudo registrar el ticket (servicio no disponible): {str(e)}")
-            return None
 
     async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de servicios activos de la clínica."""
         url = f"{self.base_url}/Services"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.get(url, headers=self._get_headers())
-                if response.status_code == 404:
-                    response = await client.get(f"{self.base_url}/servicios", headers=self._get_headers())
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items", [])
-                return None
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al obtener servicios: {str(e)}")
-                return None
-
-    async def obtener_profesionales(self, especialidad_id: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
-        """Obtiene la lista de profesionales, opcionalmente filtrados por especialidad."""
-        url = f"{self.base_url}/Professionals"
-        params = {}
-        if especialidad_id is not None:
-            params["especialidadId"] = especialidad_id
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.get(url, params=params, headers=self._get_headers())
-                if response.status_code == 404:
-                    response = await client.get(f"{self.base_url}/profesionales", params=params, headers=self._get_headers())
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items", [])
-                return None
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al obtener profesionales: {str(e)}")
-                return None
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                return payload.get("items", [])
+        return None
 
     async def obtener_especialidades(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de especialidades de la clínica."""
         url = f"{self.base_url}/Specialties"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.get(url, headers=self._get_headers())
-                if response.status_code == 404:
-                    response = await client.get(f"{self.base_url}/especialidades", headers=self._get_headers())
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items", [])
-                return None
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al obtener especialidades: {str(e)}")
-                return None
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                return payload.get("items", [])
+        return None
 
-    async def obtener_contexto_conversacion(self, conversacion_chatbot_id: str) -> Optional[Dict[str, Any]]:
+    async def obtener_profesionales(
+        self, especialidad_id: Optional[Any] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Obtiene la lista de profesionales, opcionalmente filtrados por especialidad."""
+        url = f"{self.base_url}/Professionals"
+        params = {}
+        if especialidad_id is not None:
+            params["especialidadId"] = str(especialidad_id)
+            params["specialtyId"] = str(especialidad_id)
+
+        response = await self._request_with_retry("GET", url, params=params if params else None)
+        if response and response.status_code == 200:
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                return payload.get("items", [])
+        return None
+
+    async def consultar_disponibilidad(
+        self,
+        profesional_id: Optional[Any] = None,
+        fecha: Optional[str] = None,
+        servicio_id: Optional[Any] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Consulta horarios disponibles en el backend .NET."""
+        url = f"{self.base_url}/Availabilities"
+        params: Dict[str, Any] = {}
+        if profesional_id:
+            params["profesionalId"] = str(profesional_id)
+            params["professionalId"] = str(profesional_id)
+        if fecha:
+            params["fecha"] = str(fecha)
+            params["date"] = str(fecha)
+        if servicio_id:
+            params["servicioId"] = str(servicio_id)
+            params["serviceId"] = str(servicio_id)
+
+        response = await self._request_with_retry("GET", url, params=params)
+        if response and response.status_code == 200:
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                return payload.get("items", [])
+        return None
+
+    async def agendar_cita(self, datos_cita: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Registra una cita en el backend .NET."""
+        url = f"{self.base_url}/Appointments"
+        response = await self._request_with_retry("POST", url, json=datos_cita)
+        if response and response.status_code in (200, 201):
+            return response.json()
+        return None
+
+    async def consultar_citas(self, fecha: str) -> Optional[Any]:
+        """Consulta las citas de una fecha en el backend .NET."""
+        url = f"{self.base_url}/Appointments"
+        params = {"fecha": fecha, "date": fecha}
+        response = await self._request_with_retry("GET", url, params=params)
+        if response and response.status_code == 200:
+            return response.json()
+        return None
+
+    async def _obtener_ticket_reasons(self) -> List[Dict[str, Any]]:
+        """Obtiene y cachea los motivos de ticket de soporte disponibles en .NET."""
+        if self._reasons_cache:
+            return self._reasons_cache
+        url = f"{self.base_url}/SupportTicketReasons"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            self._reasons_cache = response.json() if isinstance(response.json(), list) else []
+            return self._reasons_cache
+        return []
+
+    async def _obtener_notification_priorities(self) -> List[Dict[str, Any]]:
+        """Obtiene y cachea las prioridades de notificación disponibles en .NET."""
+        if self._priorities_cache:
+            return self._priorities_cache
+        url = f"{self.base_url}/NotificationPriorities"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            self._priorities_cache = response.json() if isinstance(response.json(), list) else []
+            return self._priorities_cache
+        return []
+
+    async def crear_ticket_soporte(
+        self, telefono: str, motivo: str, prioridad: str = "MEDIA"
+    ) -> Optional[Dict[str, Any]]:
+        """Crea un ticket en la API de .NET. Si falla, no interrumpe el chatbot."""
+        url = f"{self.base_url}/SupportTickets"
+
+        # 1. Resolver UUID de motivo y prioridad si existen en el catálogo
+        reasons = await self._obtener_ticket_reasons()
+        priorities = await self._obtener_notification_priorities()
+
+        reason_id = None
+        motivo_upper = motivo.upper()
+        for r in reasons:
+            code = (r.get("code") or "").upper()
+            if "EMERGENCIA" in motivo_upper and code in ("CONSULTA_COMPLEJA", "SOLICITUD_USUARIO"):
+                reason_id = r.get("id")
+                break
+            if "SOLICITUD" in motivo_upper and "SOLICITUD" in code:
+                reason_id = r.get("id")
+                break
+            if "RAG" in motivo_upper and "RAG" in code:
+                reason_id = r.get("id")
+                break
+        if not reason_id and reasons:
+            reason_id = reasons[0].get("id")
+
+        priority_id = None
+        prio_upper = prioridad.upper()
+        for p in priorities:
+            code = (p.get("code") or "").upper()
+            if prio_upper in ("CRITICO", "CRÍTICO", "URGENTE") and code == "URGENTE":
+                priority_id = p.get("id")
+                break
+            if prio_upper in ("ALTA", "HIGH") and code == "ALTA":
+                priority_id = p.get("id")
+                break
+            if prio_upper in ("MEDIA", "NORMAL") and code == "NORMAL":
+                priority_id = p.get("id")
+                break
+            if prio_upper in ("BAJA", "LOW") and code == "BAJA":
+                priority_id = p.get("id")
+                break
+        if not priority_id and priorities:
+            priority_id = priorities[0].get("id")
+
+        payload = {
+            "title": f"Soporte Chatbot: {motivo}",
+            "description": f"Solicitud desde WhatsApp ({telefono}). Motivo: {motivo}",
+            "chatbotSummary": f"Paciente {telefono} reportó: {motivo}",
+            "telefono": telefono,
+            "motivo": motivo,
+            "prioridad": prioridad,
+        }
+        if reason_id:
+            payload["ticketReasonId"] = reason_id
+        if priority_id:
+            payload["notificationPriorityId"] = priority_id
+
+        response = await self._request_with_retry("POST", url, json=payload)
+        if response and response.status_code in (200, 201):
+            logger.info(f"[.NET Client] Ticket de soporte registrado exitosamente para {telefono}")
+            return response.json()
+
+        logger.warning(
+            f"[.NET Client] No se pudo registrar el ticket (HTTP {response.status_code if response else 'None'})"
+        )
+        return None
+
+    async def obtener_contexto_conversacion(
+        self, conversacion_chatbot_id: str
+    ) -> Optional[Dict[str, Any]]:
         """Obtiene el contexto de una conversación de chatbot, incluyendo el paciente vinculado si existe."""
         url = f"{self.base_url}/ChatbotConversations/{conversacion_chatbot_id}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.get(url, headers=self._get_headers())
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al obtener contexto de conversación: {str(e)}")
-                return None
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            return response.json()
+        return None
 
     async def buscar_pacientes(self, search: str) -> Optional[List[Dict[str, Any]]]:
         """Busca pacientes por teléfono, nombre o documento."""
         url = f"{self.base_url}/Patients"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.get(url, params={"search": search}, headers=self._get_headers())
-                if response.status_code == 404:
-                    response = await client.get(f"{self.base_url}/pacientes", params={"search": search}, headers=self._get_headers())
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, list):
-                    return payload
-                if isinstance(payload, dict):
-                    return payload.get("items", [])
-                return None
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al buscar pacientes: {str(e)}")
-                return None
+        response = await self._request_with_retry("GET", url, params={"search": search})
+        if response and response.status_code == 200:
+            payload = response.json()
+            if isinstance(payload, list):
+                return payload
+            if isinstance(payload, dict):
+                return payload.get("items", [])
+        return None
 
-    async def vincular_paciente(self, conversacion_chatbot_id: str, paciente_id: int) -> bool:
+    async def vincular_paciente(self, conversacion_chatbot_id: str, paciente_id: Any) -> bool:
         """Vincula un paciente a una conversación de chatbot."""
-        url = f"{self.base_url}/ChatbotConversations/{conversacion_chatbot_id}/paciente"
-        payload = {"pacienteId": paciente_id}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                response = await client.patch(url, json=payload, headers=self._get_headers())
-                response.raise_for_status()
-                return True
-            except Exception as e:
-                logger.error(f"[.NET Client] Error al vincular paciente: {str(e)}")
-                return False
+        url = f"{self.base_url}/ChatbotConversations/{conversacion_chatbot_id}"
+        payload = {"patientId": str(paciente_id), "pacienteId": str(paciente_id)}
+        response = await self._request_with_retry("PATCH", url, json=payload)
+        if response and response.status_code in (200, 204):
+            return True
+        return False
+
 
 # Instancia reutilizable para el bot y las tools
 dotnet_client = DotNetClient()

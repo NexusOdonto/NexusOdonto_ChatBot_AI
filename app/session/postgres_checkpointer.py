@@ -1,7 +1,11 @@
 import logging
 from typing import Optional
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from psycopg_pool import AsyncConnectionPool
+try:
+	from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+	from psycopg_pool import AsyncConnectionPool
+except ImportError:
+	AsyncPostgresSaver = None
+	AsyncConnectionPool = None
 
 logger = logging.getLogger(__name__)
 

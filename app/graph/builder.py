@@ -2,9 +2,15 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from app.agents.tools.qdrant_tool import clinical_knowledge_tool
-from app.agents.tools.agenda_tools import consultar_disponibilidad_tool, agendar_cita_tool
+from app.agents.tools.agenda_tools import (
+	consultar_disponibilidad_tool,
+	agendar_cita_tool,
+	consultar_doctores_tool,
+	consultar_servicios_y_precios_tool,
+)
 from app.graph.nodes import (
 	chatbot_node,
+	emergency_check_node,
 	security_check_node,
 	summarize_conversation_node,
 	SUMMARY_THRESHOLD,
@@ -16,15 +22,26 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 graph = None
 
 
+def emergency_router(state: AgentState) -> str:
+	"""Router que evalúa si se detectó una emergencia médica/odontológica severa.
+
+	Si la conversación está ESCALADA o se detectó emergencia, finaliza el flujo regular (END).
+	De lo contrario, continúa con la verificación de seguridad.
+	"""
+	if state.get("conversation_status") == "ESCALADA" or state.get("emergency_detected"):
+		return END
+	return "security_check"
+
+
 def security_router(state: AgentState) -> str:
 	"""Router unificado que evalúa seguridad y longitud del historial.
 
 	Prioridades:
-	1. Si la conversación está BLOQUEADA → finaliza sin responder.
+	1. Si la conversación está BLOQUEADA o ESCALADA → finaliza sin responder.
 	2. Si el historial supera SUMMARY_THRESHOLD → comprime antes del chatbot.
 	3. En cualquier otro caso → pasa directo al chatbot.
 	"""
-	if state.get("conversation_status") == "BLOQUEADA":
+	if state.get("conversation_status") in ("BLOQUEADA", "ESCALADA"):
 		return END
 	messages = state.get("messages", [])
 	if len(messages) > SUMMARY_THRESHOLD:
@@ -39,14 +56,29 @@ def create_graph(checkpointer: BaseCheckpointSaver) -> None:
 
 	# PostgreSQL conserva los mensajes y el estado aun después de reiniciar el servidor.
 	builder = StateGraph(AgentState)
+	builder.add_node("emergency_check", emergency_check_node)
 	builder.add_node("security_check", security_check_node)
 	# El nodo de resumen comprime el historial antes de que el LLM lo procese.
 	builder.add_node("summarize_conversation", summarize_conversation_node)
 	builder.add_node("chatbot", chatbot_node)
 	# Ejecuta las llamadas a herramientas que el LLM solicite.
-	builder.add_node("tools", ToolNode([clinical_knowledge_tool, consultar_disponibilidad_tool, agendar_cita_tool]))
+	builder.add_node(
+		"tools",
+		ToolNode([
+			clinical_knowledge_tool,
+			consultar_disponibilidad_tool,
+			agendar_cita_tool,
+			consultar_doctores_tool,
+			consultar_servicios_y_precios_tool,
+		]),
+	)
 
-	builder.add_edge(START, "security_check")
+	builder.add_edge(START, "emergency_check")
+	builder.add_conditional_edges(
+		"emergency_check",
+		emergency_router,
+		{"security_check": "security_check", END: END},
+	)
 	# Un único router decide las tres rutas posibles desde security_check.
 	builder.add_conditional_edges(
 		"security_check",

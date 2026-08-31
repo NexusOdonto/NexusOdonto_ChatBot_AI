@@ -35,6 +35,14 @@ class Settings(BaseSettings):
 
     # Configuración de la API externa y reintentos de comunicación.
     agent_internal_secret: str = ""
+    dotnet_auth_login: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOTNET_AUTH_LOGIN", "DOTNET_API_USER"),
+    )
+    dotnet_auth_password: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOTNET_AUTH_PASSWORD", "DOTNET_API_PASSWORD"),
+    )
     dotnet_api_timeout: int = 30
     dotnet_max_retries: int = 3
     dotnet_retry_backoff_seconds: float = 0.5

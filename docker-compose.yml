@@ -93,12 +93,16 @@ services:
     container_name: agente_python
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=CLAVE_SECRETA_ODONTO_2026
-      - DOTNET_API_URL=http://backend-api:5000/api/v1
+      - DOTNET_API_URL=http://host.docker.internal:5170/api/v1
+      - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN}
+      - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD}
       - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_SIGNATURE_HEADER=${WEBHOOK_SIGNATURE_HEADER:-x-webhook-signature}
