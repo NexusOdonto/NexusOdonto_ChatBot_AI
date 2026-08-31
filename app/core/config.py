@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     qdrant_collection_name: str = "conocimiento_clinico"
     embedding_dimension: int = 1536
 
+    # Configuración de Caché Semántico en Qdrant
+    semantic_cache_enabled: bool = True
+    semantic_cache_collection: str = "semantic_cache"
+    semantic_cache_threshold: float = 0.94
+
     # Configuración de las integraciones que se habilitarán más adelante.
     evolution_api_url: str = "http://localhost:8080"
     evolution_api_key: str = ""

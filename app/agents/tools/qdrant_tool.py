@@ -67,9 +67,14 @@ def get_clinical_retriever():
 
 
 @lru_cache(maxsize=1)
-def get_reranker() -> CrossEncoder:
-	# El modelo se carga una sola vez y se reutiliza en todas las preguntas.
-	return CrossEncoder(settings.reranker_model)
+def get_reranker():
+	# El modelo se carga una sola vez y se reutiliza en todas las preguntas si está disponible.
+	if CrossEncoder is not None:
+		try:
+			return CrossEncoder(settings.reranker_model)
+		except Exception as e:
+			logger.warning(f"No se pudo cargar CrossEncoder ({e}), usando similitud coseno nativa.")
+	return None
 
 
 def _score_to_confidence(score: float) -> float:
@@ -90,17 +95,24 @@ def retrieve_clinical_knowledge(query: str) -> str:
 		if not documents_with_scores:
 			return "[RAG_SCORE:0.0]\nNo se encontro informacion clinica relevante."
 
-		# Después el Cross-Encoder compara la pregunta con cada documento completo.
-		pairs = [(query, document.page_content) for document, _ in documents_with_scores]
-		reranker_scores = get_reranker().predict(pairs)
-		ranked_documents = sorted(
-			zip((document for document, _ in documents_with_scores), reranker_scores),
-			key=lambda item: float(item[1]),
-			reverse=True,
-		)
-		best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
-		content = "\n\n".join(document.page_content for document, _ in ranked_documents)
-		return f"[RAG_SCORE:{best_confidence}]\n{content}"
+		reranker = get_reranker()
+		if reranker is not None:
+			# Después el Cross-Encoder compara la pregunta con cada documento completo.
+			pairs = [(query, document.page_content) for document, _ in documents_with_scores]
+			reranker_scores = reranker.predict(pairs)
+			ranked_documents = sorted(
+				zip((document for document, _ in documents_with_scores), reranker_scores),
+				key=lambda item: float(item[1]),
+				reverse=True,
+			)
+			best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
+			content = "\n\n".join(document.page_content for document, _ in ranked_documents)
+		else:
+			# Fallback a similitud coseno directa de Qdrant (normalizada 0..1)
+			best_confidence = float(documents_with_scores[0][1]) if documents_with_scores else 0.0
+			content = "\n\n".join(document.page_content for document, _ in documents_with_scores)
+
+		return f"[RAG_SCORE:{best_confidence:.4f}]\n{content}"
 	except Exception as exc:
 		logger.error(f"Error al recuperar conocimiento clinico: {exc}", exc_info=True)
 		return "[RAG_SCORE:0.0]\nNo fue posible acceder a la base de conocimiento clinico en este momento debido a problemas de conexion."
@@ -122,3 +134,14 @@ def initialize_qdrant() -> None:
 	# Se ejecuta al iniciar FastAPI para comprobar y preparar Qdrant.
 	client = get_qdrant_client()
 	_ensure_collection(client)
+	try:
+		from app.services.semantic_cache import ensure_cache_collection
+		ensure_cache_collection(client)
+	except Exception as exc:
+		logger.warning(f"No se pudo inicializar la coleccion de cache semantico: {exc}")
+
+	try:
+		from app.services.knowledge_ingestion import poblar_conocimiento_clinico
+		poblar_conocimiento_clinico()
+	except Exception as exc:
+		logger.warning(f"No se pudo poblar la base de conocimiento clinico automaticamente: {exc}")

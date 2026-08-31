@@ -16,6 +16,7 @@ from app.services.audio_service import (
     MENSAJE_AUDIO_NO_ENTENDIDO,
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
+from app.services.semantic_cache import buscar_en_cache, guardar_en_cache
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,22 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             return
 
         config = get_thread_config(numero_paciente)
+
+        # 2. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
+        cached_response = await buscar_en_cache(mensaje_texto)
+        if cached_response:
+            logger.info(f"[Semantic Cache] Respondiendo desde caché a {numero_paciente}")
+            await evolution_client.enviar_mensaje(numero_paciente, cached_response)
+            try:
+                # Mantener sincronizado el historial de mensajes en PostgreSQL
+                await get_graph().aupdate_state(
+                    config,
+                    {"messages": [HumanMessage(content=mensaje_texto), AIMessage(content=cached_response)]},
+                )
+            except Exception as hist_err:
+                logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
+            return
+
         result = await get_graph().ainvoke(
             {
                 "messages": [HumanMessage(content=mensaje_texto)],
@@ -206,7 +223,10 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             if messages:
                 last_message = messages[-1]
                 if isinstance(last_message, AIMessage) and last_message.content:
-                    await evolution_client.enviar_mensaje(numero_paciente, str(last_message.content))
+                    respuesta_texto = str(last_message.content)
+                    await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
+                    # 3. Guardar en Caché Semántico si la respuesta es informativa
+                    asyncio.create_task(guardar_en_cache(mensaje_texto, respuesta_texto))
                 else:
                     logger.warning(
                         f"[BG] La última respuesta no es de tipo AIMessage o está vacía: {last_message}"
@@ -225,7 +245,7 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             from langchain_openai import ChatOpenAI
             emergency_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=settings.openai_api_key)
             resp = await emergency_llm.ainvoke([
-                SystemMessage(content="Eres el asistente virtual de Nexus Odonto. Responde cordialmente y ofrece asistencia básica o pide que nos contacte al +57 324 6030217."),
+                SystemMessage(content="Eres el asistente virtual exclusivo de Nexus Odonto. Solo responde sobre temas odontológicos o pide que nos contacte al +57 324 6030217. Si te preguntan sobre temas no relacionados con la odontología, rehúsa amablemente indicando que solo atiendes consultas de la clínica odontológica."),
                 HumanMessage(content=mensaje_texto)
             ])
             await evolution_client.enviar_mensaje(numero_paciente, str(resp.content))
