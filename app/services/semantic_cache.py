@@ -38,7 +38,7 @@ def ensure_cache_collection(client: Optional[QdrantClient] = None) -> None:
 def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
     """Valida si un par pregunta-respuesta es apto para almacenarse en el caché semántico.
     
-    Excluye respuestas transaccionales (citas agendadas, disponibilidad en tiempo real,
+    Excluye respuestas transaccionales (citas, disponibilidad en tiempo real, agendamientos,
     emergencias médicas o mensajes de error/escalamiento).
     """
     p_lower = pregunta.lower().strip()
@@ -48,7 +48,21 @@ def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
     if len(p_lower) < 6 or len(r_lower) < 15:
         return False
 
-    # Exclusiones por palabras clave transaccionales o dinámicas
+    # Excluir comandos directos, confirmaciones o elecciones
+    if p_lower.startswith("/") or p_lower in ["si", "no", "1", "2", "3", "4", "cancelar", "ok", "vale"]:
+        return False
+
+    # Excluir si la pregunta contiene intenciones de agendamiento o reserva de citas
+    keywords_pregunta_no_cacheables = [
+        "cita", "citas", "agendar", "agenda", "turno", "turnos", "reserva", "reservar",
+        "apartar", "para mañana", "para hoy", "mañana a las", "hoy a las",
+        "el lunes a las", "el martes a las", "el miercoles a las", "el jueves a las", "el viernes a las"
+    ]
+    for kw in keywords_pregunta_no_cacheables:
+        if kw in p_lower:
+            return False
+
+    # Exclusiones por palabras clave transaccionales o dinámicas en la respuesta
     palabras_no_cacheables = [
         "cita agendada",
         "confirmada para el",
@@ -62,15 +76,16 @@ def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
         "lo siento, ocurrió un error",
         "no logré escuchar",
         "inconveniente técnico",
+        "horarios disponibles",
+        "deseas agendar",
+        "te gustaría agendar",
+        "por favor confirma",
+        "detalles de tu cita",
     ]
 
     for palabra in palabras_no_cacheables:
         if palabra in r_lower:
             return False
-
-    # Excluir comandos directos
-    if p_lower.startswith("/") or p_lower in ["si", "no", "1", "2", "3", "4", "cancelar"]:
-        return False
 
     return True
 

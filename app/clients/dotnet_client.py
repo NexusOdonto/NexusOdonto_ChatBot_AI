@@ -50,26 +50,32 @@ class DotNetClient:
             # Si hay credenciales de usuario configuradas, iniciar sesión contra /api/auth/login
             if self.auth_login and self.auth_password:
                 login_endpoint = f"{self._auth_url}/login"
-                try:
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        response = await client.post(
-                            login_endpoint,
-                            json={"login": self.auth_login, "password": self.auth_password},
-                            headers={"Content-Type": "application/json", "Accept": "application/json"},
-                        )
-                        if response.status_code == 200:
-                            data = response.json()
-                            token = data.get("token")
-                            if token:
-                                self._jwt_token = token
-                                logger.info("[.NET Client] Sesión autenticada exitosamente con backend .NET (JWT)")
-                                return self._jwt_token
-                        else:
-                            logger.warning(
-                                f"[.NET Client] No se pudo autenticar en {login_endpoint}: {response.status_code} - {response.text}"
+                login_candidates = [
+                    {"documentNumber": self.auth_login, "password": self.auth_password},
+                    {"login": self.auth_login, "password": self.auth_password},
+                    {"email": self.auth_login, "password": self.auth_password},
+                    {"documentNumber": "1234567890", "password": self.auth_password},
+                    {"documentNumber": "BOT-SERVICE-01", "password": self.auth_password},
+                ]
+                for payload in login_candidates:
+                    try:
+                        async with httpx.AsyncClient(timeout=self.timeout) as client:
+                            response = await client.post(
+                                login_endpoint,
+                                json=payload,
+                                headers={"Content-Type": "application/json", "Accept": "application/json"},
                             )
-                except Exception as e:
-                    logger.warning(f"[.NET Client] Error al conectar con endpoint de login ({login_endpoint}): {e}")
+                            if response.status_code == 200:
+                                data = response.json()
+                                token = data.get("token")
+                                if token:
+                                    self._jwt_token = token
+                                    logger.info("[.NET Client] Sesión autenticada exitosamente con backend .NET (JWT)")
+                                    return self._jwt_token
+                    except Exception as e:
+                        logger.debug(f"[.NET Client] Intento fallido con payload {list(payload.keys())}: {e}")
+
+                logger.warning(f"[.NET Client] No se pudo autenticar con ningún candidato en {login_endpoint}")
 
             # Fallback a token secreto estático
             return self.secret_token or ""
@@ -129,10 +135,28 @@ class DotNetClient:
                 return payload.get("items", [])
         return None
 
+    async def obtener_empleados(self) -> List[Dict[str, Any]]:
+        """Obtiene la lista de empleados activos en el backend .NET."""
+        url = f"{self.base_url}/Employees"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, list) else payload.get("items", [])
+        return []
+
+    async def obtener_personas(self) -> List[Dict[str, Any]]:
+        """Obtiene la lista de personas registradas en el backend .NET."""
+        url = f"{self.base_url}/Persons"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, list) else payload.get("items", [])
+        return []
+
     async def obtener_profesionales(
         self, especialidad_id: Optional[Any] = None
     ) -> Optional[List[Dict[str, Any]]]:
-        """Obtiene la lista de profesionales, opcionalmente filtrados por especialidad."""
+        """Obtiene la lista de profesionales enriquecidos con su nombre completo."""
         url = f"{self.base_url}/Professionals"
         params = {}
         if especialidad_id is not None:
@@ -142,10 +166,34 @@ class DotNetClient:
         response = await self._request_with_retry("GET", url, params=params if params else None)
         if response and response.status_code == 200:
             payload = response.json()
-            if isinstance(payload, list):
-                return payload
-            if isinstance(payload, dict):
-                return payload.get("items", [])
+            profs = payload if isinstance(payload, list) else payload.get("items", [])
+            if not profs:
+                return []
+
+            # Enriquecer con nombres reales consultando empleados y personas
+            try:
+                empleados = await self.obtener_empleados()
+                personas = await self.obtener_personas()
+                emp_to_person = {e.get("id"): e.get("personId") for e in empleados if isinstance(e, dict)}
+                person_names = {
+                    p.get("id"): f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
+                    for p in personas if isinstance(p, dict)
+                }
+
+                for p in profs:
+                    if isinstance(p, dict):
+                        emp_id = p.get("employeeId")
+                        per_id = emp_to_person.get(emp_id)
+                        nombre_raw = person_names.get(per_id)
+                        if nombre_raw:
+                            prefijo = "Dra." if any(n in nombre_raw.lower() for n in ["laura", "maria", "ana", "camila", "valentina", "sofia"]) else "Dr."
+                            p["name"] = f"{prefijo} {nombre_raw}"
+                            p["nombre"] = f"{prefijo} {nombre_raw}"
+                            p["nombreCompleto"] = f"{prefijo} {nombre_raw}"
+            except Exception as enh_err:
+                logger.debug(f"[.NET Client] No se pudieron enriquecer nombres de profesionales: {enh_err}")
+
+            return profs
         return None
 
     async def consultar_disponibilidad(
@@ -293,17 +341,97 @@ class DotNetClient:
             return response.json()
         return None
 
-    async def buscar_pacientes(self, search: str) -> Optional[List[Dict[str, Any]]]:
-        """Busca pacientes por teléfono, nombre o documento."""
-        url = f"{self.base_url}/Patients"
-        response = await self._request_with_retry("GET", url, params={"search": search})
+    async def obtener_appointment_status_id(self, code: str = "AGENDADA") -> str:
+        """Obtiene el ID del estado de cita por código."""
+        url = f"{self.base_url}/AppointmentStatuses"
+        response = await self._request_with_retry("GET", url)
         if response and response.status_code == 200:
-            payload = response.json()
-            if isinstance(payload, list):
-                return payload
-            if isinstance(payload, dict):
-                return payload.get("items", [])
-        return None
+            statuses = response.json() if isinstance(response.json(), list) else []
+            for s in statuses:
+                if str(s.get("code")).upper() == code.upper():
+                    return str(s.get("id"))
+        return "10000000-0000-0000-0000-000000000001"
+
+    async def obtener_appointment_origin_id(self, code: str = "AGENTE_BOT") -> str:
+        """Obtiene el ID del origen de cita por código."""
+        url = f"{self.base_url}/AppointmentOrigins"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            origins = response.json() if isinstance(response.json(), list) else []
+            for o in origins:
+                if str(o.get("code")).upper() == code.upper():
+                    return str(o.get("id"))
+        return "20000000-0000-0000-0000-000000000002"
+
+    async def buscar_pacientes(self, search: str) -> Optional[List[Dict[str, Any]]]:
+        """Busca pacientes por teléfono, nombre o documento cruzando con Personas."""
+        try:
+            url = f"{self.base_url}/Patients"
+            response = await self._request_with_retry("GET", url)
+            if not response or response.status_code != 200:
+                return None
+
+            patients = response.json() if isinstance(response.json(), list) else response.json().get("items", [])
+            if not patients:
+                return []
+
+            personas = await self.obtener_personas()
+            person_map = {p.get("id"): p for p in personas if isinstance(p, dict)}
+
+            clean_search = "".join(c for c in str(search) if c.isdigit())
+            text_search = str(search).lower().strip()
+
+            matching_patients = []
+            for pt in patients:
+                if not isinstance(pt, dict):
+                    continue
+                per_id = pt.get("personId")
+                per = person_map.get(per_id, {})
+
+                phone_digits = "".join(c for c in str(per.get("phone") or "") if c.isdigit())
+                doc_digits = "".join(c for c in str(per.get("documentNumber") or "") if c.isdigit())
+                doc_raw = str(per.get("documentNumber") or "").lower()
+                first_name = str(per.get("firstName") or "").lower()
+                last_name = str(per.get("lastName") or "").lower()
+                full_name = f"{first_name} {last_name}".strip()
+
+                # Comparación flexible por teléfono
+                matched = False
+                if clean_search and phone_digits:
+                    if clean_search.endswith(phone_digits) or phone_digits.endswith(clean_search) or clean_search in phone_digits or phone_digits in clean_search:
+                        matched = True
+
+                # Comparación flexible por documento
+                if not matched and clean_search and (clean_search == doc_digits or clean_search in doc_raw):
+                    matched = True
+
+                # Comparación por texto/nombre
+                if not matched and text_search and (text_search in full_name or full_name in text_search or text_search in doc_raw):
+                    matched = True
+
+                if matched:
+                    pt["persona"] = per
+                    pt["nombre"] = full_name
+                    pt["telefono"] = per.get("phone")
+                    pt["documento"] = per.get("documentNumber")
+                    matching_patients.append(pt)
+
+            if matching_patients:
+                return matching_patients
+
+            # Si no hubo búsqueda específica, devolver todos enriquecidos
+            if not search or not search.strip():
+                for pt in patients:
+                    per_id = pt.get("personId")
+                    per = person_map.get(per_id, {})
+                    pt["persona"] = per
+                    pt["nombre"] = f"{per.get('firstName', '')} {per.get('lastName', '')}".strip()
+                return patients
+
+            return []
+        except Exception as e:
+            logger.error(f"[.NET Client] Error buscando pacientes: {e}")
+            return None
 
     async def vincular_paciente(self, conversacion_chatbot_id: str, paciente_id: Any) -> bool:
         """Vincula un paciente a una conversación de chatbot."""
