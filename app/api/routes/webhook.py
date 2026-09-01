@@ -24,6 +24,7 @@ from app.services.registration_flow import (
     start_welcome_flow,
     process_registration_message,
     get_user_context,
+    logout_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,29 @@ ESCALAMIENTO_RE = re.compile(
 )
 
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
+
+LOGOUT_PATTERNS = {
+    "cerrar sesion",
+    "cerrar sesión",
+    "cerrar cuenta",
+    "desloguear",
+    "desloguearme",
+    "desloguearse",
+    "desconectar",
+    "desconectarme",
+    "logout",
+    "/logout",
+    "/salir",
+    "salir",
+    "cerrarsesion",
+}
+
+
+def _is_logout_request(message: str) -> bool:
+    clean = message.strip().lower()
+    if clean in LOGOUT_PATTERNS or clean == "cerrar_sesion":
+        return True
+    return any(p in clean for p in ["cerrar sesion", "cerrar sesión", "desloguear", "desloguearme"])
 
 
 def _is_reset_request(message: str) -> bool:
@@ -177,7 +201,12 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             await _reset_conversation(numero_paciente)
             return
 
-        # 2. Verificar si el usuario está en un flujo de registro/login activo
+        # 2. Verificar si el usuario solicita cerrar sesión / desloguearse
+        if _is_logout_request(mensaje_texto):
+            await logout_user(numero_paciente)
+            return
+
+        # 3. Verificar si el usuario está en un flujo de registro/login activo
         if is_in_registration_flow(numero_paciente):
             handled = await process_registration_message(numero_paciente, mensaje_texto)
             if handled:
@@ -185,17 +214,11 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 return
             # Si handled=False, el flujo completó y el mensaje debe ir al grafo normal
 
-        # 3. Verificar si el usuario NO está autenticado (primera vez o sesión perdida)
+        # 4. Si el usuario NO está autenticado (primera vez o cerró sesión)
         if not is_user_authenticated(numero_paciente):
-            # Consultar al backend si ya está registrado por teléfono
-            is_registered = await check_user_registered(numero_paciente)
-            if not is_registered:
-                # Usuario nuevo: iniciar flujo de bienvenida con botones
-                await start_welcome_flow(numero_paciente)
-                logger.info(f"[BG] Flujo de bienvenida iniciado para usuario nuevo: {numero_paciente}")
-                return
-            # Si está registrado, check_user_registered ya guardó el contexto
-            logger.info(f"[BG] Usuario reconocido por teléfono: {numero_paciente}")
+            await start_welcome_flow(numero_paciente)
+            logger.info(f"[BG] Flujo de bienvenida iniciado para usuario no autenticado: {numero_paciente}")
+            return
 
         if await _is_escalated(numero_paciente):
             # Una conversación escalada queda bajo control exclusivo del usuario.

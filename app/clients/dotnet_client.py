@@ -241,6 +241,66 @@ class DotNetClient:
             return response.json()
         return None
 
+    async def obtener_catalogo(self, nombre_catalogo: str) -> List[Dict[str, Any]]:
+        """Obtiene un catálogo genérico de la API (ej: AppointmentStatuses, DocumentTypes, Sexes, etc.)."""
+        url = f"{self.base_url}/{nombre_catalogo}"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, list) else payload.get("items", [])
+        return []
+
+    async def obtener_citas_paciente(self, patient_id: str) -> List[Dict[str, Any]]:
+        """Obtiene las citas registradas exclusivamente para un paciente específico, enriquecidas con profesional y servicio."""
+        if not patient_id:
+            return []
+        url = f"{self.base_url}/Appointments"
+        response = await self._request_with_retry("GET", url)
+        if not response or response.status_code != 200:
+            return []
+
+        payload = response.json()
+        all_citas = payload if isinstance(payload, list) else payload.get("items", [])
+        
+        # Filtrar estrictamente solo las citas del paciente dado
+        citas_paciente = [
+            c for c in all_citas
+            if str(c.get("patientId") or c.get("pacienteId", "")).lower() == str(patient_id).lower()
+        ]
+
+        if not citas_paciente:
+            return []
+
+        # Enriquecer con nombres de profesionales, servicios y estados
+        try:
+            profs = await self.obtener_profesionales() or []
+            servs = await self.obtener_servicios() or []
+            statuses = await self.obtener_catalogo("AppointmentStatuses") or []
+
+            prof_dict = {str(p.get("id")).lower(): p.get("name") or p.get("nombre") for p in profs if isinstance(p, dict)}
+            serv_dict = {str(s.get("id")).lower(): s.get("name") or s.get("nombre") for s in servs if isinstance(s, dict)}
+            status_dict = {str(st.get("id")).lower(): st.get("name") or st.get("nombre") or st.get("code") for st in statuses if isinstance(st, dict)}
+
+            for c in citas_paciente:
+                p_id = str(c.get("professionalId") or "").lower()
+                s_id = str(c.get("serviceId") or "").lower()
+                st_id = str(c.get("appointmentStatusId") or "").lower()
+
+                c["professionalName"] = prof_dict.get(p_id, "Especialista Odontológico")
+                c["serviceName"] = serv_dict.get(s_id, "Consulta Odontológica")
+                c["statusName"] = status_dict.get(st_id, "Agendada")
+        except Exception as enrich_err:
+            logger.warning(f"[.NET Client] Error enriqueciendo citas de paciente: {enrich_err}")
+
+        # Ordenar por fecha startsAt
+        try:
+            citas_paciente.sort(key=lambda x: str(x.get("startsAt") or x.get("fechaHoraInicio") or ""))
+        except Exception:
+            pass
+
+        return citas_paciente
+
+
     async def _obtener_ticket_reasons(self) -> List[Dict[str, Any]]:
         """Obtiene y cachea los motivos de ticket de soporte disponibles en .NET."""
         if self._reasons_cache:
@@ -546,6 +606,23 @@ class DotNetClient:
 
         return None
 
+    async def buscar_persona_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
+        """Busca si existe una persona registrada con el número de documento dado."""
+        if not document_number:
+            return None
+        personas = await self.obtener_personas()
+        if not personas:
+            return None
+
+        clean_doc = str(document_number).strip().lower()
+        for persona in personas:
+            if not isinstance(persona, dict):
+                continue
+            doc = str(persona.get("documentNumber") or "").strip().lower()
+            if doc == clean_doc:
+                return persona
+        return None
+
     async def buscar_paciente_por_person_id(self, person_id: str) -> Optional[Dict[str, Any]]:
         """Busca un paciente por su personId para obtener el patientId."""
         url = f"{self.base_url}/Patients"
@@ -553,7 +630,7 @@ class DotNetClient:
         if response and response.status_code == 200:
             patients = response.json() if isinstance(response.json(), list) else response.json().get("items", [])
             for pt in patients:
-                if isinstance(pt, dict) and str(pt.get("personId")) == str(person_id):
+                if isinstance(pt, dict) and str(pt.get("personId")).lower() == str(person_id).lower():
                     return pt
         return None
 

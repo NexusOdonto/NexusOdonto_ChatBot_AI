@@ -34,6 +34,7 @@ class RegistrationStep(str, Enum):
     DOC_NUMBER = "DOC_NUMBER"
     FIRST_NAME = "FIRST_NAME"
     LAST_NAME = "LAST_NAME"
+    PHONE = "PHONE"
     DATE_OF_BIRTH = "DATE_OF_BIRTH"
     SEX = "SEX"
     EMAIL = "EMAIL"
@@ -116,26 +117,38 @@ def is_user_authenticated(phone: str) -> bool:
     return _normalize_phone(phone) in _authenticated_users
 
 
+async def logout_user(phone: str) -> None:
+    """Cierra la sesión del usuario, elimina el contexto y envía mensaje de despedida."""
+    normalized = _normalize_phone(phone)
+    user_ctx = _authenticated_users.pop(normalized, None)
+    _active_registrations.pop(normalized, None)
+    
+    nombre = ""
+    if user_ctx and isinstance(user_ctx, dict):
+        nombre = user_ctx.get("firstName") or user_ctx.get("fullName") or ""
+    
+    saludo = f", *{nombre}*" if nombre else ""
+
+    await evolution_client.enviar_mensaje(
+        phone,
+        f"👋 *¡Has cerrado sesión exitosamente{saludo}!* 🦷✨\n\n"
+        "Tu sesión en *Nexus Odonto* ha finalizado de forma segura.\n\n"
+        "Cuando desees volver a ingresar, agendar una cita o consultar nuestros servicios, escríbenos nuevamente. ¡Hasta pronto! 😊"
+    )
+    logger.info(f"[Registration] Sesión cerrada para {normalized}")
+
+
+
+
 async def check_user_registered(phone: str) -> bool:
     """Consulta al backend si el teléfono ya tiene un paciente asociado."""
     try:
         persona = await dotnet_client.buscar_persona_por_telefono(phone)
         if persona:
-            # Verificar que también existe como paciente
             person_id = persona.get("id")
             if person_id:
                 paciente = await dotnet_client.buscar_paciente_por_person_id(str(person_id))
                 if paciente:
-                    # Guardar contexto automáticamente
-                    set_user_context(phone, {
-                        "personId": str(person_id),
-                        "patientId": str(paciente.get("id")),
-                        "firstName": persona.get("firstName", ""),
-                        "lastName": persona.get("lastName", ""),
-                        "fullName": f"{persona.get('firstName', '')} {persona.get('lastName', '')}".strip(),
-                        "documentNumber": persona.get("documentNumber", ""),
-                        "phone": persona.get("phone", ""),
-                    })
                     return True
         return False
     except Exception as e:
@@ -208,6 +221,8 @@ async def process_registration_message(phone: str, message: str) -> bool:
             await _handle_first_name(phone, state, texto)
         elif state.step == RegistrationStep.LAST_NAME:
             await _handle_last_name(phone, state, texto)
+        elif state.step == RegistrationStep.PHONE:
+            await _handle_phone(phone, state, texto)
         elif state.step == RegistrationStep.DATE_OF_BIRTH:
             await _handle_date_of_birth(phone, state, texto)
         elif state.step == RegistrationStep.SEX:
@@ -418,14 +433,36 @@ async def _handle_last_name(phone: str, state: RegistrationState, texto: str) ->
         return
 
     state.data["lastName"] = texto.strip().title()
-    state.step = RegistrationStep.DATE_OF_BIRTH
+    state.step = RegistrationStep.PHONE
     await evolution_client.enviar_mensaje(
         phone,
         f"✅ Apellidos: *{state.data['lastName']}*\n\n"
+        "¿Cuál es tu *número de teléfono o celular* personal de contacto?\n"
+        "(Ej: 3101234567)"
+    )
+
+
+async def _handle_phone(phone: str, state: RegistrationState, texto: str) -> None:
+    """Procesa el número de teléfono personal ingresado manualmente."""
+    phone_digits = "".join(c for c in texto if c.isdigit())
+    if len(phone_digits) < 7 or len(phone_digits) > 15:
+        await evolution_client.enviar_mensaje(
+            phone,
+            "❌ Por favor ingresa un número de teléfono válido (entre 7 y 15 dígitos numéricos).\n"
+            "Ejemplo: *3101234567*"
+        )
+        return
+
+    state.data["phone"] = phone_digits
+    state.step = RegistrationStep.DATE_OF_BIRTH
+    await evolution_client.enviar_mensaje(
+        phone,
+        f"✅ Teléfono: *{phone_digits}*\n\n"
         "¿Cuál es tu *fecha de nacimiento*?\n"
         "Escríbela en formato *DD/MM/AAAA* (Ej: 15/03/1990)\n\n"
         "Si deseas omitir este campo, escribe *omitir*."
     )
+
 
 
 async def _handle_date_of_birth(phone: str, state: RegistrationState, texto: str) -> None:
@@ -683,6 +720,7 @@ async def _show_registration_summary(phone: str, state: RegistrationState) -> No
         f"• 🆔 *Número de documento:* {data.get('documentNumber', 'N/A')}\n"
         f"• 👤 *Nombres:* {data.get('firstName', 'N/A')}\n"
         f"• 👤 *Apellidos:* {data.get('lastName', 'N/A')}\n"
+        f"• 📱 *Teléfono de contacto:* {data.get('phone', 'N/A')}\n"
         f"• 📅 *Fecha de nacimiento:* {data.get('dateOfBirth', 'No especificada')}\n"
         f"• ⚧ *Sexo:* {data.get('sexName', 'No especificado')}\n"
         f"• 📧 *Email:* {data.get('email', 'No especificado')}\n"
@@ -700,6 +738,7 @@ async def _complete_registration(phone: str, state: RegistrationState) -> None:
     """Envía los datos al backend para completar el registro."""
     normalized = _normalize_phone(phone)
     data = state.data
+    contacto_phone = data.get("phone") or normalized
 
     # Construir el payload para OnboardPatientDto
     onboard_payload = {
@@ -707,7 +746,7 @@ async def _complete_registration(phone: str, state: RegistrationState) -> None:
         "documentNumber": data.get("documentNumber", ""),
         "firstName": data.get("firstName", ""),
         "lastName": data.get("lastName", ""),
-        "phone": normalized,
+        "phone": contacto_phone,
         "password": data.get("password", ""),
         "emergencyContact": data.get("emergencyContact"),
         "emergencyPhone": data.get("emergencyPhone"),
@@ -744,7 +783,7 @@ async def _complete_registration(phone: str, state: RegistrationState) -> None:
             "lastName": data.get("lastName", ""),
             "fullName": f"{data.get('firstName', '')} {data.get('lastName', '')}".strip(),
             "documentNumber": data.get("documentNumber", ""),
-            "phone": normalized,
+            "phone": contacto_phone,
         })
 
         await evolution_client.enviar_mensaje(
@@ -754,9 +793,11 @@ async def _complete_registration(phone: str, state: RegistrationState) -> None:
             f"📄 Tu número de documento *{data.get('documentNumber', '')}* es tu identificador para iniciar sesión.\n\n"
             "Ahora puedo ayudarte con:\n"
             "• 📅 *Agendar citas*\n"
+            "• 📋 *Ver mis citas programadas*\n"
             "• 🦷 *Consultar servicios y precios*\n"
             "• 👨‍⚕️ *Conocer nuestros especialistas*\n"
-            "• 💡 *Resolver dudas sobre tratamientos*\n\n"
+            "• 💡 *Resolver dudas sobre tratamientos*\n"
+            "• 🚪 *Cerrar sesión* (escribe *cerrar sesión* cuando desees salir)\n\n"
             "¿En qué puedo ayudarte hoy? 😊"
         )
 
@@ -822,22 +863,28 @@ async def _handle_login_password(phone: str, state: RegistrationState, texto: st
 
         # Intentar obtener datos del paciente para el contexto
         token = result.get("token", "")
+        doc_number = state.data.get("loginDocNumber", "")
         user_context = {
             "token": token,
-            "documentNumber": state.data.get("loginDocNumber", ""),
+            "documentNumber": doc_number,
             "phone": normalized,
         }
 
-        # Buscar persona por teléfono para enriquecer contexto
-        persona = await dotnet_client.buscar_persona_por_telefono(phone)
+        # Buscar persona por número de documento para soportar login desde cualquier dispositivo
+        persona = await dotnet_client.buscar_persona_por_documento(doc_number)
+        if not persona:
+            persona = await dotnet_client.buscar_persona_por_telefono(phone)
+
         if persona:
+            person_id = str(persona.get("id", ""))
             user_context.update({
-                "personId": str(persona.get("id", "")),
+                "personId": person_id,
                 "firstName": persona.get("firstName", ""),
                 "lastName": persona.get("lastName", ""),
                 "fullName": f"{persona.get('firstName', '')} {persona.get('lastName', '')}".strip(),
+                "phone": persona.get("phone") or normalized,
             })
-            patient = await dotnet_client.buscar_paciente_por_person_id(str(persona.get("id", "")))
+            patient = await dotnet_client.buscar_paciente_por_person_id(person_id)
             if patient:
                 user_context["patientId"] = str(patient.get("id", ""))
 
@@ -848,13 +895,15 @@ async def _handle_login_password(phone: str, state: RegistrationState, texto: st
 
         await evolution_client.enviar_mensaje(
             phone,
-            f"🎉 *¡Sesión iniciada exitosamente{saludo}!*\n\n"
-            "¡Qué gusto tenerte de vuelta en Nexus Odonto! 🦷✨\n\n"
+            f"🎉 *¡Sesión iniciada exitosamente{saludo}!* 🦷✨\n\n"
+            "¡Qué gusto tenerte de vuelta en Nexus Odonto!\n\n"
             "¿En qué puedo ayudarte hoy? 😊\n\n"
             "• 📅 *Agendar citas*\n"
+            "• 📋 *Ver mis citas programadas*\n"
             "• 🦷 *Consultar servicios y precios*\n"
             "• 👨‍⚕️ *Conocer nuestros especialistas*\n"
-            "• 💡 *Resolver dudas sobre tratamientos*"
+            "• 💡 *Resolver dudas sobre tratamientos*\n"
+            "• 🚪 *Cerrar sesión* (escribe *cerrar sesión* cuando desees salir)"
         )
 
         _active_registrations.pop(normalized, None)

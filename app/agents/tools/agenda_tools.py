@@ -462,6 +462,116 @@ async def _consultar_servicios_impl() -> str:
         return "En este momento no podemos acceder al catálogo de servicios. Por favor intenta de nuevo más tarde."
 
 
+async def _consultar_mis_citas_impl(config: RunnableConfig) -> str:
+    """Consulta las citas del paciente actual garantizando privacidad estricta."""
+    try:
+        thread_id = config.get("configurable", {}).get("thread_id", "")
+        
+        # 1. Obtener contexto del usuario autenticado
+        paciente_id = None
+        nombre_paciente = "Paciente"
+        
+        from app.services.registration_flow import get_user_context
+        user_ctx = get_user_context(thread_id) if thread_id else None
+        
+        if user_ctx:
+            paciente_id = user_ctx.get("patientId")
+            nombre_paciente = user_ctx.get("firstName") or user_ctx.get("fullName") or "Paciente"
+            
+            # Fallback robusto si falta patientId en user_ctx
+            if not paciente_id and user_ctx.get("personId"):
+                pt = await dotnet_client.buscar_paciente_por_person_id(str(user_ctx["personId"]))
+                if pt:
+                    paciente_id = pt.get("id")
+                    user_ctx["patientId"] = str(paciente_id)
+            if not paciente_id and user_ctx.get("documentNumber"):
+                per = await dotnet_client.buscar_persona_por_documento(str(user_ctx["documentNumber"]))
+                if per:
+                    pt = await dotnet_client.buscar_paciente_por_person_id(str(per.get("id", "")))
+                    if pt:
+                        paciente_id = pt.get("id")
+                        user_ctx["patientId"] = str(paciente_id)
+            
+        if not paciente_id and thread_id:
+            clean_phone = "".join(c for c in thread_id.split("@")[0] if c.isdigit())
+            pacientes = await dotnet_client.buscar_pacientes(clean_phone)
+            if pacientes:
+                paciente_id = _obtener_valor(pacientes[0], "id", "pacienteId", "patientId")
+                nombre_paciente = _obtener_valor(pacientes[0], "firstName", "nombre", "fullName") or "Paciente"
+
+        if not paciente_id:
+            return (
+                "🔒 Para consultar tus citas programadas, necesitas tener una sesión activa.\n\n"
+                "Por favor escribe *iniciar sesión* para identificarte en el sistema."
+            )
+
+        # 2. Consultar únicamente las citas de este paciente
+        citas = await dotnet_client.obtener_citas_paciente(str(paciente_id))
+        
+        if not citas:
+            return (
+                f"📋 *Tus Citas Programadas en Nexus Odonto* 🦷✨\n\n"
+                f"Hola *{nombre_paciente}*, actualmente no tienes citas activas registradas en nuestro sistema.\n\n"
+                f"💡 ¿Te gustaría consultar nuestros especialistas o agendar una nueva cita? 😊"
+            )
+
+        # 3. Formatear las citas de manera atractiva
+        tarjetas_citas = []
+        for i, c in enumerate(citas, 1):
+            prof_nom = c.get("professionalName", "Especialista Odontológico")
+            serv_nom = c.get("serviceName", "Consulta Odontológica")
+            estado = c.get("statusName", "Agendada")
+            starts_at_raw = c.get("startsAt") or c.get("fechaHoraInicio") or ""
+            ends_at_raw = c.get("endsAt") or c.get("fechaHoraFin") or ""
+            motivo = c.get("reasonForVisit") or ""
+
+            # Formatear fechas
+            fecha_display = ""
+            hora_display = ""
+            try:
+                if starts_at_raw:
+                    clean_start = str(starts_at_raw).replace("Z", "").split(".")[0]
+                    dt_start = datetime.fromisoformat(clean_start)
+                    fecha_display = dt_start.strftime("%d/%m/%Y")
+                    hora_start_str = dt_start.strftime("%I:%M %p")
+                    
+                    if ends_at_raw:
+                        clean_end = str(ends_at_raw).replace("Z", "").split(".")[0]
+                        dt_end = datetime.fromisoformat(clean_end)
+                        hora_end_str = dt_end.strftime("%I:%M %p")
+                        hora_display = f"{hora_start_str} - {hora_end_str}"
+                    else:
+                        hora_display = hora_start_str
+            except Exception:
+                fecha_display = str(starts_at_raw)[:10]
+                hora_display = str(starts_at_raw)[11:16]
+
+            motivo_line = f"\n   • 📝 *Motivo:* {motivo}" if motivo else ""
+
+            tarjetas_citas.append(
+                f"{i}️⃣ *Cita #{i}*\n"
+                f"   • 🦷 *Tratamiento:* {serv_nom}\n"
+                f"   • 👨‍⚕️ *Especialista:* {prof_nom}\n"
+                f"   • 📅 *Fecha:* {fecha_display}\n"
+                f"   • ⏰ *Horario:* {hora_display}\n"
+                f"   • 📌 *Estado:* {estado}{motivo_line}"
+            )
+
+        return (
+            f"📋 *Tus Citas Programadas en Nexus Odonto* 🦷✨\n\n"
+            f"Paciente: *{nombre_paciente}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n\n".join(tarjetas_citas)
+            + "\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
+            f"📞 *Atención / Cambios:* +57 324 6030217\n\n"
+            f"💡 _Si deseas reprogramar o cancelar alguna de tus citas, déjanos saber con gusto._ 😊"
+        )
+    except Exception as exc:
+        logger.error(f"Error consultando citas de paciente: {exc}", exc_info=True)
+        return "Lo siento, ocurrió un problema al consultar tus citas. Por favor intenta de nuevo en unos minutos."
+
+
 @tool
 def consultar_disponibilidad_tool(especialidad: str, fecha: str) -> str:
     """
@@ -469,6 +579,16 @@ def consultar_disponibilidad_tool(especialidad: str, fecha: str) -> str:
     Usa esta herramienta cuando el usuario pregunte por horarios o citas disponibles para un servicio/especialidad (ej. ortodoncia, limpieza, profilaxis, valoración, resina).
     """
     return _run_sync(_consultar_disponibilidad_impl(especialidad, fecha))
+
+
+@tool
+def consultar_mis_citas_tool(config: RunnableConfig) -> str:
+    """
+    Consulta las citas programadas exclusivamente para el paciente autenticado actual.
+    Garantiza privacidad total: solo muestra las citas del usuario que está chateando.
+    Usa esta herramienta cuando el usuario pregunte por sus citas (ej: 'cuáles son mis citas', 'ver mis citas', 'tengo citas programadas?', 'mis citas pendientes', 'consultar mis turnos').
+    """
+    return _run_sync(_consultar_mis_citas_impl(config))
 
 
 @tool
@@ -508,3 +628,4 @@ def consultar_servicios_y_precios_tool() -> str:
     Usa esta herramienta cuando el usuario pregunte qué servicios prestan, qué tratamientos hacen, o cuánto cuestan los procedimientos.
     """
     return _run_sync(_consultar_servicios_impl())
+
