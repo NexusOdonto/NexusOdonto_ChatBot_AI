@@ -200,19 +200,35 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                 # Eliminar duplicados manteniendo orden
                 unique_slots = list(dict.fromkeys(slots))
                 if unique_slots:
-                    resultados.append(f"👨‍⚕️ {prof_nombre} (ID: {prof_id}):\n   Horarios disponibles: " + ", ".join(unique_slots))
+                    # Agrupar visualmente slots mañana y tarde
+                    manana = [s for s in unique_slots if int(s.split(":")[0]) < 12]
+                    tarde = [s for s in unique_slots if int(s.split(":")[0]) >= 12]
+                    
+                    horarios_str_list = []
+                    if manana:
+                        horarios_str_list.append(f"   🌅 *Mañana:* " + ", ".join(manana))
+                    if tarde:
+                        horarios_str_list.append(f"   🌇 *Tarde:* " + ", ".join(tarde))
+                    
+                    bloque_horarios = "\n".join(horarios_str_list) if horarios_str_list else ("   ⏰ " + ", ".join(unique_slots))
+                    resultados.append(f"👨‍⚕️ *{prof_nombre}*:\n{bloque_horarios}")
                 else:
-                    resultados.append(f"👨‍⚕️ {prof_nombre} (ID: {prof_id}): Sin atención programada para este día.")
+                    resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin turnos disponibles para esta fecha.")
             else:
-                resultados.append(f"👨‍⚕️ {prof_nombre} (ID: {prof_id}): Sin horarios disponibles.")
+                resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin horarios registrados.")
                 
         if not resultados:
-            return f"No se encontraron espacios disponibles para {esp_nombre} el día {fecha}."
+            return f"No se encontraron espacios disponibles para *{esp_nombre}* en la fecha `{fecha}`. ¿Deseas consultar otro día? 😊"
             
-        return f"Horarios disponibles para {servicio_nombre} (ID de servicio: {servicio_id}) el día {fecha}:\n\n" + "\n".join(resultados)
+        return (
+            f"📅 *Horarios Disponibles para {servicio_nombre}* ✨\n"
+            f"🗓️ *Fecha:* {fecha}\n\n"
+            + "\n\n".join(resultados)
+            + "\n\n💬 *¿Cuál de estos horarios te queda más cómodo para apartar tu cita?* 😊"
+        )
     except Exception as exc:
         logger.error(f"Error al consultar disponibilidad: {exc}", exc_info=True)
-        return "En este momento no podemos acceder a la disponibilidad de la agenda debido a problemas de conexión con el servidor. Por favor intenta de nuevo más tarde."
+        return "En este momento no podemos acceder a la disponibilidad de la agenda. Por favor intenta de nuevo en unos minutos."
 
 async def _agendar_cita_impl(
     profesional_id: Any,
@@ -282,15 +298,14 @@ async def _agendar_cita_impl(
                     await dotnet_client.vincular_paciente(thread_id, paciente_id)
 
         if not paciente_id:
-            # Fallback a pacientes registrados
             pacientes_all = await dotnet_client.buscar_pacientes("")
             if pacientes_all:
                 paciente_id = _obtener_valor(pacientes_all[0], "id", "pacienteId", "patientId")
 
         if not paciente_id:
             return (
-                "Lo siento, no pude encontrar tu número registrado como paciente en nuestra base de datos. "
-                "Por favor, facilítame tu nombre completo y número de documento para que recepción pueda registrarte."
+                "¡Hola! 👋 Para poder agendar tu cita, necesitamos registrar tus datos básicos en recepción. "
+                "¿Podrías facilitarme tu *nombre completo* y *número de documento*? Con gusto te registro de inmediato."
             )
 
         # 4. Calcular startsAt y endsAt en formato ISO 8601 UTC
@@ -346,21 +361,25 @@ async def _agendar_cita_impl(
             fecha_str = starts_dt.strftime("%Y-%m-%d") if "starts_dt" in locals() else ""
 
             return (
-                f"¡Cita agendada con éxito! 🎉\n\n"
-                f"📋 *Detalles de tu cita:*\n"
-                f"- 👨‍⚕️ *Doctor:* {prof_nombre_display}\n"
-                f"- 🦷 *Servicio:* {serv_nombre_display}\n"
-                f"- 📅 *Fecha:* {fecha_str}\n"
-                f"- ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
-                f"- 🆔 *Código de cita:* `{cita_id}`\n\n"
-                f"📍 *Ubicación:* Cr 24 #35-12, Santander (Nexus Odonto).\n"
-                f"¡Te esperamos!"
+                f"¡Cita Confirmada con Éxito! 🎉🦷✨\n\n"
+                f"Hemos reservado tu espacio en nuestra agenda médica:\n\n"
+                f"📋 *Resumen de tu Cita:*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 👨‍⚕️ *Especialista:* {prof_nombre_display}\n"
+                f"• 🦷 *Tratamiento:* {serv_nombre_display}\n"
+                f"• 📅 *Fecha:* {fecha_str}\n"
+                f"• ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
+                f"• 🆔 *Código de Cita:* `{cita_id}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
+                f"📞 *Atención:* +57 324 6030217\n\n"
+                f"💡 *Recomendación:* Por favor llega 10 minutos antes de tu hora programada. ¡Será un placer cuidar de tu sonrisa! 😊✨"
             )
         else:
-            return "Lo siento, ocurrió un problema al registrar la cita en el sistema. Es posible que el horario seleccionado ya esté ocupado o fuera del turno de atención. Por favor, elige otro horario disponible."
+            return "Lo siento, ocurrió un inconveniente al registrar la cita en el sistema. Es posible que el horario seleccionado ya esté ocupado. ¿Te gustaría intentar con otro horario disponible? 😊"
     except Exception as exc:
         logger.error(f"Error al agendar cita: {exc}", exc_info=True)
-        return "Lo siento, ocurrió un problema de conexión al registrar la cita en el sistema. Por favor, intenta de nuevo en unos minutos."
+        return "Lo siento, ocurrió un problema de conexión al registrar la cita. Por favor intenta de nuevo en unos minutos."
 
 
 async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
@@ -381,33 +400,31 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
         profesionales = await dotnet_client.obtener_profesionales(especialidad_id=esp_id) or []
         
         if profesionales:
-            nombres_prof = []
+            tarjetas_prof = []
             for p in profesionales:
-                nombre = _obtener_valor(p, "name", "nombre", "nombreCompleto")
-                if not nombre and "empleado" in p:
-                    nombre = _obtener_valor(p["empleado"], "nombreCompleto", "nombre", "name")
-                if not nombre and "persona" in p:
-                    nombre = _obtener_valor(p["persona"], "nombreCompleto", "nombre", "firstName")
-                if not nombre:
-                    p_id = _obtener_valor(p, "id", "profesionalId")
-                    nombre = f"Dr. Especialista (ID: {p_id})"
-                nombres_prof.append(f"👨‍⚕️ {nombre}")
+                nombre = _obtener_valor(p, "name", "nombre", "nombreCompleto") or "Especialista Odontológico"
+                licencia = _obtener_valor(p, "professionalLicense", "licencia", "tarjetaProfesional")
+                licencia_str = f"\n   • 🎓 *Reg. Profesional:* `{licencia}`" if licencia else ""
+                tarjetas_prof.append(f"👨‍⚕️ *{nombre}*{licencia_str}\n   • 🦷 Especialista en Odontología Integral")
             
-            if esp_nombre:
-                return f"Nuestros profesionales para {esp_nombre} son:\n" + "\n".join(nombres_prof)
-            return "Nuestros profesionales disponibles en la clínica son:\n" + "\n".join(nombres_prof)
+            titulo = f"✨ *Especialistas en {esp_nombre} en Nexus Odonto* 🦷" if esp_nombre else "✨ *Equipo Médico de Nexus Odonto* 🦷"
+            return (
+                f"{titulo}\n\n"
+                f"Contamos con profesionales de primer nivel para cuidar de tu sonrisa:\n\n"
+                + "\n\n".join(tarjetas_prof)
+                + "\n\n💡 _¿Te gustaría consultar los horarios disponibles de alguno de nuestros doctores para agendar tu cita?_ 😊"
+            )
         else:
-            # Si no hay profesionales en BD, mostramos los servicios/especialidades que sí existen
             nombres_esp = [(_obtener_valor(e, "name", "nombre") or _obtener_valor(e, "code", "codigo")) for e in especialidades]
             esp_str = ", ".join(filter(None, nombres_esp)) if nombres_esp else "Ortodoncia, Valoración General, Profilaxis y Cirugía Oral"
             return (
-                "Actualmente no tenemos doctores con turnos asignados en el sistema en este momento. "
-                f"Sin embargo, nuestra clínica Nexus Odonto cuenta con atención en las siguientes especialidades: {esp_str}. "
-                "¿Deseas consultar sobre alguno de nuestros servicios o agendar para una fecha específica?"
+                "Actualmente estamos actualizando los turnos de nuestros doctores. "
+                f"Sin embargo, nuestra clínica cuenta con atención en: *{esp_str}*.\n\n"
+                "¿Deseas consultar sobre alguno de nuestros tratamientos o tarifas? 😊"
             )
     except Exception as exc:
         logger.error(f"Error al consultar doctores: {exc}", exc_info=True)
-        return "En este momento no podemos acceder a la lista de doctores. Por favor intenta de nuevo en unos minutos."
+        return "En este momento no podemos acceder a la lista de especialistas. Por favor intenta de nuevo en unos minutos."
 
 
 async def _consultar_servicios_impl() -> str:
@@ -416,23 +433,30 @@ async def _consultar_servicios_impl() -> str:
         if not servicios:
             return "En este momento no podemos acceder a la lista de servicios. Por favor intenta de nuevo más tarde."
             
-        lineas = []
+        tarjetas = []
         for s in servicios:
             nombre = _obtener_valor(s, "name", "nombre") or "Servicio Odontológico"
-            desc = _obtener_valor(s, "description", "descripcion") or ""
+            desc = _obtener_valor(s, "description", "descripcion") or "Procedimiento odontológico especializado con tecnología avanzada."
             precio = _obtener_valor(s, "price", "precio")
             duracion = _obtener_valor(s, "durationMinutes", "duracionMinutos")
             
             detalles = []
             if duracion:
-                detalles.append(f"Duración: {duracion} min")
+                detalles.append(f"⏱️ *Duración:* {duracion} min")
             if precio:
-                detalles.append(f"Precio: ${precio:,.0f}" if isinstance(precio, (int, float)) else f"Precio: ${precio}")
+                precio_str = f"${precio:,.0f} COP" if isinstance(precio, (int, float)) else f"${precio} COP"
+                detalles.append(f"💰 *Inversión:* {precio_str}")
             
-            detalle_str = f" ({', '.join(detalles)})" if detalles else ""
-            lineas.append(f"🦷 *{nombre}*{detalle_str}: {desc}" if desc else f"🦷 *{nombre}*{detalle_str}")
+            meta_str = " | ".join(detalles) if detalles else ""
+            meta_line = f"\n   • {meta_str}" if meta_str else ""
+            tarjetas.append(f"✨ *{nombre}*{meta_line}\n   • 📝 {desc}")
             
-        return "Nuestros servicios odontológicos disponibles en Nexus Odonto son:\n\n" + "\n".join(lineas)
+        return (
+            "🦷 *Tratamientos y Servicios en Nexus Odonto* ✨\n\n"
+            "Ofrecemos atención odontológica integral de alta calidad:\n\n"
+            + "\n\n".join(tarjetas)
+            + "\n\n💬 *¿Cuál de estos tratamientos te gustaría realizarte? Con gusto verifico la disponibilidad para ti.* 😊"
+        )
     except Exception as exc:
         logger.error(f"Error al consultar servicios: {exc}", exc_info=True)
         return "En este momento no podemos acceder al catálogo de servicios. Por favor intenta de nuevo más tarde."

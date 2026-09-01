@@ -64,3 +64,46 @@ def unwrap_message_dict(raw_message: Dict[str, Any]) -> Dict[str, Any]:
         else:
             break
     return curr
+
+
+def extract_interactive_selection(unwrapped_message: Dict[str, Any]) -> Optional[str]:
+    """Extrae el texto/ID seleccionado de un mensaje interactivo (botón o lista).
+
+    Evolution API envía las respuestas de botones como buttonsResponseMessage y
+    las respuestas de listas como listResponseMessage. Esta función extrae
+    el identificador seleccionado para que el flujo de registro lo procese.
+
+    Returns:
+        El texto/ID de la opción seleccionada, o None si no es un mensaje interactivo.
+    """
+    # Respuesta a botones de WhatsApp
+    btn_response = unwrapped_message.get("buttonsResponseMessage") or unwrapped_message.get("buttonResponseMessage")
+    if isinstance(btn_response, dict):
+        # Puede venir como selectedButtonId o selectedDisplayText
+        return (
+            btn_response.get("selectedButtonId")
+            or btn_response.get("selectedDisplayText")
+            or btn_response.get("selectedId")
+            or ""
+        )
+
+    # Respuesta a listas de WhatsApp
+    list_response = unwrapped_message.get("listResponseMessage")
+    if isinstance(list_response, dict):
+        # El rowId es el identificador técnico de la opción seleccionada
+        single = list_response.get("singleSelectReply") or {}
+        return (
+            single.get("selectedRowId")
+            or list_response.get("title")
+            or list_response.get("selectedRowId")
+            or ""
+        )
+
+    # Respuesta a mensajes interactivos nativos (nativeFlowResponseMessage)
+    interactive = unwrapped_message.get("interactiveResponseMessage")
+    if isinstance(interactive, dict):
+        body = interactive.get("nativeFlowResponseMessage") or {}
+        return body.get("selectedId") or body.get("body") or ""
+
+    return None
+

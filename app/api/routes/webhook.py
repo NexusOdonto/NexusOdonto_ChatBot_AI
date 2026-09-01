@@ -3,7 +3,7 @@ import re
 import asyncio
 from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
-from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict
+from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
@@ -17,6 +17,14 @@ from app.services.audio_service import (
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
 from app.services.semantic_cache import buscar_en_cache, guardar_en_cache
+from app.services.registration_flow import (
+    is_in_registration_flow,
+    is_user_authenticated,
+    check_user_registered,
+    start_welcome_flow,
+    process_registration_message,
+    get_user_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +165,37 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
 
     Esta corutina se ejecuta desacoplada del ciclo request/response para que
     Evolution API reciba el HTTP 200 de inmediato y no genere un error de timeout.
+
+    El flujo de registro/login se intercepta ANTES del grafo LangGraph:
+    1. Si el usuario está en flujo de registro → delegar a RegistrationManager
+    2. Si NO está registrado → iniciar flujo de bienvenida
+    3. Si ya está autenticado → continuar con el grafo normal
     """
     try:
         # 1. Comandos de reinicio de conversación
         if _is_reset_request(mensaje_texto):
             await _reset_conversation(numero_paciente)
             return
+
+        # 2. Verificar si el usuario está en un flujo de registro/login activo
+        if is_in_registration_flow(numero_paciente):
+            handled = await process_registration_message(numero_paciente, mensaje_texto)
+            if handled:
+                logger.info(f"[BG] Mensaje procesado por flujo de registro: {numero_paciente}")
+                return
+            # Si handled=False, el flujo completó y el mensaje debe ir al grafo normal
+
+        # 3. Verificar si el usuario NO está autenticado (primera vez o sesión perdida)
+        if not is_user_authenticated(numero_paciente):
+            # Consultar al backend si ya está registrado por teléfono
+            is_registered = await check_user_registered(numero_paciente)
+            if not is_registered:
+                # Usuario nuevo: iniciar flujo de bienvenida con botones
+                await start_welcome_flow(numero_paciente)
+                logger.info(f"[BG] Flujo de bienvenida iniciado para usuario nuevo: {numero_paciente}")
+                return
+            # Si está registrado, check_user_registered ya guardó el contexto
+            logger.info(f"[BG] Usuario reconocido por teléfono: {numero_paciente}")
 
         if await _is_escalated(numero_paciente):
             # Una conversación escalada queda bajo control exclusivo del usuario.
@@ -191,14 +224,17 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
             return
 
-        result = await get_graph().ainvoke(
-            {
-                "messages": [HumanMessage(content=mensaje_texto)],
-                "conversation_status": "ACTIVA",
-                "rag_confidence": 1.0,
-            },
-            config,
-        )
+        # Inyectar contexto del paciente autenticado si existe
+        user_ctx = get_user_context(numero_paciente)
+        invoke_input = {
+            "messages": [HumanMessage(content=mensaje_texto)],
+            "conversation_status": "ACTIVA",
+            "rag_confidence": 1.0,
+        }
+        if user_ctx:
+            invoke_input["user_context"] = user_ctx
+
+        result = await get_graph().ainvoke(invoke_input, config)
 
         if result.get("conversation_status") == "ESCALADA":
             # Escalado inmediato (ej: triage de urgencia detectado en security_check_node)
@@ -325,9 +361,15 @@ async def receive_whatsapp_message(request: Request):
                     _process_whatsapp_unsupported_media(numero_paciente, caption)
                 )
             else:
-                # Extraer texto del mensaje
+                # Extraer texto del mensaje (incluye respuestas de botones/listas)
                 mensaje_texto = ""
-                if "conversation" in unwrapped_message and unwrapped_message["conversation"]:
+
+                # 1. Intentar extraer selección de botón/lista interactiva
+                interactive_selection = extract_interactive_selection(unwrapped_message)
+                if interactive_selection:
+                    mensaje_texto = interactive_selection
+                # 2. Texto de conversación normal
+                elif "conversation" in unwrapped_message and unwrapped_message["conversation"]:
                     mensaje_texto = unwrapped_message["conversation"]
                 elif "extendedTextMessage" in unwrapped_message:
                     ext = unwrapped_message["extendedTextMessage"]

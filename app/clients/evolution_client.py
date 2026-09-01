@@ -54,6 +54,113 @@ class EvolutionClient:
                 logger.error(f"[Evolution API] Error de conexión/timeout con Evolution API (¿contenedor apagado?): {str(e)}")
                 return None
 
+    async def enviar_botones(
+        self,
+        numero: str,
+        titulo: str,
+        descripcion: str,
+        botones: list[Dict[str, str]],
+        pie: str = "",
+        delay: int = 1200,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Envía un mensaje interactivo con botones de respuesta rápida vía Evolution API v2.
+        Endpoint: POST /message/sendButtons/{instance_name}
+
+        Cada botón es un dict con:
+          - "buttonId": identificador técnico (ej. "CC")
+          - "buttonText": {"displayText": "Cédula de Ciudadanía"}
+
+        WhatsApp permite máximo 3 botones por mensaje.
+        """
+        url = f"{self.base_url}/message/sendButtons/{self.instance_name}"
+        payload = {
+            "number": numero,
+            "options": {"delay": delay, "presence": "composing"},
+            "buttonMessage": {
+                "title": titulo,
+                "description": descripcion,
+                "footerText": pie,
+                "buttons": botones,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(url, json=payload, headers=self._get_headers())
+                response.raise_for_status()
+                logger.info(f"[Evolution API] Botones enviados exitosamente a {numero}")
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"[Evolution API] Error HTTP {e.response.status_code} al enviar botones: {e.response.text}"
+                )
+                # Fallback: enviar como texto plano con opciones numeradas
+                texto_fallback = f"*{titulo}*\n\n{descripcion}\n\n"
+                for i, b in enumerate(botones, 1):
+                    display = b.get("buttonText", {}).get("displayText", b.get("buttonId", ""))
+                    texto_fallback += f"{i}. {display}\n"
+                if pie:
+                    texto_fallback += f"\n_{pie}_"
+                return await self.enviar_mensaje(numero, texto_fallback, delay)
+            except httpx.RequestError as e:
+                logger.error(f"[Evolution API] Error de conexión al enviar botones: {str(e)}")
+                return None
+
+    async def enviar_lista(
+        self,
+        numero: str,
+        titulo: str,
+        descripcion: str,
+        texto_boton: str,
+        secciones: list[Dict[str, Any]],
+        pie: str = "",
+        delay: int = 1200,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Envía un mensaje interactivo tipo lista de selección vía Evolution API v2.
+        Endpoint: POST /message/sendList/{instance_name}
+
+        Cada sección tiene:
+          - "title": nombre de la sección
+          - "rows": [{"title": "Opción", "description": "Detalle", "rowId": "ID_TECNICO"}]
+        """
+        url = f"{self.base_url}/message/sendList/{self.instance_name}"
+        payload = {
+            "number": numero,
+            "options": {"delay": delay, "presence": "composing"},
+            "listMessage": {
+                "title": titulo,
+                "description": descripcion,
+                "footerText": pie,
+                "buttonText": texto_boton,
+                "sections": secciones,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                response = await client.post(url, json=payload, headers=self._get_headers())
+                response.raise_for_status()
+                logger.info(f"[Evolution API] Lista enviada exitosamente a {numero}")
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                logger.error(
+                    f"[Evolution API] Error HTTP {e.response.status_code} al enviar lista: {e.response.text}"
+                )
+                # Fallback: enviar como texto plano con opciones numeradas
+                texto_fallback = f"*{titulo}*\n\n{descripcion}\n\n"
+                for sec in secciones:
+                    for row in sec.get("rows", []):
+                        texto_fallback += f"• {row.get('title', '')} — {row.get('description', '')}\n"
+                if pie:
+                    texto_fallback += f"\n_{pie}_"
+                texto_fallback += f"\n\nResponde con el nombre de la opción que deseas."
+                return await self.enviar_mensaje(numero, texto_fallback, delay)
+            except httpx.RequestError as e:
+                logger.error(f"[Evolution API] Error de conexión al enviar lista: {str(e)}")
+                return None
+
     async def obtener_base64_media(self, message: Dict[str, Any], convert_to_mp4: bool = False) -> Optional[Dict[str, Any]]:
         """
         Obtiene el contenido binario/base64 de un mensaje multimedia desde Evolution API v2.

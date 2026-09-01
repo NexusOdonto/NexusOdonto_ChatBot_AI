@@ -77,7 +77,13 @@ async def enviar_recordatorios_citas() -> None:
             continue
 
         message = (
-            f"Hola {patient}, te recordamos tu cita de {service} para mañana. "
-            "Si necesitas reprogramarla o tienes alguna duda, responde a este mensaje."
+            f"¡Hola {patient}! 👋✨\n\n"
+            f"Te saludamos de *Nexus Odonto* 🦷 para recordarte tu cita programada para el día de mañana:\n\n"
+            f"📋 *Detalles de tu cita:*\n"
+            f"• 🦷 *Tratamiento:* {service}\n"
+            f"• 📍 *Sede:* Cr 24 #35-12, Santander\n"
+            f"• 📞 *Línea de atención:* +57 324 6030217\n\n"
+            f"💡 *Recomendación:* Por favor llega 10 minutos antes de tu hora.\n\n"
+            f"Si necesitas confirmar o reprogramar tu horario, ¡solo responde a este mensaje y con gusto te atenderemos! 😊✨"
         )
         await evolution_client.enviar_mensaje(phone, message)

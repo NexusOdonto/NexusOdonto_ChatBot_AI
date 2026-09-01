@@ -16,3 +16,7 @@ class AgentState(TypedDict):
 	conversation_summary: NotRequired[Optional[str]]
 	emergency_detected: NotRequired[bool]
 	emergency_reason: NotRequired[Optional[str]]
+	# Contexto del paciente autenticado (personId, patientId, nombre, etc.)
+	# Se inyecta desde el flujo de registro/login cuando el usuario está autenticado.
+	user_context: NotRequired[Optional[dict]]
+

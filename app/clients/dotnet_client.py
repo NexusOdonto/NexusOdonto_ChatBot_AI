@@ -442,6 +442,121 @@ class DotNetClient:
             return True
         return False
 
+    # ─────────────────────────────────────────────────────────────
+    # Métodos para el flujo de registro / login de pacientes
+    # ─────────────────────────────────────────────────────────────
+
+    async def obtener_tipos_documento(self) -> List[Dict[str, Any]]:
+        """Obtiene el catálogo de tipos de documento (CC, TI, CE, PP, etc.) desde .NET."""
+        url = f"{self.base_url}/DocumentTypes"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, list) else payload.get("items", [])
+        return []
+
+    async def obtener_sexos(self) -> List[Dict[str, Any]]:
+        """Obtiene el catálogo de sexos (Masculino, Femenino, Otro) desde .NET."""
+        url = f"{self.base_url}/Sexes"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            payload = response.json()
+            return payload if isinstance(payload, list) else payload.get("items", [])
+        return []
+
+    async def registrar_paciente(self, datos_onboard: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Registra un paciente completo mediante el endpoint de onboarding.
+
+        El endpoint POST /api/v1/Patients/onboard crea en una sola transacción:
+        - PersonEntity (datos personales)
+        - UserEntity (credenciales con hash BCrypt)
+        - PatientEntity (contacto de emergencia)
+        - ClinicalHistoryEntity (historial clínico vacío)
+        - UserRoleEntity (rol PACIENTE)
+
+        Args:
+            datos_onboard: dict con los campos de OnboardPatientDto:
+                documentTypeId, documentNumber, firstName, lastName,
+                dateOfBirth, sexId, phone, email, address,
+                emergencyContact, emergencyPhone, password
+        """
+        url = f"{self.base_url}/Patients/onboard"
+        response = await self._request_with_retry("POST", url, json=datos_onboard)
+        if response and response.status_code in (200, 201):
+            logger.info(f"[.NET Client] Paciente registrado exitosamente: {datos_onboard.get('documentNumber')}")
+            return response.json()
+        if response:
+            logger.warning(
+                f"[.NET Client] Error en onboarding (HTTP {response.status_code}): {response.text}"
+            )
+        return None
+
+    async def login_paciente(self, document_number: str, password: str) -> Optional[Dict[str, Any]]:
+        """Autentica un paciente mediante documento y contraseña.
+
+        Endpoint: POST /api/auth/login
+        Payload: {documentNumber, password}
+        Retorna el JWT y datos de sesión si es exitoso.
+        """
+        login_endpoint = f"{self._auth_url}/login"
+        payload = {"documentNumber": document_number, "password": password}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    login_endpoint,
+                    json=payload,
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    logger.info(f"[.NET Client] Login exitoso para documento: {document_number}")
+                    return data
+                logger.warning(
+                    f"[.NET Client] Login fallido para {document_number} (HTTP {response.status_code})"
+                )
+                return None
+        except Exception as e:
+            logger.error(f"[.NET Client] Error en login: {e}")
+            return None
+
+    async def buscar_persona_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
+        """Busca si existe una persona registrada con el teléfono dado.
+
+        Compara los últimos 10 dígitos del teléfono para manejar variaciones de formato
+        (con/sin código de país, con/sin sufijo de WhatsApp).
+        """
+        personas = await self.obtener_personas()
+        if not personas:
+            return None
+
+        # Normalizar: quedarse solo con dígitos
+        tel_digits = "".join(c for c in str(telefono) if c.isdigit())
+        # Usar últimos 10 dígitos para comparación (sin código de país)
+        tel_suffix = tel_digits[-10:] if len(tel_digits) >= 10 else tel_digits
+
+        for persona in personas:
+            if not isinstance(persona, dict):
+                continue
+            phone = persona.get("phone") or ""
+            phone_digits = "".join(c for c in str(phone) if c.isdigit())
+            phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
+
+            if tel_suffix and phone_suffix and tel_suffix == phone_suffix:
+                return persona
+
+        return None
+
+    async def buscar_paciente_por_person_id(self, person_id: str) -> Optional[Dict[str, Any]]:
+        """Busca un paciente por su personId para obtener el patientId."""
+        url = f"{self.base_url}/Patients"
+        response = await self._request_with_retry("GET", url)
+        if response and response.status_code == 200:
+            patients = response.json() if isinstance(response.json(), list) else response.json().get("items", [])
+            for pt in patients:
+                if isinstance(pt, dict) and str(pt.get("personId")) == str(person_id):
+                    return pt
+        return None
+
 
 # Instancia reutilizable para el bot y las tools
 dotnet_client = DotNetClient()
