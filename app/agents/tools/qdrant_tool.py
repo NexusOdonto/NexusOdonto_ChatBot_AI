@@ -122,11 +122,7 @@ def retrieve_clinical_knowledge(query: str) -> str:
 clinical_knowledge_tool = Tool.from_function(
 	func=retrieve_clinical_knowledge,
 	name="buscar_conocimiento_clinico",
-	description=(
-		"Busca en la base de conocimiento clinico los horarios, precios y "
-		"preparaciones de la clinica. Usa esta herramienta antes de responder "
-		"preguntas sobre esos datos."
-	),
+	description="Consulta protocolos clínicos, tratamientos, cuidados bucales y preparaciones de Nexus Odonto.",
 )
 
 

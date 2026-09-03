@@ -113,9 +113,30 @@ async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
     return False, None
 
 
+# Términos sospechosos que justifican activar el triage LLM si el regex directo no hizo match
+SUSPICIOUS_EMERGENCY_TERMS = {
+    "dolor", "sangr", "infect", "urgenc", "emerg", "hinch", "asfix", "respir",
+    "fractur", "trauma", "grave", "absces", "flemon", "arranc", "desmay",
+    "fiebre", "morir", "auxilio", "ayuda", "insoportable", "inaguantable",
+    "hemorrag", "accidente", "golpe", "partio", "parti"
+}
+
+
 async def detect_severe_emergency(text: str) -> Tuple[bool, Optional[str]]:
-    """Función principal híbrida: evalúa primero por reglas deterministas y luego por LLM si es necesario."""
+    """Función principal híbrida de alta eficiencia:
+    1. Evalúa primero por reglas deterministas (0 tokens).
+    2. Si no coincide, solo llama al LLM clasificador si el texto contiene términos clínicos o de sospecha de urgencia.
+    """
     is_emergency, reason = detect_emergency_keywords(text)
     if is_emergency:
         return True, reason
+
+    # Pre-filtro: Si el mensaje no contiene ningún indicio de urgencia (ej. "quiero una cita", "cuál es el horario"),
+    # evitamos gastar tokens llamando a OpenAI.
+    norm_text = normalize_text(text)
+    has_suspicious_term = any(term in norm_text for term in SUSPICIOUS_EMERGENCY_TERMS)
+    if not has_suspicious_term:
+        return False, None
+
     return await classify_emergency_llm(text)
+

@@ -25,12 +25,10 @@ from app.graph.state import AgentState
 logger = logging.getLogger(__name__)
 
 # Umbral de mensajes a partir del cual se activa la compresión del historial.
-# Cuando el hilo supera este valor, el nodo summarize_conversation_node
-# condensa los mensajes antiguos en un único párrafo de contexto.
-SUMMARY_THRESHOLD: int = 20
+# Mantener un umbral de 10 mensajes optimiza significativamente los tokens enviados en cada turno.
+SUMMARY_THRESHOLD: int = 10
 
 # Número de mensajes recientes que se preservan intactos después del resumen.
-# Estos mensajes son los más relevantes para el turno actual de conversación.
 RECENT_MESSAGES_KEEP: int = 4
 
 
@@ -122,6 +120,7 @@ def get_llm_with_tools():
 	llm = ChatOpenAI(
 		model=settings.openai_model,
 		temperature=0,
+		max_tokens=400,
 		api_key=settings.openai_api_key,
 	)
 	return llm.bind_tools([
@@ -191,13 +190,22 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
 		"emergency_detected": False,
 	}
 
+# Patrones rápidos de sospecha de Jailbreak / Prompt Injection
+INJECTION_PATTERNS = [
+	r"\b(ignora|olvida)\b.*\b(instruccion|regla|anterior|prompt)\b",
+	r"\b(ahora\s+eres|actua\s+como|dan\s+mode|jailbreak|developer\s+mode)\b",
+	r"\b(system\s+prompt|muestra\s+tu\s+prompt|dime\s+tu\s+prompt)\b",
+	r"\b(drop\s+table|union\s+select|exec\s*\(|<script>)\b",
+]
+
 async def security_check_node(state: AgentState, config: RunnableConfig) -> dict:
-	"""Evalúa si el último mensaje del usuario es un intento de jailbreak, prompt injection o contenido tóxico."""
+	"""Evalúa si el último mensaje del usuario es un intento de jailbreak, prompt injection o contenido malicioso.
+	Optimizado: Solo invoca LLM evaluador si se detectan patrones sospechosos en el texto (0 tokens en mensajes normales).
+	"""
 	messages = state.get("messages", [])
 	if not messages:
 		return {"conversation_status": "ACTIVA"}
 	
-	# Obtener el último mensaje del usuario
 	last_message = messages[-1]
 	if not isinstance(last_message, HumanMessage):
 		return {"conversation_status": "ACTIVA"}
@@ -205,8 +213,14 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
 	user_text = last_message.content
 	if not isinstance(user_text, str) or not user_text.strip():
 		return {"conversation_status": "ACTIVA"}
-		
-	# LLM clasificador de seguridad rápido
+
+	# Pre-filtro determinista rápido (0 tokens): Si no hay indicios de inyección, dejar pasar de inmediato
+	user_lower = user_text.lower()
+	has_suspicious_pattern = any(re.search(p, user_lower) for p in INJECTION_PATTERNS)
+	if not has_suspicious_pattern:
+		return {"conversation_status": "ACTIVA"}
+
+	# Si hay sospecha explícita, evaluar con clasificador ligero
 	evaluator_llm = ChatOpenAI(
 		model="gpt-4o-mini",
 		temperature=0,
@@ -229,7 +243,6 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
 		response = await evaluator_llm.ainvoke([SystemMessage(content=prompt)])
 		result = response.content.strip().upper()
 		if "INSEGURO" in result:
-			# Extraer thread_id
 			thread_id = config.get("configurable", {}).get("thread_id")
 			texto_bloqueo = "Solo puedo ayudarte con temas odontológicos de NexusOdonto"
 			if thread_id:
@@ -241,7 +254,6 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
 				"conversation_status": "BLOQUEADA"
 			}
 	except Exception as e:
-		# En caso de error de llamada, dejamos pasar para no bloquear al usuario legítimo.
 		pass
 		
 	return {"conversation_status": "ACTIVA"}
@@ -326,8 +338,9 @@ async def summarize_conversation_node(state: AgentState) -> dict:
 
 
 async def chatbot_node(state: AgentState) -> dict[str, list]:
-	"""Procesa el historial actual y agrega la respuesta del asistente."""
-	# Determinar la fecha y hora actual local
+	"""Procesa el historial actual y agrega la respuesta del asistente.
+	Optimizado para OpenAI Prompt Caching: el System Message permanece estable durante el día.
+	"""
 	try:
 		tz = ZoneInfo(settings.reminder_timezone)
 	except Exception:
@@ -339,9 +352,8 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 	
 	context_message = SystemMessage(
 		content=(
-			f"Fecha y hora actual: {fecha_str} ({dia_nombre}, {now.strftime('%H:%M')}). "
-			"Usa esta referencia para deducir fechas relativas (ej. 'el viernes' se refiere al próximo viernes respecto a hoy). "
-			"No hay sesión activa: cualquier persona puede escribir sin autenticarse. "
+			f"Fecha de referencia clínica: {fecha_str} ({dia_nombre}). "
+			"Usa esta referencia para deducir fechas relativas (ej. 'el viernes' se refiere al próximo viernes respecto a esta fecha). "
 			"Para gestiones de citas, el identificador del paciente es su CÉDULA (número de documento)."
 		)
 	)

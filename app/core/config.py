@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Configuración de Caché Semántico en Qdrant
     semantic_cache_enabled: bool = True
     semantic_cache_collection: str = "semantic_cache"
-    semantic_cache_threshold: float = 0.94
+    semantic_cache_threshold: float = 0.90
 
     # Configuración de las integraciones que se habilitarán más adelante.
     evolution_api_url: str = "http://localhost:8080"
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     graph_timeout_seconds: int = 60
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
     rag_min_confidence: float = 0.65
-    rag_candidate_count: int = 5
+    rag_candidate_count: int = 3
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     allowed_origins: str = "*"
 

@@ -1,31 +1,5 @@
 services:
-  oracle-db:
-    image: gvenzl/oracle-free:latest
-    container_name: odontologia_oracle
-    environment:
-      - ORACLE_PASSWORD=Admin123Password!
-      - APP_USER=odontologia_user
-      - APP_USER_PASSWORD=Odontologia123!
-    ports:
-      - "1522:1521"
-    volumes:
-      - oracle_data:/opt/oracle/oradata
-    networks:
-      - odontologia_network
 
-  # backend-api:
-  #   build:
-  #     context: ./Backend_Odontologia
-  #     dockerfile: Dockerfile
-  #   container_name: backend-api
-  #   ports:
-  #     - "5000:5000"
-  #   environment:
-  #     - ASPNETCORE_HTTP_PORTS=5000
-  #   depends_on:
-  #     - oracle-db
-  #   networks:
-  #     - odontologia_network
 
   evolution-whatsapp:
     image: evoapicloud/evolution-api:latest
@@ -113,7 +87,6 @@ services:
       - odontologia_network
 
 volumes:
-  oracle_data:
   evolution_instances:
   evolution_postgres_data:
   bot_memory_data:
