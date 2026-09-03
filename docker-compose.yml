@@ -71,6 +71,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-3.5-turbo}
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=CLAVE_SECRETA_ODONTO_2026

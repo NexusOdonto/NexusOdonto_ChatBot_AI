@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # Configuración del modelo de lenguaje y del modelo de embeddings.
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o"
+    openai_model: str = "gpt-3.5-turbo"
     embedding_model: str = "text-embedding-3-small"
 
     # Datos de conexión y configuración de la colección vectorial de Qdrant.
