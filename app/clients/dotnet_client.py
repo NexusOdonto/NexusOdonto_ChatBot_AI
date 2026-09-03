@@ -634,6 +634,111 @@ class DotNetClient:
                     return pt
         return None
 
+    async def buscar_citas_por_cedula(self, cedula: str) -> List[Dict[str, Any]]:
+        """Busca todas las citas de un paciente identificado por su número de cédula.
+        
+        Flujo:
+        1. Buscar la persona por documento.
+        2. Encontrar el paciente asociado a esa persona.
+        3. Retornar sus citas enriquecidas.
+        """
+        persona = await self.buscar_persona_por_documento(cedula)
+        if not persona:
+            return []
+        person_id = persona.get("id")
+        if not person_id:
+            return []
+        paciente = await self.buscar_paciente_por_person_id(str(person_id))
+        if not paciente:
+            return []
+        patient_id = paciente.get("id")
+        if not patient_id:
+            return []
+        return await self.obtener_citas_paciente(str(patient_id))
+
+    async def cancelar_cita(self, cita_id: str) -> bool:
+        """Cancela una cita por su ID usando PATCH con el estado CANCELADA.
+        
+        Intenta PATCH primero. Si el backend no lo soporta, intenta PUT.
+        Retorna True si la operación fue exitosa.
+        """
+        status_id = await self.obtener_appointment_status_id("CANCELADA")
+        payload = {"appointmentStatusId": str(status_id), "status": "CANCELADA"}
+        url = f"{self.base_url}/Appointments/{cita_id}"
+        response = await self._request_with_retry("PATCH", url, json=payload)
+        if response and response.status_code in (200, 204):
+            logger.info(f"[.NET Client] Cita {cita_id} cancelada exitosamente")
+            return True
+        # Fallback: intentar PUT con payload completo si PATCH no funciona
+        response_put = await self._request_with_retry("PUT", url, json=payload)
+        if response_put and response_put.status_code in (200, 204):
+            logger.info(f"[.NET Client] Cita {cita_id} cancelada (vía PUT)")
+            return True
+        logger.warning(f"[.NET Client] No se pudo cancelar la cita {cita_id} "
+                       f"(PATCH: {response.status_code if response else 'None'})")
+        return False
+
+    async def modificar_cita(self, cita_id: str, datos_actualizacion: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Modifica los campos de una cita existente (fecha, horario, profesional, etc.).
+        
+        Intenta PATCH primero, luego PUT como fallback.
+        """
+        url = f"{self.base_url}/Appointments/{cita_id}"
+        response = await self._request_with_retry("PATCH", url, json=datos_actualizacion)
+        if response and response.status_code in (200, 204):
+            logger.info(f"[.NET Client] Cita {cita_id} modificada exitosamente")
+            try:
+                return response.json() if response.content else datos_actualizacion
+            except Exception:
+                return datos_actualizacion
+        # Fallback PUT
+        response_put = await self._request_with_retry("PUT", url, json=datos_actualizacion)
+        if response_put and response_put.status_code in (200, 204):
+            logger.info(f"[.NET Client] Cita {cita_id} modificada (vía PUT)")
+            try:
+                return response_put.json() if response_put.content else datos_actualizacion
+            except Exception:
+                return datos_actualizacion
+        logger.warning(f"[.NET Client] No se pudo modificar la cita {cita_id} "
+                       f"(PATCH: {response.status_code if response else 'None'})")
+        return None
+
+    async def crear_paciente_basico(self, cedula: str, nombre: str, telefono_whatsapp: str) -> Optional[Dict[str, Any]]:
+        """Crea un paciente con datos mínimos cuando la cédula no existe en el sistema.
+        
+        Usa el endpoint de onboarding con un password generado automáticamente.
+        El teléfono de WhatsApp se registra como contacto del paciente.
+        """
+        # Separar nombre en partes (primer nombre y apellidos)
+        partes = nombre.strip().split()
+        first_name = partes[0].title() if partes else "Paciente"
+        last_name = " ".join(partes[1:]).title() if len(partes) > 1 else "Sin Apellido"
+
+        # Limpiar teléfono WA (quitar @s.whatsapp.net y código de país si es necesario)
+        clean_phone = "".join(c for c in str(telefono_whatsapp).split("@")[0] if c.isdigit())
+        if len(clean_phone) > 10:
+            clean_phone = clean_phone[-10:]  # Quedarse con los últimos 10 dígitos
+
+        # Obtener primer tipo de documento disponible (CC por defecto)
+        doc_types = await self.obtener_tipos_documento()
+        doc_type_id = None
+        for dt in doc_types:
+            if (dt.get("code") or "").upper() == "CC":
+                doc_type_id = str(dt.get("id", ""))
+                break
+        if not doc_type_id and doc_types:
+            doc_type_id = str(doc_types[0].get("id", ""))
+
+        payload = {
+            "documentTypeId": doc_type_id or "",
+            "documentNumber": str(cedula).strip(),
+            "firstName": first_name,
+            "lastName": last_name,
+            "phone": clean_phone,
+            "password": f"Bot{cedula[-4:]}2024!",  # Password temporal
+        }
+        return await self.registrar_paciente(payload)
+
 
 # Instancia reutilizable para el bot y las tools
 dotnet_client = DotNetClient()

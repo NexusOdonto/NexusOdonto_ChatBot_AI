@@ -4,8 +4,10 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from app.agents.tools.qdrant_tool import clinical_knowledge_tool
 from app.agents.tools.agenda_tools import (
 	consultar_disponibilidad_tool,
-	consultar_mis_citas_tool,
 	agendar_cita_tool,
+	consultar_cita_por_cedula_tool,
+	cancelar_cita_tool,
+	modificar_cita_tool,
 	consultar_doctores_tool,
 	consultar_servicios_y_precios_tool,
 )
@@ -68,8 +70,10 @@ def create_graph(checkpointer: BaseCheckpointSaver) -> None:
 		ToolNode([
 			clinical_knowledge_tool,
 			consultar_disponibilidad_tool,
-			consultar_mis_citas_tool,
 			agendar_cita_tool,
+			consultar_cita_por_cedula_tool,
+			cancelar_cita_tool,
+			modificar_cita_tool,
 			consultar_doctores_tool,
 			consultar_servicios_y_precios_tool,
 		]),

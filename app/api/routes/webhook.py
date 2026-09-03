@@ -17,15 +17,6 @@ from app.services.audio_service import (
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
 from app.services.semantic_cache import buscar_en_cache, guardar_en_cache
-from app.services.registration_flow import (
-    is_in_registration_flow,
-    is_user_authenticated,
-    check_user_registered,
-    start_welcome_flow,
-    process_registration_message,
-    get_user_context,
-    logout_user,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -55,36 +46,13 @@ ESCALAMIENTO_RE = re.compile(
 
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
 
-LOGOUT_PATTERNS = {
-    "cerrar sesion",
-    "cerrar sesión",
-    "cerrar cuenta",
-    "desloguear",
-    "desloguearme",
-    "desloguearse",
-    "desconectar",
-    "desconectarme",
-    "logout",
-    "/logout",
-    "/salir",
-    "salir",
-    "cerrarsesion",
-}
-
-
-def _is_logout_request(message: str) -> bool:
-    clean = message.strip().lower()
-    if clean in LOGOUT_PATTERNS or clean == "cerrar_sesion":
-        return True
-    return any(p in clean for p in ["cerrar sesion", "cerrar sesión", "desloguear", "desloguearme"])
-
 
 def _is_reset_request(message: str) -> bool:
     return message.strip().lower() in COMMANDS_RESET
 
 
 async def _reset_conversation(phone_number: str) -> None:
-    # 1. Purgar checkpoints de PostgreSQL directamente para ese thread_id
+    # Purgar checkpoints de PostgreSQL directamente para ese thread_id
     checkpointer = get_checkpointer_instance()
     if checkpointer:
         await checkpointer.clear_thread(phone_number)
@@ -190,10 +158,8 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
     Esta corutina se ejecuta desacoplada del ciclo request/response para que
     Evolution API reciba el HTTP 200 de inmediato y no genere un error de timeout.
 
-    El flujo de registro/login se intercepta ANTES del grafo LangGraph:
-    1. Si el usuario está en flujo de registro → delegar a RegistrationManager
-    2. Si NO está registrado → iniciar flujo de bienvenida
-    3. Si ya está autenticado → continuar con el grafo normal
+    El flujo es directo: el mensaje va al grafo LangGraph sin requerir autenticación previa.
+    El número de WhatsApp (numero_paciente) es el identificador de la conversación.
     """
     try:
         # 1. Comandos de reinicio de conversación
@@ -201,38 +167,19 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             await _reset_conversation(numero_paciente)
             return
 
-        # 2. Verificar si el usuario solicita cerrar sesión / desloguearse
-        if _is_logout_request(mensaje_texto):
-            await logout_user(numero_paciente)
-            return
-
-        # 3. Verificar si el usuario está en un flujo de registro/login activo
-        if is_in_registration_flow(numero_paciente):
-            handled = await process_registration_message(numero_paciente, mensaje_texto)
-            if handled:
-                logger.info(f"[BG] Mensaje procesado por flujo de registro: {numero_paciente}")
-                return
-            # Si handled=False, el flujo completó y el mensaje debe ir al grafo normal
-
-        # 4. Si el usuario NO está autenticado (primera vez o cerró sesión)
-        if not is_user_authenticated(numero_paciente):
-            await start_welcome_flow(numero_paciente)
-            logger.info(f"[BG] Flujo de bienvenida iniciado para usuario no autenticado: {numero_paciente}")
-            return
-
+        # 2. Verificar si la conversación ya fue escalada a un asesor humano
         if await _is_escalated(numero_paciente):
-            # Una conversación escalada queda bajo control exclusivo del usuario.
             logger.info(f"[BG] Mensaje ignorado – conversación escalada: {numero_paciente}")
             return
 
+        # 3. Detectar solicitud explícita de hablar con un asesor
         if _is_escalation_request(mensaje_texto):
-            # La solicitud explícita se atiende sin pasarla por el LLM.
             await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             return
 
         config = get_thread_config(numero_paciente)
 
-        # 2. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
+        # 4. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
         cached_response = await buscar_en_cache(mensaje_texto)
         if cached_response:
             logger.info(f"[Semantic Cache] Respondiendo desde caché a {numero_paciente}")
@@ -247,20 +194,19 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
             return
 
-        # Inyectar contexto del paciente autenticado si existe
-        user_ctx = get_user_context(numero_paciente)
+        # 5. Invocar el grafo LangGraph directamente (sin requerir sesión autenticada)
+        # El numero_paciente (número WA) se propaga como thread_id en config para que
+        # las herramientas de citas puedan usarlo como teléfono de referencia del paciente.
         invoke_input = {
             "messages": [HumanMessage(content=mensaje_texto)],
             "conversation_status": "ACTIVA",
             "rag_confidence": 1.0,
         }
-        if user_ctx:
-            invoke_input["user_context"] = user_ctx
 
         result = await get_graph().ainvoke(invoke_input, config)
 
         if result.get("conversation_status") == "ESCALADA":
-            # Escalado inmediato (ej: triage de urgencia detectado en security_check_node)
+            # Escalado inmediato (ej: triage de urgencia detectado en emergency_check_node)
             messages = result.get("messages", [])
             if messages:
                 last_message = messages[-1]
@@ -275,7 +221,7 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
             return
 
-        # Enviar la respuesta del bot al paciente por WhatsApp si no está bloqueada
+        # 6. Enviar la respuesta del bot al paciente por WhatsApp
         # (ya se envió en el nodo de seguridad cuando conversation_status == "BLOQUEADA").
         if result.get("conversation_status") != "BLOQUEADA":
             messages = result.get("messages", [])
@@ -284,7 +230,7 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 if isinstance(last_message, AIMessage) and last_message.content:
                     respuesta_texto = str(last_message.content)
                     await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
-                    # 3. Guardar en Caché Semántico si la respuesta es informativa
+                    # Guardar en Caché Semántico si la respuesta es informativa
                     asyncio.create_task(guardar_en_cache(mensaje_texto, respuesta_texto))
                 else:
                     logger.warning(

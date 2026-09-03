@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from app.security.webhook_signature import is_valid_webhook_signature, restore_request_body
+
 from app.agents.tools.qdrant_tool import initialize_qdrant
 from app.core.config import settings
 from app.services.appointment_reminders import enviar_recordatorios_citas
