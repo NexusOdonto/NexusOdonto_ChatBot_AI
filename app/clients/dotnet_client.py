@@ -51,11 +51,7 @@ class DotNetClient:
             if self.auth_login and self.auth_password:
                 login_endpoint = f"{self._auth_url}/login"
                 login_candidates = [
-                    {"documentNumber": self.auth_login, "password": self.auth_password},
-                    {"login": self.auth_login, "password": self.auth_password},
-                    {"email": self.auth_login, "password": self.auth_password},
-                    {"documentNumber": "1234567890", "password": self.auth_password},
-                    {"documentNumber": "BOT-SERVICE-01", "password": self.auth_password},
+                    {"loginId": self.auth_login, "password": self.auth_password},
                 ]
                 for payload in login_candidates:
                     try:
@@ -230,6 +226,10 @@ class DotNetClient:
         response = await self._request_with_retry("POST", url, json=datos_cita)
         if response and response.status_code in (200, 201):
             return response.json()
+        if response:
+            logger.warning(
+                f"[.NET Client] Error creando cita (HTTP {response.status_code}): {response.text[:500]}"
+            )
         return None
 
     async def consultar_citas(self, fecha: str) -> Optional[Any]:
@@ -656,52 +656,92 @@ class DotNetClient:
             return []
         return await self.obtener_citas_paciente(str(patient_id))
 
-    async def cancelar_cita(self, cita_id: str) -> bool:
-        """Cancela una cita por su ID usando PATCH con el estado CANCELADA.
+    async def cancelar_cita(self, cita_id: str, datos_cita: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Cancela una cita por su ID usando PUT con el estado CANCELADA.
         
-        Intenta PATCH primero. Si el backend no lo soporta, intenta PUT.
-        Retorna True si la operación fue exitosa.
+        El backend usa CrudControllerBase que expone PUT (no PATCH).
+        Retorna un dict con success y mensaje de error si aplica.
         """
         status_id = await self.obtener_appointment_status_id("CANCELADA")
-        payload = {"appointmentStatusId": str(status_id), "status": "CANCELADA"}
+        
+        # Si no se pasó datos_cita o faltan fechas, intentar obtener la cita del backend
+        if not datos_cita or not datos_cita.get("startsAt"):
+            try:
+                resp = await self._request_with_retry("GET", f"{self.base_url}/Appointments/{cita_id}")
+                if resp and resp.status_code == 200:
+                    datos_cita = resp.json()
+            except Exception as e:
+                logger.debug(f"[.NET Client] No se pudo obtener la cita {cita_id}: {e}")
+
+        datos_cita = datos_cita or {}
+        starts_at = datos_cita.get("startsAt") or datos_cita.get("fechaHoraInicio") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        ends_at = datos_cita.get("endsAt") or datos_cita.get("fechaHoraFin") or (datetime.utcnow() + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        payload: Dict[str, Any] = {
+            "professionalId": str(datos_cita.get("professionalId") or "00000000-0000-0000-0000-000000000000"),
+            "serviceId": str(datos_cita.get("serviceId") or "00000000-0000-0000-0000-000000000000"),
+            "startsAt": starts_at,
+            "endsAt": ends_at,
+            "appointmentStatusId": str(status_id),
+            "appointmentOriginId": str(datos_cita.get("appointmentOriginId") or "20000000-0000-0000-0000-000000000002"),
+            "reasonForVisit": datos_cita.get("reasonForVisit") or "Cancelada vía Chatbot",
+            "notes": datos_cita.get("notes"),
+            "cancellationReason": "Cancelada por el paciente vía chatbot",
+        }
+
         url = f"{self.base_url}/Appointments/{cita_id}"
-        response = await self._request_with_retry("PATCH", url, json=payload)
+        response = await self._request_with_retry("PUT", url, json=payload)
         if response and response.status_code in (200, 204):
             logger.info(f"[.NET Client] Cita {cita_id} cancelada exitosamente")
-            return True
-        # Fallback: intentar PUT con payload completo si PATCH no funciona
-        response_put = await self._request_with_retry("PUT", url, json=payload)
-        if response_put and response_put.status_code in (200, 204):
-            logger.info(f"[.NET Client] Cita {cita_id} cancelada (vía PUT)")
-            return True
-        logger.warning(f"[.NET Client] No se pudo cancelar la cita {cita_id} "
-                       f"(PATCH: {response.status_code if response else 'None'})")
-        return False
+            return {"success": True}
+        
+        error_msg = "Error desconocido al cancelar la cita"
+        if response is not None:
+            try:
+                err_json = response.json()
+                error_msg = err_json.get("message") or err_json.get("title") or response.text[:300]
+            except Exception:
+                error_msg = response.text[:300]
+            logger.warning(
+                f"[.NET Client] No se pudo cancelar la cita {cita_id} "
+                f"(HTTP {response.status_code}): {error_msg}"
+            )
+            return {"success": False, "status_code": response.status_code, "error": error_msg}
+        else:
+            logger.warning(f"[.NET Client] No se pudo cancelar la cita {cita_id} (sin respuesta)")
+            return {"success": False, "status_code": None, "error": "No hubo respuesta del servidor"}
 
-    async def modificar_cita(self, cita_id: str, datos_actualizacion: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def modificar_cita(self, cita_id: str, datos_actualizacion: Dict[str, Any]) -> Dict[str, Any]:
         """Modifica los campos de una cita existente (fecha, horario, profesional, etc.).
         
-        Intenta PATCH primero, luego PUT como fallback.
+        El backend usa CrudControllerBase que expone PUT, por lo que se usa PUT directamente.
+        Retorna un dict con success, data y error si aplica.
         """
         url = f"{self.base_url}/Appointments/{cita_id}"
-        response = await self._request_with_retry("PATCH", url, json=datos_actualizacion)
+        response = await self._request_with_retry("PUT", url, json=datos_actualizacion)
         if response and response.status_code in (200, 204):
             logger.info(f"[.NET Client] Cita {cita_id} modificada exitosamente")
             try:
-                return response.json() if response.content else datos_actualizacion
+                data = response.json() if response.content else datos_actualizacion
             except Exception:
-                return datos_actualizacion
-        # Fallback PUT
-        response_put = await self._request_with_retry("PUT", url, json=datos_actualizacion)
-        if response_put and response_put.status_code in (200, 204):
-            logger.info(f"[.NET Client] Cita {cita_id} modificada (vía PUT)")
+                data = datos_actualizacion
+            return {"success": True, "data": data}
+        
+        error_msg = "Error desconocido al modificar la cita"
+        if response is not None:
             try:
-                return response_put.json() if response_put.content else datos_actualizacion
+                err_json = response.json()
+                error_msg = err_json.get("message") or err_json.get("title") or response.text[:300]
             except Exception:
-                return datos_actualizacion
-        logger.warning(f"[.NET Client] No se pudo modificar la cita {cita_id} "
-                       f"(PATCH: {response.status_code if response else 'None'})")
-        return None
+                error_msg = response.text[:300]
+            logger.warning(
+                f"[.NET Client] No se pudo modificar la cita {cita_id} "
+                f"(HTTP {response.status_code}): {error_msg}"
+            )
+            return {"success": False, "status_code": response.status_code, "error": error_msg}
+        else:
+            logger.warning(f"[.NET Client] No se pudo modificar la cita {cita_id} (sin respuesta)")
+            return {"success": False, "status_code": None, "error": "No hubo respuesta del servidor"}
 
     async def crear_paciente_basico(self, cedula: str, nombre: str, telefono_whatsapp: str) -> Optional[Dict[str, Any]]:
         """Crea un paciente con datos mínimos cuando la cédula no existe en el sistema.

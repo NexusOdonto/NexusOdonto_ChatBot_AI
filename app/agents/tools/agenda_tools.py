@@ -477,40 +477,57 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
         return "Lo siento, ocurrió un problema al consultar tus citas. Por favor intenta de nuevo en unos minutos."
 
 
-async def _cancelar_cita_impl(cedula: str, cita_id: str) -> str:
+async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str:
     """Cancela una cita verificando primero que la cédula corresponda al paciente dueño de la cita."""
     try:
-        cedula = cedula.strip()
-        cita_id = cita_id.strip()
+        cedula = (cedula or "").strip()
+        cita_id = (cita_id or "").strip()
 
-        if not cedula or not cita_id:
-            return (
-                "Para cancelar una cita necesito:\n"
-                "• Tu *número de cédula* 🆔\n"
-                "• El *ID de la cita* (lo puedes ver consultando tus citas con tu cédula)\n\n"
-                "¿Me puedes proporcionar esos datos? 😊"
-            )
+        if not cedula:
+            return "Para cancelar tu cita, necesito tu *número de cédula* 🆔. ¿Me la puedes indicar? 😊"
 
-        # Verificar que la cita pertenece al paciente con esa cédula
+        # Obtener citas del paciente
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
-        cita_encontrada = None
-        for c in (citas or []):
-            c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
-            if c_id == cita_id.lower():
-                cita_encontrada = c
-                break
-
-        if not cita_encontrada:
+        if not citas:
             return (
-                f"❌ No encontré una cita con ID `{cita_id}` registrada para la cédula *{cedula}*.\n\n"
-                "Verifica el ID de la cita consultando tus citas con:\n"
-                "*'Consulta mis citas con cédula {cedula}'* 📋\n\n"
-                "¿Deseas que te muestre tus citas actuales? 😊"
+                f"📋 *Consulta de Citas* 🦷✨\n\n"
+                f"No encontré citas activas registradas para la cédula *{cedula}*.\n\n"
+                "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
             )
 
-        # Obtener información de la cita para mostrar en el resumen
-        prof_nom = cita_encontrada.get("professionalName", "Especialista")
-        serv_nom = cita_encontrada.get("serviceName", "Consulta")
+        # Filtrar citas activas (no canceladas)
+        citas_activas = [c for c in citas if str(c.get("statusName", "")).lower() != "cancelada"]
+        if not citas_activas:
+            return f"Todas las citas registradas para la cédula *{cedula}* ya se encuentran canceladas o atendidas. 😊"
+
+        cita_encontrada = None
+        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
+            for c in citas_activas:
+                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
+                if c_id == cita_id.lower():
+                    cita_encontrada = c
+                    break
+
+        # Si no se especificó ID o no coincidió pero solo hay 1 cita activa, seleccionarla automáticamente
+        if not cita_encontrada:
+            if len(citas_activas) == 1:
+                cita_encontrada = citas_activas[0]
+            else:
+                # Mostrar lista para que el paciente elija
+                opciones = []
+                for i, c in enumerate(citas_activas, 1):
+                    cid = c.get("id") or c.get("citaId")
+                    s_raw = c.get("startsAt") or ""
+                    opciones.append(f"{i}️⃣ Cita del `{str(s_raw)[:10]}` — ID: `{cid}`")
+                return (
+                    f"Tienes varias citas activas registradas con la cédula *{cedula}*:\n\n"
+                    + "\n".join(opciones)
+                    + "\n\n¿Cuál de estas citas deseas cancelar? Indícame el ID o la fecha. 😊"
+                )
+
+        target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
+        prof_nom = cita_encontrada.get("professionalName", "Especialista Odontológico")
+        serv_nom = cita_encontrada.get("serviceName", "Consulta Odontológica")
         starts_at_raw = cita_encontrada.get("startsAt") or ""
         fecha_display = str(starts_at_raw)[:10]
         try:
@@ -521,10 +538,10 @@ async def _cancelar_cita_impl(cedula: str, cita_id: str) -> str:
         except Exception:
             pass
 
-        # Realizar la cancelación
-        exito = await dotnet_client.cancelar_cita(cita_id)
+        # Realizar la cancelación enviando la info completa
+        resultado = await dotnet_client.cancelar_cita(target_id, cita_encontrada)
 
-        if exito:
+        if resultado.get("success"):
             return (
                 f"✅ *Cita Cancelada Exitosamente* 🦷\n\n"
                 f"📋 *Resumen de la Cita Cancelada:*\n"
@@ -533,57 +550,79 @@ async def _cancelar_cita_impl(cedula: str, cita_id: str) -> str:
                 f"• 👨‍⚕️ *Especialista:* {prof_nom}\n"
                 f"• 🦷 *Tratamiento:* {serv_nom}\n"
                 f"• 📅 *Fecha y Hora:* {fecha_display}\n"
-                f"• 🔑 *ID de Cita:* `{cita_id}`\n"
+                f"• 🔑 *ID de Cita:* `{target_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Tu cita ha sido cancelada. Si deseas reagendar en otro horario, con gusto te ayudo. 😊\n"
                 f"📞 *Atención:* +57 324 6030217"
             )
         else:
+            err = resultado.get("error", "")
             return (
-                f"⚠️ No fue posible cancelar la cita `{cita_id}` en este momento.\n\n"
-                "Por favor intenta de nuevo en unos minutos o comunícate directamente con recepción:\n"
-                "📞 *+57 324 6030217* 😊"
+                f"⚠️ No fue posible cancelar la cita `{target_id}` en este momento.\n\n"
+                f"Detalle: {err}\n"
+                "Por favor intenta de nuevo o comunícate con recepción al *+57 324 6030217*. 😊"
             )
     except Exception as exc:
-        logger.error(f"Error cancelando cita {cita_id} para cédula {cedula}: {exc}", exc_info=True)
+        logger.error(f"Error cancelando cita para cédula {cedula}: {exc}", exc_info=True)
         return "Lo siento, ocurrió un problema al cancelar la cita. Por favor intenta de nuevo o llama a recepción."
 
 
 async def _modificar_cita_impl(
     cedula: str,
-    cita_id: str,
     nueva_fecha_hora: str,
-    nuevo_profesional_id: Optional[str],
-    config: RunnableConfig,
+    cita_id: Optional[str] = None,
+    nuevo_profesional_id: Optional[str] = None,
 ) -> str:
     """Modifica la fecha/horario (y opcionalmente el profesional) de una cita existente."""
     try:
-        cedula = cedula.strip()
-        cita_id = cita_id.strip()
+        cedula = (cedula or "").strip()
+        cita_id = (cita_id or "").strip()
+        nueva_fecha_hora = (nueva_fecha_hora or "").strip()
 
-        if not cedula or not cita_id or not nueva_fecha_hora:
+        if not cedula or not nueva_fecha_hora:
             return (
-                "Para modificar una cita necesito:\n"
+                "Para reprogramar tu cita necesito:\n"
                 "• Tu *número de cédula* 🆔\n"
-                "• El *ID de la cita* a modificar\n"
-                "• La *nueva fecha y horario* deseado (ej: 2025-08-15T10:00:00)\n\n"
+                "• La *nueva fecha y horario* deseado (ej: 2026-09-04 14:00)\n\n"
                 "¿Me puedes proporcionar esos datos? 😊"
             )
 
-        # Verificar que la cita pertenece al paciente
+        # Buscar citas del paciente
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
+        if not citas:
+            return (
+                f"❌ No encontré ninguna cita activa registrada para la cédula *{cedula}*.\n\n"
+                "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
+            )
+
+        citas_activas = [c for c in citas if str(c.get("statusName", "")).lower() != "cancelada"]
+        if not citas_activas:
+            return f"No tienes citas activas para reprogramar con la cédula *{cedula}*. ¿Deseas agendar una nueva cita? 😊"
+
         cita_encontrada = None
-        for c in (citas or []):
-            c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
-            if c_id == cita_id.lower():
-                cita_encontrada = c
-                break
+        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
+            for c in citas_activas:
+                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
+                if c_id == cita_id.lower():
+                    cita_encontrada = c
+                    break
 
         if not cita_encontrada:
-            return (
-                f"❌ No encontré una cita con ID `{cita_id}` registrada para la cédula *{cedula}*.\n\n"
-                "Consulta tus citas con tu cédula para obtener el ID correcto. 📋"
-            )
+            if len(citas_activas) == 1:
+                cita_encontrada = citas_activas[0]
+            else:
+                opciones = []
+                for i, c in enumerate(citas_activas, 1):
+                    cid = c.get("id") or c.get("citaId")
+                    s_raw = c.get("startsAt") or ""
+                    opciones.append(f"{i}️⃣ Cita del `{str(s_raw)[:10]}` — ID: `{cid}`")
+                return (
+                    f"Tienes varias citas activas con la cédula *{cedula}*:\n\n"
+                    + "\n".join(opciones)
+                    + "\n\n¿Cuál de estas citas deseas reprogramar? Indícame el ID o la fecha. 😊"
+                )
+
+        target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
 
         # Calcular nuevas fechas
         try:
@@ -594,7 +633,7 @@ async def _modificar_cita_impl(
         except Exception:
             return (
                 f"❌ No pude interpretar la fecha '{nueva_fecha_hora}'.\n"
-                "Por favor usa el formato: *YYYY-MM-DD HH:MM* (ej: 2025-08-15 10:00)"
+                "Por favor usa el formato: *YYYY-MM-DD HH:MM* (ej: 2026-09-04 14:00)"
             )
 
         # Determinar duración del servicio actual
@@ -611,27 +650,34 @@ async def _modificar_cita_impl(
         starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Construir payload de actualización
-        datos_actualizacion: Dict[str, Any] = {
-            "startsAt": starts_at_iso,
-            "endsAt": ends_at_iso,
-        }
-
-        # Si se solicita cambio de profesional
+        # Determinar profesional
         prof_nombre_display = cita_encontrada.get("professionalName", "Especialista")
-        if nuevo_profesional_id:
+        resolved_prof_id = cita_encontrada.get("professionalId")
+        if nuevo_profesional_id and str(nuevo_profesional_id).strip():
             profs = await dotnet_client.obtener_profesionales() or []
             for p in profs:
                 p_name = _normalizar_texto(p.get("name") or "")
-                norm_target = _normalizar_texto(nuevo_profesional_id)
-                if str(p.get("id")).lower() == nuevo_profesional_id.lower() or (norm_target and norm_target in p_name):
-                    datos_actualizacion["professionalId"] = str(p.get("id"))
+                norm_target = _normalizar_texto(str(nuevo_profesional_id))
+                if str(p.get("id")).lower() == str(nuevo_profesional_id).lower() or (norm_target and norm_target in p_name):
+                    resolved_prof_id = str(p.get("id"))
                     prof_nombre_display = p.get("name", prof_nombre_display)
                     break
 
-        resultado = await dotnet_client.modificar_cita(cita_id, datos_actualizacion)
+        # Construir payload completo de actualización
+        datos_actualizacion: Dict[str, Any] = {
+            "professionalId": str(resolved_prof_id or "00000000-0000-0000-0000-000000000000"),
+            "serviceId": str(serv_id or "00000000-0000-0000-0000-000000000000"),
+            "startsAt": starts_at_iso,
+            "endsAt": ends_at_iso,
+            "appointmentStatusId": str(cita_encontrada.get("appointmentStatusId") or "10000000-0000-0000-0000-000000000001"),
+            "appointmentOriginId": str(cita_encontrada.get("appointmentOriginId") or "20000000-0000-0000-0000-000000000002"),
+            "reasonForVisit": cita_encontrada.get("reasonForVisit") or "Reprogramada por el paciente",
+            "notes": cita_encontrada.get("notes") or "Reprogramado por Nexus Odonto Chatbot",
+        }
 
-        if resultado is not None:
+        resultado = await dotnet_client.modificar_cita(target_id, datos_actualizacion)
+
+        if resultado.get("success"):
             fecha_display = starts_dt.strftime("%d/%m/%Y")
             hora_display = f"{starts_dt.strftime('%I:%M %p')} - {ends_dt.strftime('%I:%M %p')}"
 
@@ -643,19 +689,35 @@ async def _modificar_cita_impl(
                 f"• 👨‍⚕️ *Especialista:* {prof_nombre_display}\n"
                 f"• 📅 *Nueva Fecha:* {fecha_display}\n"
                 f"• ⏰ *Nuevo Horario:* {hora_display}\n"
-                f"• 🔑 *ID de Cita:* `{cita_id}`\n"
+                f"• 🔑 *ID de Cita:* `{target_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Por favor llega 10 minutos antes de tu hora programada. ¡Hasta pronto! 😊\n"
                 f"📞 *Atención:* +57 324 6030217"
             )
         else:
-            return (
-                f"⚠️ No fue posible reprogramar la cita `{cita_id}` en este momento.\n\n"
-                "Por favor intenta de nuevo o comunícate con recepción:\n"
-                "📞 *+57 324 6030217* 😊"
-            )
+            err_msg = str(resultado.get("error") or "").lower()
+            hora_req = starts_dt.strftime('%I:%M %p')
+            fecha_req = starts_dt.strftime('%Y-%m-%d')
+
+            if "availability" in err_msg or "outside" in err_msg or resultado.get("status_code") == 409:
+                return (
+                    f"⚠️ El horario solicitado (*{hora_req}* del `{fecha_req}`) no está disponible para {prof_nombre_display}.\n\n"
+                    "💡 Puede deberse al receso de almuerzo (12:00 PM a 1:00 PM) o a que está fuera de su turno de atención.\n"
+                    "Por favor consulta los horarios disponibles o elige otra hora (ej. 8:00 AM - 11:30 AM o 1:00 PM - 4:30 PM). 😊"
+                )
+            elif "overlap" in err_msg or "already has" in err_msg:
+                return (
+                    f"⚠️ {prof_nombre_display} ya tiene otra cita programada a las *{hora_req}*.\n\n"
+                    "Por favor elige otro horario disponible para apartar tu turno. 😊"
+                )
+            else:
+                return (
+                    f"⚠️ No fue posible reprogramar la cita `{target_id}` en este momento.\n\n"
+                    f"Detalle: {resultado.get('error')}\n"
+                    "Por favor intenta de nuevo o comunícate con recepción: *+57 324 6030217* 😊"
+                )
     except Exception as exc:
-        logger.error(f"Error modificando cita {cita_id} para cédula {cedula}: {exc}", exc_info=True)
+        logger.error(f"Error modificando cita para cédula {cedula}: {exc}", exc_info=True)
         return "Lo siento, ocurrió un problema al modificar la cita. Por favor intenta de nuevo o llama a recepción."
 
 
@@ -794,17 +856,15 @@ def consultar_cita_por_cedula_tool(cedula: str) -> str:
 
 
 @tool
-def cancelar_cita_tool(cedula: str, cita_id: str) -> str:
+def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     """
-    Cancela una cita existente verificando que la cédula corresponda al titular de la cita.
+    Cancela una cita activa de un paciente verificando su cédula.
     
     Parámetros:
-    - cedula: Número de cédula del paciente (para verificar identidad).
-    - cita_id: ID único de la cita a cancelar (se obtiene consultando las citas con la cédula).
+    - cedula: Número de cédula o documento de identidad del paciente (OBLIGATORIO).
+    - cita_id: (Opcional) ID de la cita a cancelar. Si el paciente tiene solo una cita activa, el sistema la identificará automáticamente.
     
-    Usa esta herramienta cuando el usuario quiera cancelar una cita.
-    Si no tienes el ID de la cita, primero usa consultar_cita_por_cedula_tool para obtenerlo.
-    Siempre pide confirmación explícita antes de cancelar.
+    Usa esta herramienta SOLAMENTE tras haber confirmado con el usuario que realmente desea cancelar su cita.
     """
     return _run_sync(_cancelar_cita_impl(cedula, cita_id))
 
@@ -812,25 +872,23 @@ def cancelar_cita_tool(cedula: str, cita_id: str) -> str:
 @tool
 def modificar_cita_tool(
     cedula: str,
-    cita_id: str,
     nueva_fecha_hora: str,
-    config: RunnableConfig,
+    cita_id: Optional[str] = None,
     nuevo_profesional_id: Optional[str] = None,
 ) -> str:
     """
-    Modifica la fecha, horario o profesional de una cita existente.
+    Reprograma una cita existente a una nueva fecha y horario (y opcionalmente con otro doctor).
     
     Parámetros:
-    - cedula: Número de cédula del paciente (para verificar identidad).
-    - cita_id: ID único de la cita a modificar.
-    - nueva_fecha_hora: Nueva fecha y hora en formato 'YYYY-MM-DD HH:MM' (ej: '2025-08-20 10:00').
+    - cedula: Número de cédula del paciente (OBLIGATORIO).
+    - nueva_fecha_hora: Nueva fecha y hora en formato ISO 8601 o 'YYYY-MM-DD HH:MM' (ej: '2026-09-04 14:00').
+    - cita_id: (Opcional) ID de la cita a modificar. Si el paciente solo tiene una cita activa, el sistema la detectará automáticamente.
     - nuevo_profesional_id: (Opcional) ID o nombre del nuevo profesional si desea cambiarlo.
     
-    Usa esta herramienta cuando el usuario quiera reprogramar una cita.
-    Si no tienes el ID de la cita, primero usa consultar_cita_por_cedula_tool para obtenerlo.
-    Siempre presenta la propuesta de cambio y pide confirmación antes de modificar.
+    IMPORTANTE: Antes de proponer o confirmar un nuevo horario, consulta SIEMPRE la disponibilidad con consultar_disponibilidad_tool para asegurar que el especialista no esté en horario de almuerzo (ej. 12:00 PM a 1:00 PM) ni fuera de turno.
+    Usa esta herramienta SOLAMENTE después de presentar la propuesta de cambio y obtener confirmación explícita del usuario.
     """
-    return _run_sync(_modificar_cita_impl(cedula, cita_id, nueva_fecha_hora, nuevo_profesional_id, config))
+    return _run_sync(_modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id))
 
 
 @tool
