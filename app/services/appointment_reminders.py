@@ -87,3 +87,12 @@ async def enviar_recordatorios_citas() -> None:
             f"Si necesitas confirmar o reprogramar tu horario, ¡solo responde a este mensaje y con gusto te atenderemos! 😊✨"
         )
         await evolution_client.enviar_mensaje(phone, message)
+        # Persistir el recordatorio enviado en la base de datos Oracle
+        try:
+            await dotnet_client.registrar_mensaje(
+                chat_identifier=phone,
+                rol="CHATBOT",
+                contenido=message,
+            )
+        except Exception as msg_err:
+            logger.debug("No se pudo persistir el mensaje de recordatorio para %s: %s", phone, msg_err)
