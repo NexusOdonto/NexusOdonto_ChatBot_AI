@@ -743,41 +743,173 @@ class DotNetClient:
             logger.warning(f"[.NET Client] No se pudo modificar la cita {cita_id} (sin respuesta)")
             return {"success": False, "status_code": None, "error": "No hubo respuesta del servidor"}
 
-    async def crear_paciente_basico(self, cedula: str, nombre: str, telefono_whatsapp: str) -> Optional[Dict[str, Any]]:
-        """Crea un paciente con datos mínimos cuando la cédula no existe en el sistema.
+    # -------------------------------------------------------------
+    # GESTIÓN DE CONVERSACIONES Y MENSAJES (ORACLE DB VIA .NET API)
+    # -------------------------------------------------------------
+    CHANNEL_WHATSAPP: str = "90000000-0000-0000-0000-000000000001"
+    CHANNEL_TELEGRAM: str = "90000000-0000-0000-0000-000000000002"
+    CHANNEL_WEBCHAT: str = "90000000-0000-0000-0000-000000000003"
+
+    ROLE_USUARIO: str = "a0000000-0000-0000-0000-000000000001"
+    ROLE_CHATBOT: str = "a0000000-0000-0000-0000-000000000002"
+    ROLE_AGENTE_HUMANO: str = "a0000000-0000-0000-0000-000000000003"
+    ROLE_SISTEMA: str = "a0000000-0000-0000-0000-000000000004"
+
+    STATUS_ACTIVA: str = "b0000000-0000-0000-0000-000000000001"
+    STATUS_ESCALADA: str = "b0000000-0000-0000-0000-000000000002"
+    STATUS_ATENDIDA_HUMANO: str = "b0000000-0000-0000-0000-000000000003"
+    STATUS_CERRADA: str = "b0000000-0000-0000-0000-000000000004"
+
+    _conversations_cache: Dict[str, str] = {}
+
+    async def obtener_o_crear_conversacion(
+        self,
+        chat_identifier: str,
+        channel_id: Optional[str] = None,
+        patient_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Obtiene el ID de una conversación activa o crea una nueva en el backend .NET / Oracle.
         
-        Usa el endpoint de onboarding con un password generado automáticamente.
-        El teléfono de WhatsApp se registra como contacto del paciente.
+        Mantiene una caché en memoria para evitar llamadas redundantes de búsqueda.
         """
-        # Separar nombre en partes (primer nombre y apellidos)
-        partes = nombre.strip().split()
-        first_name = partes[0].title() if partes else "Paciente"
-        last_name = " ".join(partes[1:]).title() if len(partes) > 1 else "Sin Apellido"
+        ident = str(chat_identifier).strip()
+        if not ident:
+            return None
 
-        # Limpiar teléfono WA (quitar @s.whatsapp.net y código de país si es necesario)
-        clean_phone = "".join(c for c in str(telefono_whatsapp).split("@")[0] if c.isdigit())
-        if len(clean_phone) > 10:
-            clean_phone = clean_phone[-10:]  # Quedarse con los últimos 10 dígitos
+        # 1. Verificar caché en memoria
+        if ident in self._conversations_cache:
+            return self._conversations_cache[ident]
 
-        # Obtener primer tipo de documento disponible (CC por defecto)
-        doc_types = await self.obtener_tipos_documento()
-        doc_type_id = None
-        for dt in doc_types:
-            if (dt.get("code") or "").upper() == "CC":
-                doc_type_id = str(dt.get("id", ""))
-                break
-        if not doc_type_id and doc_types:
-            doc_type_id = str(doc_types[0].get("id", ""))
+        # 2. Consultar conversaciones existentes en el backend .NET
+        url_get = f"{self.base_url}/ChatbotConversations"
+        resp = await self._request_with_retry("GET", url_get)
+        if resp and resp.status_code == 200:
+            try:
+                items = resp.json()
+                if isinstance(items, dict):
+                    items = items.get("items", [])
+                for conv in items:
+                    if (
+                        str(conv.get("chatIdentifier", "")).strip() == ident
+                        and not conv.get("closedAt")
+                    ):
+                        conv_id = str(conv.get("id"))
+                        self._conversations_cache[ident] = conv_id
+                        logger.info(f"[.NET Client] Conversación activa recuperada para {ident}: {conv_id}")
+                        return conv_id
+            except Exception as e:
+                logger.debug(f"[.NET Client] Error parseando conversaciones existentes: {e}")
 
+        # 3. Si no se especificó patient_id, intentar buscar si el teléfono pertenece a un paciente registrado
+        if not patient_id:
+            try:
+                persona = await self.buscar_persona_por_telefono(ident)
+                if persona and persona.get("id"):
+                    paciente = await self.buscar_paciente_por_person_id(str(persona["id"]))
+                    if paciente and paciente.get("id"):
+                        patient_id = str(paciente["id"])
+            except Exception as pat_err:
+                logger.debug(f"[.NET Client] No se pudo autovincular paciente por teléfono: {pat_err}")
+
+        # 4. Si no existe conversación activa, crear una nueva
         payload = {
-            "documentTypeId": doc_type_id or "",
-            "documentNumber": str(cedula).strip(),
-            "firstName": first_name,
-            "lastName": last_name,
-            "phone": clean_phone,
-            "password": f"Bot{cedula[-4:]}2024!",  # Password temporal
+            "chatIdentifier": ident,
+            "chatChannelId": channel_id or self.CHANNEL_WHATSAPP,
+            "patientId": patient_id,
         }
-        return await self.registrar_paciente(payload)
+        resp_post = await self._request_with_retry("POST", url_get, json=payload)
+        if resp_post and resp_post.status_code in (200, 201):
+            try:
+                data = resp_post.json()
+                conv_id = str(data.get("id"))
+                if conv_id:
+                    self._conversations_cache[ident] = conv_id
+                    logger.info(f"[.NET Client] Nueva conversación creada en DB para {ident}: {conv_id}")
+                    return conv_id
+            except Exception as e:
+                logger.error(f"[.NET Client] Error parseando respuesta de creación de conversación: {e}")
+
+        logger.warning(f"[.NET Client] No se pudo crear/obtener conversación en DB para {ident}")
+        return None
+
+    async def guardar_mensaje_conversacion(
+        self,
+        conversation_id: str,
+        rol: str,
+        contenido: str,
+        rag_confidence: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Guarda un mensaje en la tabla chatbot_messages de la base de datos vía el endpoint de .NET."""
+        if not conversation_id or not contenido:
+            return None
+
+        # Resolver el MessageRoleId según el rol
+        rol_upper = str(rol).upper().strip()
+        if rol_upper in ("USUARIO", "USER", "HUMAN"):
+            role_id = self.ROLE_USUARIO
+        elif rol_upper in ("CHATBOT", "ASSISTANT", "BOT"):
+            role_id = self.ROLE_CHATBOT
+        elif rol_upper in ("AGENTE_HUMANO", "ASESOR", "HUMAN_AGENT"):
+            role_id = self.ROLE_AGENTE_HUMANO
+        else:
+            role_id = self.ROLE_SISTEMA
+
+        url = f"{self.base_url}/ChatbotMessages"
+        payload = {
+            "chatbotConversationId": conversation_id,
+            "messageRoleId": role_id,
+            "content": str(contenido).strip(),
+            "ragConfidence": float(rag_confidence) if rag_confidence is not None else None,
+        }
+
+        resp = await self._request_with_retry("POST", url, json=payload)
+        if resp and resp.status_code in (200, 201):
+            try:
+                data = resp.json()
+                logger.info(f"[.NET Client] Mensaje ({rol_upper}) guardado en DB para conv {conversation_id}")
+                return data
+            except Exception:
+                return payload
+        else:
+            status = resp.status_code if resp else "Sin respuesta"
+            logger.warning(f"[.NET Client] No se pudo guardar mensaje ({rol_upper}) en DB (HTTP {status})")
+            return None
+
+    async def registrar_mensaje(
+        self,
+        chat_identifier: str,
+        rol: str,
+        contenido: str,
+        rag_confidence: Optional[float] = None,
+        patient_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Registra un mensaje asegurando que la conversación exista en base de datos.
+        
+        Obtiene o crea la conversación en Oracle y luego inserta el mensaje en chatbot_messages.
+        """
+        try:
+            if not contenido or not str(contenido).strip():
+                return None
+            conv_id = await self.obtener_o_crear_conversacion(
+                chat_identifier=chat_identifier,
+                patient_id=patient_id,
+            )
+            if not conv_id:
+                logger.warning(f"[.NET Client] No se pudo obtener/crear conversación para {chat_identifier}")
+                return None
+            return await self.guardar_mensaje_conversacion(
+                conversation_id=conv_id,
+                rol=rol,
+                contenido=contenido,
+                rag_confidence=rag_confidence,
+            )
+        except Exception as e:
+            logger.error(f"[.NET Client] Error registrando mensaje para {chat_identifier}: {e}")
+            return None
+
+    def limpiar_cache_conversacion(self, chat_identifier: str) -> None:
+        """Limpia el ID en caché cuando la conversación se reinicia."""
+        self._conversations_cache.pop(str(chat_identifier).strip(), None)
 
 
 # Instancia reutilizable para el bot y las tools
