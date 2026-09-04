@@ -146,40 +146,75 @@ async def extraer_bytes_audio(raw_payload_data: Dict[str, Any], raw_message: Dic
 
 async def transcribir_audio(audio_bytes: bytes, mimetype: str = "audio/ogg") -> Optional[str]:
     """
-    Transcribe los bytes de audio a texto usando OpenAI Whisper (whisper-1).
-    Configurado en español y con contexto léxico de la clínica Nexus Odonto.
+    Transcribe los bytes de audio a texto usando Gemini Multimodal o OpenAI Whisper
+    según el proveedor configurado.
     """
-    if not settings.openai_api_key:
-        logger.error("[Audio Service] No hay OPENAI_API_KEY configurada para transcribir audios.")
-        return None
+    prov = (settings.llm_provider or "openai").lower().strip()
 
-    # Determinar extensión apropiada
-    ext = "ogg"
-    if "mp4" in mimetype:
-        ext = "m4a"
-    elif "mpeg" in mimetype or "mp3" in mimetype:
-        ext = "mp3"
-    elif "wav" in mimetype:
-        ext = "wav"
+    # 1. Si el proveedor activo es Gemini o si hay clave de Gemini y no de OpenAI
+    if (prov == "gemini" and settings.gemini_api_key) or (not settings.openai_api_key.startswith("sk-") and settings.gemini_api_key):
+        try:
+            import asyncio
+            import google.generativeai as genai
 
-    filename = f"audio.{ext}"
+            genai.configure(api_key=settings.gemini_api_key)
+            model_name = "gemini-1.5-flash" if "flash" in settings.gemini_model else settings.gemini_model
+            model = genai.GenerativeModel(model_name)
+            clean_mime = mimetype.split(";")[0].strip() if mimetype else "audio/ogg"
+            prompt = (
+                "Transcribe el siguiente audio exactamente como se escucha en español. "
+                "Contexto: consultorio odontológico Nexus Odonto (citas, doctores, tratamientos, ortodoncia, etc.). "
+                "No agregues comentarios ni formato adicional, únicamente devuelve el texto transcrito."
+            )
+            logger.info(f"[Audio Service] Transcribiendo audio ({len(audio_bytes)} bytes) con Gemini ({model_name})...")
 
-    try:
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-        audio_file = io.BytesIO(audio_bytes)
-        audio_file.name = filename
+            response = await asyncio.to_thread(
+                model.generate_content,
+                [
+                    {"mime_type": clean_mime, "data": audio_bytes},
+                    prompt,
+                ],
+            )
+            texto = (response.text or "").strip()
+            logger.info(f"[Audio Service] Transcripción exitosa con Gemini: '{texto}'")
+            return texto
+        except Exception as exc:
+            logger.error(f"[Audio Service] Error al transcribir con Gemini: {exc}", exc_info=True)
+            if not settings.openai_api_key:
+                return None
 
-        logger.info(f"[Audio Service] Enviando audio ({len(audio_bytes)} bytes, {filename}) a Whisper...")
-        transcription = await client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            language="es",
-            prompt="Nexus Odonto, consultorio odontológico, citas, doctores, tratamientos, limpieza, ortodoncia, endodoncia, diseño de sonrisa, implantes."
-        )
+    # 2. Si hay clave válida de OpenAI
+    if settings.openai_api_key and settings.openai_api_key.startswith("sk-"):
+        # Determinar extensión apropiada
+        ext = "ogg"
+        if "mp4" in mimetype:
+            ext = "m4a"
+        elif "mpeg" in mimetype or "mp3" in mimetype:
+            ext = "mp3"
+        elif "wav" in mimetype:
+            ext = "wav"
 
-        texto = transcription.text.strip()
-        logger.info(f"[Audio Service] Transcripción exitosa: '{texto}'")
-        return texto
-    except Exception as e:
-        logger.error(f"[Audio Service] Error al transcribir audio con Whisper: {e}", exc_info=True)
-        return None
+        filename = f"audio.{ext}"
+
+        try:
+            client = AsyncOpenAI(api_key=settings.openai_api_key)
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = filename
+
+            logger.info(f"[Audio Service] Enviando audio ({len(audio_bytes)} bytes, {filename}) a Whisper...")
+            transcription = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                language="es",
+                prompt="Nexus Odonto, consultorio odontológico, citas, doctores, tratamientos, limpieza, ortodoncia, endodoncia, diseño de sonrisa, implantes."
+            )
+
+            texto = transcription.text.strip()
+            logger.info(f"[Audio Service] Transcripción exitosa con Whisper: '{texto}'")
+            return texto
+        except Exception as e:
+            logger.error(f"[Audio Service] Error al transcribir audio con Whisper: {e}", exc_info=True)
+            return None
+
+    logger.error("[Audio Service] No hay API Key válida para transcribir notas de voz (OpenAI o Gemini).")
+    return None

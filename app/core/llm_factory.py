@@ -65,6 +65,7 @@ def get_chat_llm(
             google_api_key=settings.gemini_api_key,
             temperature=temperature,
             max_output_tokens=max_tokens,
+            max_retries=1,
         )
 
     # Proveedor por defecto: OpenAI
@@ -89,8 +90,7 @@ def get_evaluator_llm(provider: Optional[str] = None) -> BaseChatModel:
     """Retorna un modelo ligero y rápido para tareas de clasificación, triage y compresión."""
     active_provider = (provider or settings.llm_provider or "openai").lower().strip()
     if active_provider == "gemini":
-        # Usar el modelo configurado de Gemini o 3.6-flash por defecto
-        target = settings.gemini_model if "flash" in settings.gemini_model else "gemini-3.6-flash"
+        target = settings.gemini_model if "flash" in settings.gemini_model else "gemini-1.5-flash"
         return get_chat_llm(model=target, temperature=0.0, provider="gemini")
     else:
         return get_chat_llm(model="gpt-4o-mini", temperature=0.0, provider="openai")

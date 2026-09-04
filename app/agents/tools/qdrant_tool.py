@@ -48,8 +48,32 @@ def get_vector_store() -> QdrantVectorStore:
 
 
 def _ensure_collection(client: QdrantClient) -> None:
-	# Crea la colección solo si todavía no existe en Qdrant.
-	if not client.collection_exists(settings.qdrant_collection_name):
+	# Crea la colección solo si todavía no existe en Qdrant o si cambió la dimensión del modelo
+	if client.collection_exists(settings.qdrant_collection_name):
+		try:
+			info = client.get_collection(settings.qdrant_collection_name)
+			vectors_config = info.config.params.vectors
+			existing_size = getattr(vectors_config, "size", None)
+			if existing_size is None and isinstance(vectors_config, dict):
+				first_val = next(iter(vectors_config.values()), None)
+				existing_size = getattr(first_val, "size", None)
+
+			if existing_size is not None and existing_size != settings.embedding_dimension:
+				logger.warning(
+					f"[Qdrant] Dimensión incompatible detectada ({existing_size} != {settings.embedding_dimension}). "
+					f"Recreando colección '{settings.qdrant_collection_name}'..."
+				)
+				client.delete_collection(settings.qdrant_collection_name)
+				client.create_collection(
+					collection_name=settings.qdrant_collection_name,
+					vectors_config=models.VectorParams(
+						size=settings.embedding_dimension,
+						distance=models.Distance.COSINE,
+					),
+				)
+		except Exception as exc:
+			logger.warning(f"[Qdrant] Error validando dimensiones de colección: {exc}")
+	else:
 		client.create_collection(
 			collection_name=settings.qdrant_collection_name,
 			vectors_config=models.VectorParams(
@@ -103,7 +127,9 @@ def retrieve_clinical_knowledge(query: str) -> str:
 				key=lambda item: float(item[1]),
 				reverse=True,
 			)
-			best_confidence = _score_to_confidence(float(ranked_documents[0][1]))
+			cosine_confidence = float(documents_with_scores[0][1]) if documents_with_scores else 0.0
+			reranker_confidence = _score_to_confidence(float(ranked_documents[0][1]))
+			best_confidence = max(cosine_confidence, reranker_confidence)
 			content = "\n\n".join(document.page_content for document, _ in ranked_documents)
 		else:
 			# Fallback a similitud coseno directa de Qdrant (normalizada 0..1)
@@ -116,12 +142,13 @@ def retrieve_clinical_knowledge(query: str) -> str:
 		return "[RAG_SCORE:0.0]\nNo fue posible acceder a la base de conocimiento clinico en este momento debido a problemas de conexion."
 
 
+from langchain_core.tools import tool
+
 # Herramienta que LangGraph puede incluir junto con sus demás herramientas.
-clinical_knowledge_tool = Tool.from_function(
-	func=retrieve_clinical_knowledge,
-	name="buscar_conocimiento_clinico",
-	description="Consulta protocolos clínicos, tratamientos, cuidados bucales y preparaciones de Nexus Odonto.",
-)
+@tool("buscar_conocimiento_clinico")
+def clinical_knowledge_tool(query: str) -> str:
+	"""Consulta protocolos clínicos, tratamientos, cuidados bucales y preparaciones de Nexus Odonto."""
+	return retrieve_clinical_knowledge(query)
 
 
 def initialize_qdrant() -> None:

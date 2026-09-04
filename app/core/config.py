@@ -14,23 +14,29 @@ class Settings(BaseSettings):
     port: int = 8000 # Puerto de la aplicación
 
     # Configuración del modelo de lenguaje y del modelo de embeddings.
-    llm_provider: str = "gemini"  # Opciones: "openai" o "gemini"
+    llm_provider: str = Field(
+        default="gemini",
+        validation_alias=AliasChoices("LLM_PROVIDER", "AI_PROVIDER"),
+    )
     openai_api_key: str = ""
     openai_model: str = "gpt-3.5-turbo"
     gemini_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
-    gemini_model: str = "gemini-3.5-flash-lite"
-    embedding_provider: str = "openai"  # Opciones: "openai" o "gemini"
+    gemini_model: str = "gemini-3.1-flash-lite"
+    embedding_provider: str = Field(
+        default="gemini",
+        validation_alias=AliasChoices("EMBEDDING_PROVIDER"),
+    )
     embedding_model: str = "text-embedding-3-small"
-    gemini_embedding_model: str = "models/text-embedding-004"
+    gemini_embedding_model: str = "models/gemini-embedding-001"
 
     # Datos de conexión y configuración de la colección vectorial de Qdrant.
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
     qdrant_collection_name: str = "conocimiento_clinico"
-    embedding_dimension: int = 1536
+    embedding_dimension: int = 3072
 
     # Configuración de Caché Semántico en Qdrant
     semantic_cache_enabled: bool = True
@@ -98,13 +104,23 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
-    def _validate_production_requirements(self) -> "Settings":
-        # En producción se valida la clave del proveedor que esté configurado.
+    def _validate_settings(self) -> "Settings":
+        prov = (self.llm_provider or "openai").lower().strip()
+        emb_prov = (self.embedding_provider or "openai").lower().strip()
+
+        # Sincronizar dimensiones según el proveedor de embeddings
+        if emb_prov == "gemini":
+            if self.embedding_dimension in (1536, 768):
+                self.embedding_dimension = 3072
+        elif emb_prov == "openai":
+            if self.embedding_dimension in (3072, 768):
+                self.embedding_dimension = 1536
+
+        # En producción se valida la clave del proveedor que esté configurado
         if self.app_env.lower() == "production":
-            provider = (self.llm_provider or "openai").lower()
-            if provider == "gemini" and not self.gemini_api_key:
+            if prov == "gemini" and not self.gemini_api_key:
                 raise ValueError("GEMINI_API_KEY es obligatoria en producción cuando LLM_PROVIDER='gemini'")
-            elif provider == "openai" and not self.openai_api_key:
+            elif prov == "openai" and not self.openai_api_key:
                 raise ValueError("OPENAI_API_KEY es obligatoria en producción cuando LLM_PROVIDER='openai'")
         return self
 

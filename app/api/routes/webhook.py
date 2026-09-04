@@ -245,19 +245,19 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}",
             exc_info=True,
         )
-        # Solo si el grafo falló por completo y no hay respuesta, se genera una salida amigable
+        # Si el flujo falló por completo (ej. indisponibilidad de red), se envía mensaje amigable de contingencia
         try:
-            from langchain_core.messages import SystemMessage
-            from app.core.llm_factory import get_chat_llm, extract_text_content
-            emergency_llm = get_chat_llm(temperature=0.7)
-            resp = await emergency_llm.ainvoke([
-                SystemMessage(content="Eres el asistente virtual exclusivo de Nexus Odonto. Solo responde sobre temas odontológicos o pide que nos contacte al +57 324 6030217. Si te preguntan sobre temas no relacionados con la odontología, rehúsa amablemente indicando que solo atiendes consultas de la clínica odontológica."),
-                HumanMessage(content=mensaje_texto)
-            ])
-            await evolution_client.enviar_mensaje(numero_paciente, extract_text_content(resp.content))
+            fallback_msg = (
+                "¡Hola! 👋 En este momento estamos experimentando una alta demanda en nuestro sistema digital.\n\n"
+                "Para consultar disponibilidad, agendar citas o atender cualquier duda, puedes comunicarte directamente con nuestro equipo:\n"
+                "📞 *WhatsApp / Teléfono:* +57 324 6030217\n"
+                "📍 *Consultorio:* Cr 24 #35-12, Santander\n"
+                "⏰ *Horario:* Lunes a Sábado de 8:00 AM a 6:00 PM\n\n"
+                "¡Con gusto te atenderemos! 😊🦷"
+            )
+            await evolution_client.enviar_mensaje(numero_paciente, fallback_msg)
         except Exception as e:
-            logger.error(f"Error crítico en fallback: {e}")
-            pass
+            logger.error(f"[Webhook] Error enviando mensaje de contingencia a {numero_paciente}: {e}")
 
 
 @router.post("/whatsapp")
