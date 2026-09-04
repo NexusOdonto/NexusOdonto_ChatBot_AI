@@ -113,9 +113,7 @@ SYSTEM_MESSAGE = SystemMessage(
 
 @lru_cache(maxsize=1)
 def get_llm_with_tools():
-	# Obtiene el LLM según el proveedor configurado (OpenAI o Gemini)
-	llm = get_chat_llm(temperature=0, max_tokens=400)
-	return llm.bind_tools([
+	tools = [
 		clinical_knowledge_tool,
 		consultar_disponibilidad_tool,
 		agendar_cita_tool,
@@ -124,7 +122,27 @@ def get_llm_with_tools():
 		modificar_cita_tool,
 		consultar_doctores_tool,
 		consultar_servicios_y_precios_tool,
-	])
+	]
+	primary_llm = get_chat_llm(temperature=0, max_tokens=400)
+	bound_primary = primary_llm.bind_tools(tools)
+
+	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
+	if is_gemini:
+		fallback_model_names = [
+			m for m in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]
+			if m != settings.gemini_model
+		]
+		fallback_bounds = []
+		for m_name in fallback_model_names[:2]:
+			try:
+				fb_llm = get_chat_llm(model=m_name, temperature=0, max_tokens=400, provider="gemini")
+				fallback_bounds.append(fb_llm.bind_tools(tools))
+			except Exception:
+				pass
+		if fallback_bounds:
+			return bound_primary.with_fallbacks(fallback_bounds)
+
+	return bound_primary
 
 
 from datetime import datetime
@@ -334,16 +352,35 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 	dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 	dia_nombre = dias_semana[now.weekday()]
 	
-	context_message = SystemMessage(
-		content=(
-			f"Fecha de referencia clínica: {fecha_str} ({dia_nombre}). "
-			"Usa esta referencia para deducir fechas relativas (ej. 'el viernes' se refiere al próximo viernes respecto a esta fecha). "
-			"Para gestiones de citas, el identificador del paciente es su CÉDULA (número de documento)."
-		)
+	context_str = (
+		f"Fecha de referencia clínica: {fecha_str} ({dia_nombre}). "
+		"Usa esta referencia para deducir fechas relativas (ej. 'el viernes' se refiere al próximo viernes respecto a esta fecha). "
+		"Para gestiones de citas, el identificador del paciente es su CÉDULA (número de documento)."
 	)
 	
-	messages = [SYSTEM_MESSAGE, context_message]
-	messages.extend(state["messages"])
+	combined_system_message = SystemMessage(
+		content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO TEMPORAL Y CLÍNICO]\n{context_str}"
+	)
+	
+	# Procesar mensajes del estado para compatibilidad total con Gemini y OpenAI
+	chat_messages = []
+	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
+
+	for msg in state.get("messages", []):
+		if isinstance(msg, SystemMessage):
+			chat_messages.append(HumanMessage(content=f"[Contexto / Resumen de conversación previa]:\n{msg.content}"))
+		elif is_gemini and isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and not msg.content:
+			# En Gemini, un AIMessage con tool_calls de turnos anteriores sin thought_signature causa error 400.
+			# Lo convertimos a un mensaje de transición legible.
+			chat_messages.append(AIMessage(content="[Consultando información en el sistema...]"))
+		elif is_gemini and isinstance(msg, ToolMessage):
+			# En Gemini, convertimos ToolMessage a un turno de contexto del sistema.
+			tool_name = getattr(msg, "name", None) or "herramienta"
+			chat_messages.append(HumanMessage(content=f"[Resultado del sistema ({tool_name})]:\n{msg.content}"))
+		else:
+			chat_messages.append(msg)
+	
+	messages = [combined_system_message, *chat_messages]
 	
 	# ainvoke mantiene todo el grafo compatible con el saver PostgreSQL async.
 	response = await get_llm_with_tools().ainvoke(messages)
