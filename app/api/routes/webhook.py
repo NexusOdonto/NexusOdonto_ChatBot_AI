@@ -228,7 +228,8 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             if messages:
                 last_message = messages[-1]
                 if isinstance(last_message, AIMessage) and last_message.content:
-                    respuesta_texto = str(last_message.content)
+                    from app.core.llm_factory import extract_text_content
+                    respuesta_texto = extract_text_content(last_message.content)
                     await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
                     # Guardar en Caché Semántico si la respuesta es informativa
                     asyncio.create_task(guardar_en_cache(mensaje_texto, respuesta_texto))
@@ -247,13 +248,13 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
         # Solo si el grafo falló por completo y no hay respuesta, se genera una salida amigable
         try:
             from langchain_core.messages import SystemMessage
-            from langchain_openai import ChatOpenAI
-            emergency_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, api_key=settings.openai_api_key)
+            from app.core.llm_factory import get_chat_llm, extract_text_content
+            emergency_llm = get_chat_llm(temperature=0.7)
             resp = await emergency_llm.ainvoke([
                 SystemMessage(content="Eres el asistente virtual exclusivo de Nexus Odonto. Solo responde sobre temas odontológicos o pide que nos contacte al +57 324 6030217. Si te preguntan sobre temas no relacionados con la odontología, rehúsa amablemente indicando que solo atiendes consultas de la clínica odontológica."),
                 HumanMessage(content=mensaje_texto)
             ])
-            await evolution_client.enviar_mensaje(numero_paciente, str(resp.content))
+            await evolution_client.enviar_mensaje(numero_paciente, extract_text_content(resp.content))
         except Exception as e:
             logger.error(f"Error crítico en fallback: {e}")
             pass

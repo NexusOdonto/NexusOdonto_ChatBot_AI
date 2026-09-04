@@ -14,9 +14,17 @@ class Settings(BaseSettings):
     port: int = 8000 # Puerto de la aplicación
 
     # Configuración del modelo de lenguaje y del modelo de embeddings.
+    llm_provider: str = "gemini"  # Opciones: "openai" o "gemini"
     openai_api_key: str = ""
     openai_model: str = "gpt-3.5-turbo"
+    gemini_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    )
+    gemini_model: str = "gemini-3.5-flash-lite"
+    embedding_provider: str = "openai"  # Opciones: "openai" o "gemini"
     embedding_model: str = "text-embedding-3-small"
+    gemini_embedding_model: str = "models/text-embedding-004"
 
     # Datos de conexión y configuración de la colección vectorial de Qdrant.
     qdrant_url: str = "http://localhost:6333"
@@ -91,9 +99,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_requirements(self) -> "Settings":
-        # En producción no se permite iniciar sin la clave de OpenAI.
-        if self.app_env.lower() == "production" and not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY es obligatoria en producción")
+        # En producción se valida la clave del proveedor que esté configurado.
+        if self.app_env.lower() == "production":
+            provider = (self.llm_provider or "openai").lower()
+            if provider == "gemini" and not self.gemini_api_key:
+                raise ValueError("GEMINI_API_KEY es obligatoria en producción cuando LLM_PROVIDER='gemini'")
+            elif provider == "openai" and not self.openai_api_key:
+                raise ValueError("OPENAI_API_KEY es obligatoria en producción cuando LLM_PROVIDER='openai'")
         return self
 
 

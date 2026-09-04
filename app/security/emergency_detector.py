@@ -2,8 +2,8 @@ import re
 import unicodedata
 import logging
 from typing import Optional, Tuple
-from langchain_core.messages import SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from app.core.llm_factory import get_evaluator_llm, extract_text_content
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,14 @@ EMERGENCY_PATTERNS = [
     (r"\bdolor\s+insoportable\b", "DOLOR_INSOPORTABLE"),
     (r"\bsangrado\s+que\s+no\s+para\b", "SANGRADO_QUE_NO_PARA"),
     (r"\binfecci[oó]n\s+gigante\b", "INFECCION_GIGANTE"),
+    (r"\bfractura\s+mandibular\b", "FRACTURA_MANDIBULAR"),
+    (r"\btraumatismo\s+severo\b", "TRAUMATISMO_SEVERO"),
+    (r"\bflemon\s+con\s+fiebre\b", "FLEMON_CON_FIEBRE"),
+    (r"\bdificultad\s+para\s+respirar\b", "DIFICULTAD_RESPIRATORIA"),
+    (r"\basfixia\b", "ASFIXIA"),
+    (r"\bno\s+puedo\s+abrir\s+la\s+boca\s+del\s+dolor\b", "TRISMUS_SEVERO"),
+    (r"\bhinchaz[oó]n\s+en\s+el\s+cuello\b", "EDEMA_CERVICAL"),
+    (r"\bpus\s+abundante\b", "SUPURACION_SEVERA"),
 
     # Variaciones de hemorragia / sangrado severo
     (r"\bno\s+para\s+de\s+sangrar\b", "SANGRADO_INCONTROLABLE"),
@@ -81,30 +89,36 @@ def detect_emergency_keywords(text: str) -> Tuple[bool, Optional[str]]:
 
 
 async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
-    """Clasificador LLM rápido (gpt-4o-mini) para evaluar triage de emergencia severa cuando no coincide por regex."""
-    if not settings.openai_api_key or not text or len(text.strip()) < 8:
+    """Clasificador LLM rápido para evaluar triage de emergencia severa cuando no coincide por regex."""
+    has_api_key = (
+        (settings.llm_provider.lower() == "gemini" and bool(settings.gemini_api_key))
+        or (settings.llm_provider.lower() == "openai" and bool(settings.openai_api_key))
+    )
+    if not has_api_key or not text or len(text.strip()) < 8:
         return False, None
 
-    evaluator_llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0,
-        api_key=settings.openai_api_key,
-    )
+    try:
+        evaluator_llm = get_evaluator_llm()
+    except Exception as exc:
+        logger.warning(f"[Emergency Detector] No se pudo instanciar LLM: {exc}")
+        return False, None
 
-    prompt = (
+    sys_prompt = (
         "Eres un clasificador de triage clínico para un consultorio odontológico. "
         "Tu única tarea es determinar si el mensaje del paciente describe una EMERGENCIA ODONTOLÓGICA O MÉDICA SEVERA "
         "que ponga en riesgo su integridad física inmediata (ejemplos: hemorragia incesante, dolor extremo/insoportable, "
         "infección facial masiva/flemón gigante con dificultad respiratoria o fiebre alta, traumatismo severo/fractura mandibular).\n\n"
         "NO clasifiques como EMERGENCIA consultas comunes como agendar citas, dolor leve/moderado tratable con cita previa, "
         "presupuestos, limpieza dental, preguntas sobre ortodoncia o dudas generales.\n\n"
-        f"Mensaje del paciente:\n\"\"\"\n{text}\n\"\"\"\n\n"
         "Responde ESTRICTAMENTE con una sola palabra: EMERGENCIA o REGULAR."
     )
 
     try:
-        response = await evaluator_llm.ainvoke([SystemMessage(content=prompt)])
-        result = response.content.strip().upper()
+        response = await evaluator_llm.ainvoke([
+            SystemMessage(content=sys_prompt),
+            HumanMessage(content=f"Mensaje del paciente:\n\"\"\"\n{text}\n\"\"\"")
+        ])
+        result = extract_text_content(response.content).strip().upper()
         if "EMERGENCIA" in result:
             return True, "TRIAGE_CLINICO_LLM"
     except Exception as e:

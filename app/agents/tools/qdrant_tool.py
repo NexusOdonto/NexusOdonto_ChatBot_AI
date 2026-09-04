@@ -1,8 +1,8 @@
 import logging
 from functools import lru_cache
 
+from langchain_core.embeddings import Embeddings
 from langchain_core.tools import Tool
-from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -12,6 +12,7 @@ except ImportError:
 	CrossEncoder = None
 
 from app.core.config import settings
+from app.core.llm_factory import get_embeddings_model
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,9 @@ def get_qdrant_client() -> QdrantClient:
 
 
 @lru_cache(maxsize=1)
-def get_embeddings() -> OpenAIEmbeddings:
+def get_embeddings() -> Embeddings:
 	# Crea el modelo que transforma preguntas y documentos en vectores.
-	return OpenAIEmbeddings(
-		model=settings.embedding_model,
-		api_key=settings.openai_api_key or None,
-	)
+	return get_embeddings_model()
 
 
 @lru_cache(maxsize=1)
