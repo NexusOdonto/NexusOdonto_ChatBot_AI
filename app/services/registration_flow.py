@@ -13,5 +13,5 @@ logger = logging.getLogger(__name__)
 
 def _normalize_phone(phone: str) -> str:
     """Extrae solo dígitos del número de WhatsApp, quitando el sufijo @s.whatsapp.net."""
-    clean = phone.replace("@s.whatsapp.net", "").replace("@g.us", "").strip()
+    clean = phone.replace("@s.whatsapp.net ", "").replace("@g.us", "").strip()
     return clean

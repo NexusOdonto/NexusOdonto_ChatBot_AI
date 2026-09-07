@@ -5,7 +5,7 @@ services:
     image: evoapicloud/evolution-api:latest
     container_name: evolution_whatsapp
     ports:
-      - "8080:8080"
+      - "${EVOLUTION_PORT:-8085}:8080"
     environment:
       - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
       - DATABASE_ENABLED=true
@@ -83,8 +83,8 @@ services:
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-CLAVE_SECRETA_ODONTO_2026}
       - DOTNET_API_URL=http://host.docker.internal:5170/api/v1
-      - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN}
-      - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD}
+      - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN:-}
+      - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD:-}
       - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_SIGNATURE_HEADER=${WEBHOOK_SIGNATURE_HEADER:-x-webhook-signature}

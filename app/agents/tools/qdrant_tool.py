@@ -153,8 +153,21 @@ def clinical_knowledge_tool(query: str) -> str:
 
 def initialize_qdrant() -> None:
 	# Se ejecuta al iniciar FastAPI para comprobar y preparar Qdrant.
-	client = get_qdrant_client()
-	_ensure_collection(client)
+	import time
+	client = None
+	max_retries = 10
+	for attempt in range(1, max_retries + 1):
+		try:
+			client = get_qdrant_client()
+			_ensure_collection(client)
+			logger.info("[Qdrant] Conexión y colección inicializadas exitosamente.")
+			break
+		except Exception as exc:
+			if attempt == max_retries:
+				logger.error(f"[Qdrant] No se pudo conectar a Qdrant tras {max_retries} intentos: {exc}")
+				raise
+			logger.warning(f"[Qdrant] Intento {attempt}/{max_retries} falló ({exc}). Reintentando en 2s...")
+			time.sleep(2)
 	try:
 		from app.services.semantic_cache import ensure_cache_collection
 		ensure_cache_collection(client)

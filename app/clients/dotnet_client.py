@@ -24,6 +24,7 @@ class DotNetClient:
 
         self._jwt_token: Optional[str] = None
         self._auth_lock = asyncio.Lock()
+        self._conversations_lock = asyncio.Lock()
         self._reasons_cache: Optional[List[Dict[str, Any]]] = None
         self._priorities_cache: Optional[List[Dict[str, Any]]] = None
 
@@ -323,10 +324,29 @@ class DotNetClient:
             return self._priorities_cache
         return []
 
+    async def actualizar_estado_conversacion(
+        self, conversacion_id: str, status_id: str, patient_id: Optional[str] = None
+    ) -> bool:
+        """Actualiza el estado de una conversación en el backend .NET / Oracle."""
+        try:
+            url = f"{self.base_url}/ChatbotConversations/{conversacion_id}"
+            payload = {
+                "conversationStatusId": status_id,
+                "patientId": patient_id,
+            }
+            resp = await self._request_with_retry("PUT", url, json=payload)
+            if resp and resp.status_code in (200, 204):
+                logger.info(f"[.NET Client] Estado de conversación {conversacion_id} actualizado a {status_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[.NET Client] Error actualizando estado de conversación {conversacion_id}: {e}")
+            return False
+
     async def crear_ticket_soporte(
         self, telefono: str, motivo: str, prioridad: str = "MEDIA"
     ) -> Optional[Dict[str, Any]]:
-        """Crea un ticket en la API de .NET. Si falla, no interrumpe el chatbot."""
+        """Crea un ticket en la API de .NET vinculado a la conversación. Si falla, no interrumpe el chatbot."""
         url = f"{self.base_url}/SupportTickets"
 
         # 1. Resolver UUID de motivo y prioridad si existen en el catálogo
@@ -368,11 +388,33 @@ class DotNetClient:
         if not priority_id and priorities:
             priority_id = priorities[0].get("id")
 
+        # 2. Obtener o crear la conversación en .NET para vincularla al ticket
+        conv_id = await self.obtener_o_crear_conversacion(telefono)
+        patient_id = None
+        try:
+            persona = await self.buscar_persona_por_telefono(telefono)
+            if persona and persona.get("id"):
+                paciente = await self.buscar_paciente_por_person_id(str(persona["id"]))
+                if paciente and paciente.get("id"):
+                    patient_id = str(paciente["id"])
+        except Exception as e:
+            logger.debug(f"[.NET Client] Error buscando paciente para ticket: {e}")
+
+        import re
+        clean_tel = re.sub(r"@.*$", "", telefono).strip()
+        formatted_phone = clean_tel if clean_tel.startswith("+") else f"+{clean_tel}"
+
+        human_reason = "El paciente solicitó atención personalizada con un asesor humano" if "SOLICITUD" in motivo.upper() \
+                  else ("Baja confianza en la respuesta automática de la IA" if "RAG" in motivo.upper() \
+                  else f"Atención requerida: {motivo}")
+
         payload = {
-            "title": f"Soporte Chatbot: {motivo}",
-            "description": f"Solicitud desde WhatsApp ({telefono}). Motivo: {motivo}",
-            "chatbotSummary": f"Paciente {telefono} reportó: {motivo}",
-            "telefono": telefono,
+            "chatbotConversationId": conv_id,
+            "patientId": patient_id,
+            "title": f"Escalamiento WhatsApp: {human_reason}",
+            "description": f"Solicitud desde WhatsApp ({formatted_phone}). Motivo: {human_reason}",
+            "chatbotSummary": human_reason,
+            "telefono": formatted_phone,
             "motivo": motivo,
             "prioridad": prioridad,
         }
@@ -384,6 +426,11 @@ class DotNetClient:
         response = await self._request_with_retry("POST", url, json=payload)
         if response and response.status_code in (200, 201):
             logger.info(f"[.NET Client] Ticket de soporte registrado exitosamente para {telefono}")
+            # Actualizar estado de la conversación a ESCALADA en Oracle DB
+            if conv_id:
+                asyncio.create_task(
+                    self.actualizar_estado_conversacion(conv_id, self.STATUS_ESCALADA, patient_id)
+                )
             return response.json()
 
         logger.warning(
@@ -776,61 +823,66 @@ class DotNetClient:
         if not ident:
             return None
 
-        # 1. Verificar caché en memoria
+        # 1. Verificar caché en memoria rápido
         if ident in self._conversations_cache:
             return self._conversations_cache[ident]
 
-        # 2. Consultar conversaciones existentes en el backend .NET
-        url_get = f"{self.base_url}/ChatbotConversations"
-        resp = await self._request_with_retry("GET", url_get)
-        if resp and resp.status_code == 200:
-            try:
-                items = resp.json()
-                if isinstance(items, dict):
-                    items = items.get("items", [])
-                for conv in items:
-                    if (
-                        str(conv.get("chatIdentifier", "")).strip() == ident
-                        and not conv.get("closedAt")
-                    ):
-                        conv_id = str(conv.get("id"))
+        async with self._conversations_lock:
+            # Re-verificar tras adquirir el lock por si otra corrutina concurrente ya la creó
+            if ident in self._conversations_cache:
+                return self._conversations_cache[ident]
+
+            # 2. Consultar conversaciones existentes en el backend .NET
+            url_get = f"{self.base_url}/ChatbotConversations"
+            resp = await self._request_with_retry("GET", url_get)
+            if resp and resp.status_code == 200:
+                try:
+                    items = resp.json()
+                    if isinstance(items, dict):
+                        items = items.get("items", [])
+                    for conv in items:
+                        if (
+                            str(conv.get("chatIdentifier", "")).strip() == ident
+                            and not conv.get("closedAt")
+                        ):
+                            conv_id = str(conv.get("id"))
+                            self._conversations_cache[ident] = conv_id
+                            logger.info(f"[.NET Client] Conversación activa recuperada para {ident}: {conv_id}")
+                            return conv_id
+                except Exception as e:
+                    logger.debug(f"[.NET Client] Error parseando conversaciones existentes: {e}")
+
+            # 3. Si no se especificó patient_id, intentar buscar si el teléfono pertenece a un paciente registrado
+            if not patient_id:
+                try:
+                    persona = await self.buscar_persona_por_telefono(ident)
+                    if persona and persona.get("id"):
+                        paciente = await self.buscar_paciente_por_person_id(str(persona["id"]))
+                        if paciente and paciente.get("id"):
+                            patient_id = str(paciente["id"])
+                except Exception as pat_err:
+                    logger.debug(f"[.NET Client] No se pudo autovincular paciente por teléfono: {pat_err}")
+
+            # 4. Si no existe conversación activa, crear una nueva
+            payload = {
+                "chatIdentifier": ident,
+                "chatChannelId": channel_id or self.CHANNEL_WHATSAPP,
+                "patientId": patient_id,
+            }
+            resp_post = await self._request_with_retry("POST", url_get, json=payload)
+            if resp_post and resp_post.status_code in (200, 201):
+                try:
+                    data = resp_post.json()
+                    conv_id = str(data.get("id"))
+                    if conv_id:
                         self._conversations_cache[ident] = conv_id
-                        logger.info(f"[.NET Client] Conversación activa recuperada para {ident}: {conv_id}")
+                        logger.info(f"[.NET Client] Nueva conversación creada en DB para {ident}: {conv_id}")
                         return conv_id
-            except Exception as e:
-                logger.debug(f"[.NET Client] Error parseando conversaciones existentes: {e}")
+                except Exception as e:
+                    logger.error(f"[.NET Client] Error parseando respuesta de creación de conversación: {e}")
 
-        # 3. Si no se especificó patient_id, intentar buscar si el teléfono pertenece a un paciente registrado
-        if not patient_id:
-            try:
-                persona = await self.buscar_persona_por_telefono(ident)
-                if persona and persona.get("id"):
-                    paciente = await self.buscar_paciente_por_person_id(str(persona["id"]))
-                    if paciente and paciente.get("id"):
-                        patient_id = str(paciente["id"])
-            except Exception as pat_err:
-                logger.debug(f"[.NET Client] No se pudo autovincular paciente por teléfono: {pat_err}")
-
-        # 4. Si no existe conversación activa, crear una nueva
-        payload = {
-            "chatIdentifier": ident,
-            "chatChannelId": channel_id or self.CHANNEL_WHATSAPP,
-            "patientId": patient_id,
-        }
-        resp_post = await self._request_with_retry("POST", url_get, json=payload)
-        if resp_post and resp_post.status_code in (200, 201):
-            try:
-                data = resp_post.json()
-                conv_id = str(data.get("id"))
-                if conv_id:
-                    self._conversations_cache[ident] = conv_id
-                    logger.info(f"[.NET Client] Nueva conversación creada en DB para {ident}: {conv_id}")
-                    return conv_id
-            except Exception as e:
-                logger.error(f"[.NET Client] Error parseando respuesta de creación de conversación: {e}")
-
-        logger.warning(f"[.NET Client] No se pudo crear/obtener conversación en DB para {ident}")
-        return None
+            logger.warning(f"[.NET Client] No se pudo crear/obtener conversación en DB para {ident}")
+            return None
 
     async def guardar_mensaje_conversacion(
         self,
