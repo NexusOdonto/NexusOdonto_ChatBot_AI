@@ -27,9 +27,21 @@ class PostgresCheckpointer:
 		checkpointer_instance = self
 
 	async def start(self) -> None:
-		"""Abre PostgreSQL y crea las tablas internas de LangGraph."""
-		await self.pool.open()
-		await self.saver.setup()
+		"""Abre PostgreSQL y crea las tablas internas de LangGraph con reintentos."""
+		import asyncio
+		max_retries = 10
+		for attempt in range(1, max_retries + 1):
+			try:
+				await self.pool.open()
+				await self.saver.setup()
+				logger.info("[PostgresCheckpointer] Conectado exitosamente a PostgreSQL y tablas inicializadas.")
+				return
+			except Exception as exc:
+				if attempt == max_retries:
+					logger.error(f"[PostgresCheckpointer] No se pudo conectar a PostgreSQL tras {max_retries} intentos: {exc}")
+					raise
+				logger.warning(f"[PostgresCheckpointer] Intento {attempt}/{max_retries} falló ({exc}). Reintentando en 2s...")
+				await asyncio.sleep(2)
 
 	async def stop(self) -> None:
 		"""Cierra ordenadamente el pool cuando FastAPI se detiene."""

@@ -367,9 +367,16 @@ async def receive_whatsapp_message(request: Request):
                 return {"status": "ignored", "reason": "self_message"}
 
             # Extraer número del paciente completo (con el sufijo de whatsapp)
-            numero_paciente = data.key.remoteJid if (data.key and data.key.remoteJid) else None
-            if not numero_paciente:
+            remote_jid = data.key.remoteJid if (data.key and data.key.remoteJid) else ""
+            if not remote_jid:
                 return {"status": "ignored", "reason": "no_remote_jid"}
+
+            # Si remoteJid trae un LID interno de WhatsApp (@lid), buscar si participant o sender trae el teléfono real
+            participant = getattr(data.key, "participant", None) or getattr(data, "sender", None)
+            if "@lid" in str(remote_jid) and participant and "@s.whatsapp.net" in str(participant):
+                numero_paciente = str(participant)
+            else:
+                numero_paciente = remote_jid
 
             raw_message = data.message or {}
             unwrapped_message = unwrap_message_dict(raw_message)
