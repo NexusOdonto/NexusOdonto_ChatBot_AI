@@ -349,13 +349,17 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 		tz = ZoneInfo("America/Bogota")
 	now = datetime.now(tz)
 	fecha_str = now.strftime("%Y-%m-%d")
+	hora_str = now.strftime("%I:%M %p")
 	dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 	dia_nombre = dias_semana[now.weekday()]
 	
 	context_str = (
-		f"Fecha de referencia clínica: {fecha_str} ({dia_nombre}). "
-		"Usa esta referencia para deducir fechas relativas (ej. 'el viernes' se refiere al próximo viernes respecto a esta fecha). "
-		"Para gestiones de citas, el identificador del paciente es su CÉDULA (número de documento)."
+		f"Fecha actual del consultorio: {fecha_str} ({dia_nombre}) | Hora actual en Colombia: {hora_str}.\n"
+		"REGLAS OBLIGATORIAS DE FECHAS Y HORARIOS:\n"
+		f"1. Hoy es {fecha_str} ({dia_nombre}). Cuando el paciente diga 'hoy', 'mañana' o un día relativo, calcula la fecha partiendo de hoy.\n"
+		f"2. NUNCA ofrezcas horarios en el pasado respecto a la hora actual ({hora_str}).\n"
+		"3. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
+		"4. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
 	)
 	
 	combined_system_message = SystemMessage(

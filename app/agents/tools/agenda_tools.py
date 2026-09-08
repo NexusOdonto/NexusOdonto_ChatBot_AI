@@ -90,6 +90,36 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
         norm_esp = _normalizar_texto(especialidad)
         if not norm_esp:
             return "Por favor, indica una especialidad o servicio válido."
+
+        # Mapeo de términos habituales en español a nombres de catálogo en inglés
+        SINONIMOS_ESPANOL = {
+            "general": "General Dentistry",
+            "odontologia": "General Dentistry",
+            "odontologia general": "General Dentistry",
+            "limpieza": "General Dentistry",
+            "valoracion": "General Dentistry",
+            "revision": "General Dentistry",
+            "consulta": "General Dentistry",
+            "ortodoncia": "Orthodontics",
+            "brackets": "Orthodontics",
+            "frenillos": "Orthodontics",
+            "endodoncia": "Endodontics",
+            "conducto": "Endodontics",
+            "periodoncia": "Periodontics",
+            "encias": "Periodontics",
+            "odontopediatria": "Pediatric Dentistry",
+            "pediatria": "Pediatric Dentistry",
+            "ninos": "Pediatric Dentistry",
+            "cirugia": "Oral Surgery",
+            "cirugia oral": "Oral Surgery",
+            "extraccion": "Oral Surgery",
+            "cordales": "Oral Surgery",
+            "muela del juicio": "Oral Surgery",
+        }
+        for k, v in SINONIMOS_ESPANOL.items():
+            if k in norm_esp or norm_esp in k:
+                norm_esp = _normalizar_texto(v)
+                break
         
         # 1. Obtener especialidades desde el backend .NET
         especialidades = await dotnet_client.obtener_especialidades()
@@ -199,6 +229,36 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
 
                 # Eliminar duplicados manteniendo orden
                 unique_slots = list(dict.fromkeys(slots))
+
+                # Filtrar turnos ya ocupados por citas existentes
+                try:
+                    citas_existentes = await dotnet_client.consultar_citas(fecha[:10]) or []
+                    if isinstance(citas_existentes, dict):
+                        citas_existentes = citas_existentes.get("items", [])
+                    horas_ocupadas = set()
+                    for c in citas_existentes:
+                        c_prof = str(c.get("professionalId") or "")
+                        c_canc = c.get("cancelledAt")
+                        if c_prof.lower() == str(prof_id).lower() and not c_canc:
+                            c_start = str(c.get("startsAt") or "")
+                            if "T" in c_start:
+                                horas_ocupadas.add(c_start.split("T")[1][:5])
+                            elif " " in c_start:
+                                horas_ocupadas.add(c_start.split(" ")[1][:5])
+                    unique_slots = [s for s in unique_slots if s not in horas_ocupadas]
+                except Exception as c_err:
+                    logger.warning(f"[Agenda] Error consultando citas ocupadas: {c_err}")
+
+                # Si la consulta es para hoy, filtrar horarios que ya pasaron en Colombia
+                try:
+                    from zoneinfo import ZoneInfo
+                    now_bogota = datetime.now(ZoneInfo("America/Bogota"))
+                except Exception:
+                    now_bogota = datetime.now()
+
+                if str(fecha)[:10] == now_bogota.strftime("%Y-%m-%d"):
+                    current_hhmm = now_bogota.strftime("%H:%M")
+                    unique_slots = [s for s in unique_slots if s > current_hhmm]
                 if unique_slots:
                     # Agrupar visualmente slots mañana y tarde
                     manana = [s for s in unique_slots if int(s.split(":")[0]) < 12]
@@ -338,13 +398,13 @@ async def _agendar_cita_impl(
                     starts_dt = datetime.now()
 
             ends_dt = starts_dt + timedelta(minutes=duracion_min)
-            starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%S")
+            ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%S")
         except Exception as dt_err:
             logger.warning(f"[Agenda Tools] Error formateando fechas ({fecha_hora_inicio}): {dt_err}")
             now = datetime.now()
-            starts_at_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            ends_at_iso = (now + timedelta(minutes=duracion_min)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            starts_at_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
+            ends_at_iso = (now + timedelta(minutes=duracion_min)).strftime("%Y-%m-%dT%H:%M:%S")
             starts_dt = now
             ends_dt = now + timedelta(minutes=duracion_min)
 

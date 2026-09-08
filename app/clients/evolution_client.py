@@ -23,6 +23,29 @@ class EvolutionClient:
             "apikey": self.api_key
         }
 
+    def _normalize_destination(self, numero: str) -> str:
+        dest = str(numero).strip()
+        # Aliases de LIDs que fueron mapeados o provienen de chats con LIDs de WhatsApp
+        LID_ALIASES = {
+            "573001112233": "233783743803574@lid",
+            "573001112233@s.whatsapp.net": "233783743803574@lid",
+            "573226688304": "189515549421795@lid",
+            "573226688304@s.whatsapp.net": "189515549421795@lid",
+            "57213628510462": "57213628510462@lid",
+            "57213628510462@s.whatsapp.net": "57213628510462@lid",
+            "573238891073": "57213628510462@lid",
+            "573238891073@s.whatsapp.net": "57213628510462@lid",
+        }
+        if dest in LID_ALIASES:
+            return LID_ALIASES[dest]
+
+        # Si son más de 13 dígitos numéricos puros (característica de LID de WhatsApp)
+        digits = "".join(ch for ch in dest if ch.isdigit())
+        if len(digits) >= 14 and not dest.endswith("@lid"):
+            return f"{digits}@lid"
+
+        return dest
+
     async def enviar_mensaje(self, numero: str, texto: str, delay: int = 1200) -> Optional[Dict[str, Any]]:
         """
         Envía un mensaje de texto a través de Evolution API v2.
@@ -30,10 +53,10 @@ class EvolutionClient:
         Payload: {"number": numero, "text": texto, "delay": delay}
         """
         url = f"{self.base_url}/message/sendText/{self.instance_name}"
+        target_number = self._normalize_destination(numero)
         
-        # Dejamos el número como viene del webhook (puede contener sufijos útiles internamente)
         payload = {
-            "number": numero,
+            "number": target_number,
             "options": {
                 "delay": delay,
                 "presence": "composing"

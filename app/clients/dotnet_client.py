@@ -598,6 +598,53 @@ class DotNetClient:
             )
         return None
 
+    async def crear_paciente_basico(
+        self,
+        cedula: str,
+        nombre: str,
+        telefono_whatsapp: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Crea un perfil de paciente básico en el sistema usando datos mínimos.
+        Utilizado por el agente de WhatsApp cuando un paciente nuevo confirma su cita.
+        """
+        cedula_clean = str(cedula).strip()
+        parts = str(nombre).strip().split()
+        first_name = parts[0] if parts else "Paciente"
+        last_name = " ".join(parts[1:]) if len(parts) > 1 else "Nexus"
+
+        # Tipo de documento CC por defecto (Citizenship Card)
+        doc_type_id = "e0000000-0000-0000-0000-000000000001"
+        # Sexo Masculino por defecto
+        sex_id = "f0000000-0000-0000-0000-000000000002"
+
+        # Si el teléfono de whatsapp es un LID (>13 dígitos), no usarlo como número telefónico móvil
+        clean_phone = "".join(ch for ch in str(telefono_whatsapp or "") if ch.isdigit())
+        if len(clean_phone) > 12:
+            clean_phone = ""
+        if not clean_phone:
+            clean_phone = "+573000000000"
+        elif not clean_phone.startswith("+"):
+            clean_phone = f"+{clean_phone}"
+
+        onboard_payload = {
+            "documentTypeId": doc_type_id,
+            "documentNumber": cedula_clean,
+            "firstName": first_name,
+            "lastName": last_name,
+            "dateOfBirth": "2000-01-01",
+            "sexId": sex_id,
+            "phone": clean_phone,
+            "email": f"paciente_{cedula_clean}@nexusodonto.com",
+            "address": "Consultorio Nexus Odonto",
+            "emergencyContact": "Recepción Nexus",
+            "emergencyPhone": "+573246030217",
+            "password": f"Nexus{cedula_clean}!"
+        }
+        res = await self.registrar_paciente(onboard_payload)
+        if res:
+            logger.info(f"[.NET Client] Paciente básico creado para {cedula_clean} con ID: {res.get('patientId')}")
+        return res
+
     async def login_paciente(self, document_number: str, password: str) -> Optional[Dict[str, Any]]:
         """Autentica un paciente mediante documento y contraseña.
 
@@ -822,6 +869,14 @@ class DotNetClient:
         ident = str(chat_identifier).strip()
         if not ident:
             return None
+
+        LID_MAPPING = {
+            "233783743803574@lid": "573001112233@s.whatsapp.net",
+            "189515549421795@lid": "573226688304@s.whatsapp.net",
+            "57213628510462@lid": "573238891073@s.whatsapp.net",
+        }
+        if ident in LID_MAPPING:
+            ident = LID_MAPPING[ident]
 
         # 1. Verificar caché en memoria rápido
         if ident in self._conversations_cache:

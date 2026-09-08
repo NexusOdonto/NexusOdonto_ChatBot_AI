@@ -74,6 +74,7 @@ app.add_middleware(
 # Registro de rutas
 app.include_router(webhook_router, tags=["WhatsApp Webhook"])
 app.include_router(handoff_router, tags=["Agent Handoff & Messaging"])
+app.include_router(handoff_router, prefix="/api/v1", tags=["Agent Handoff & Messaging (v1)"])
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -147,8 +148,8 @@ async def get_qr_data():
         pass
 
     # 2. Si ya está conectado, no necesitamos QR
-    if state == "open":
-        return {"connected": True, "state": "open", "instanceName": instance_name}
+    if state in ("open", "connecting"):
+        return {"connected": state == "open", "state": state, "instanceName": instance_name}
 
     # 3. Obtener QR code activo
     qr_base64 = ""
