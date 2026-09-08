@@ -54,18 +54,31 @@ async def resume_conversation(request: ResumeConversationRequest):
         raise HTTPException(status_code=400, detail="El número de teléfono es requerido.")
 
     try:
-        config = get_thread_config(phone_number)
-        
-        if request.clear_history:
-            checkpointer = get_checkpointer_instance()
-            if checkpointer:
-                await checkpointer.clear_thread(phone_number)
-            dotnet_client.limpiar_cache_conversacion(phone_number)
-            logger.info(f"[Handoff] Memoria reiniciada completamente para {phone_number}")
-        else:
-            # Actualizar únicamente el estado de conversación a ACTIVA
-            await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
-            logger.info(f"[Handoff] Estado de conversación cambiado a ACTIVA para {phone_number}")
+        targets = [phone_number]
+        ALIAS_MAP = {
+            "233783743803574@lid": "573001112233@s.whatsapp.net",
+            "573001112233": "233783743803574@lid",
+            "573001112233@s.whatsapp.net": "233783743803574@lid",
+            "189515549421795@lid": "573226688304@s.whatsapp.net",
+            "573226688304": "189515549421795@lid",
+            "573226688304@s.whatsapp.net": "189515549421795@lid",
+            "57213628510462@lid": "573238891073@s.whatsapp.net",
+            "573238891073": "57213628510462@lid",
+            "573238891073@s.whatsapp.net": "57213628510462@lid",
+        }
+        if phone_number in ALIAS_MAP and ALIAS_MAP[phone_number] not in targets:
+            targets.append(ALIAS_MAP[phone_number])
+
+        for t in targets:
+            try:
+                config = get_thread_config(t)
+                checkpointer = get_checkpointer_instance()
+                if checkpointer:
+                    await checkpointer.clear_thread(t)
+                dotnet_client.limpiar_cache_conversacion(t)
+                logger.info(f"[Handoff] Estado reactivado y limpiado para {t}")
+            except Exception as t_err:
+                logger.warning(f"[Handoff] Error reactivando hilo {t}: {t_err}")
 
         # Mensaje de notificación amigable al paciente
         mensaje_retorno = (

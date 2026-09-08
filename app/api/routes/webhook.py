@@ -47,6 +47,22 @@ ESCALAMIENTO_RE = re.compile(
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
 
 
+KEYWORDS_RESUME = {
+    "bot", "volver", "volver al bot", "asistente", "menu", "menú",
+    "reiniciar", "hablar con bot", "continuar", "inicio", "/start", "/bot"
+}
+
+
+def _is_resume_request(message: str) -> bool:
+    norm = " ".join(message.strip().lower().split())
+    return (
+        norm in KEYWORDS_RESUME
+        or "volver al bot" in norm
+        or "hablar con el bot" in norm
+        or "hablar con bot" in norm
+    )
+
+
 def _is_reset_request(message: str) -> bool:
     return message.strip().lower() in COMMANDS_RESET
 
@@ -112,8 +128,29 @@ async def _process_whatsapp_unsupported_media(numero_paciente: str, caption: str
     """Gestiona la recepción de fotos, videos, documentos o archivos no procesables directamente."""
     try:
         if await _is_escalated(numero_paciente):
-            logger.info(f"[BG] Medio ignorado – conversación escalada: {numero_paciente}")
-            return
+            if _is_resume_request(mensaje_texto):
+                logger.info(f"[BG] Paciente solicita volver con el bot: {numero_paciente}")
+                checkpointer = get_checkpointer_instance()
+                for t in [numero_paciente, "573001112233@s.whatsapp.net", "233783743803574@lid"]:
+                    try:
+                        if checkpointer:
+                            await checkpointer.clear_thread(t)
+                        dotnet_client.limpiar_cache_conversacion(t)
+                    except Exception:
+                        pass
+
+                msg_bienvenida = (
+                    "👋🦷 *Nexus Odonto Asistente Virtual*\n\n"
+                    "¡Hola de nuevo! He reactivado mi sistema para atenderte. ¿En qué puedo colaborarte hoy? 😊✨"
+                )
+                await evolution_client.enviar_mensaje(numero_paciente, msg_bienvenida)
+                asyncio.create_task(
+                    dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_bienvenida)
+                )
+                return
+            else:
+                logger.info(f"[BG] Mensaje ignorado - conversación escalada: {numero_paciente}")
+                return
 
         # Registrar el mensaje de medio enviado por el usuario en Oracle DB
         user_msg = f"[Archivo o medio adjunto: {caption}]" if caption else "[Archivo o medio adjunto]"
@@ -377,6 +414,15 @@ async def receive_whatsapp_message(request: Request):
                 numero_paciente = str(participant)
             else:
                 numero_paciente = remote_jid
+
+            # Mapeo canónico de LIDs conocidos para evitar duplicidad de conversaciones
+            LID_MAPPING = {
+                "233783743803574@lid": "573001112233@s.whatsapp.net",
+                "189515549421795@lid": "573226688304@s.whatsapp.net",
+                "57213628510462@lid": "573238891073@s.whatsapp.net",
+            }
+            if str(numero_paciente).strip() in LID_MAPPING:
+                numero_paciente = LID_MAPPING[str(numero_paciente).strip()]
 
             raw_message = data.message or {}
             unwrapped_message = unwrap_message_dict(raw_message)
