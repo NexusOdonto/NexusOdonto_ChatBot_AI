@@ -1,7 +1,7 @@
 from functools import lru_cache
 import logging
 import re
-from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage, RemoveMessage
 from langchain_core.runnables import RunnableConfig
 from app.core.llm_factory import get_chat_llm, get_evaluator_llm, extract_text_content
 
@@ -14,6 +14,7 @@ from app.agents.tools.agenda_tools import (
 	modificar_cita_tool,
 	consultar_doctores_tool,
 	consultar_servicios_y_precios_tool,
+	confirmar_cita_tool,
 )
 from app.clients.dotnet_client import dotnet_client
 from app.clients.evolution_client import evolution_client
@@ -25,11 +26,11 @@ from app.graph.state import AgentState
 logger = logging.getLogger(__name__)
 
 # Umbral de mensajes a partir del cual se activa la compresión del historial.
-# Mantener un umbral de 10 mensajes optimiza significativamente los tokens enviados en cada turno.
-SUMMARY_THRESHOLD: int = 10
+# Mantener un umbral adecuado evita llamadas innecesarias al summarizer en turnos frecuentes.
+SUMMARY_THRESHOLD: int = 25
 
 # Número de mensajes recientes que se preservan intactos después del resumen.
-RECENT_MESSAGES_KEEP: int = 4
+RECENT_MESSAGES_KEEP: int = 6
 
 
 # Define el rol, tono y límites de seguridad del asistente.
@@ -74,7 +75,8 @@ SYSTEM_MESSAGE = SystemMessage(
 		"5. consultar_cita_por_cedula_tool → Para VER las citas de un paciente (requiere: cédula).\n"
 		"6. modificar_cita_tool → Para REPROGRAMAR una cita (requiere: cédula, ID de cita, nueva fecha/hora).\n"
 		"7. cancelar_cita_tool → Para CANCELAR una cita (requiere: cédula, ID de cita).\n"
-		"8. buscar_conocimiento_clinico → Para resolver dudas clínicas y odontológicas.\n\n"
+		"8. confirmar_cita_tool → Para CONFIRMAR la asistencia del paciente a una cita programada o recordatorio (requiere: cédula).\n"
+		"9. buscar_conocimiento_clinico → Para resolver dudas clínicas y odontológicas.\n\n"
 		"PROTOCOLO PARA AGENDAR CITAS:\n"
 		"Paso 1 — Recolectar datos (si no los tienes): cédula 🆔, nombre completo, especialidad/servicio, fecha preferida.\n"
 		"Paso 2 — Consultar disponibilidad con consultar_disponibilidad_tool.\n"
@@ -87,10 +89,25 @@ SYSTEM_MESSAGE = SystemMessage(
 		"• ⏰ *Horario:* [Hora propuesta]\n\n"
 		"¿Confirmas estos datos para agendar tu cita? 😊\n\n"
 		"Paso 4 — SOLO si el paciente confirma de forma explícita (ej. 'Sí', 'Confirmo', 'De acuerdo'), invocar agendar_cita_tool.\n\n"
+		"PROTOCOLO PARA CONFIRMAR ASISTENCIA A CITAS (RESPUESTAS A RECORDATORIOS):\n"
+		"1. Si el paciente dice 'Confirmo', 'Sí confirmo', 'Confirmo mi cita', 'Confirmo mi asistencia', 'Allá estaré' (o responde a un recordatorio):\n"
+		"   - Si NO hay una propuesta de cita pendiente de agendamiento/modificación activa en este turno, significa que está confirmando una cita ya existente.\n"
+		"   - Si ya conoces su cédula (por mensajes previos o resumen), invoca INMEDIATAMENTE confirmar_cita_tool(cedula=...).\n"
+		"   - Si NO conoces su cédula, pídela amablemente: '¡Con gusto! Para confirmar tu asistencia, indícame tu *número de cédula* 🆔.'\n"
+		"   - Al invocar confirmar_cita_tool, la cita se marcará formalmente en el sistema como CONFIRMADA ✅.\n\n"
+		"REGLAS OBLIGATORIAS PARA GESTIÓN DE HORARIOS:\n"
+		"- Las citas en Nexus Odonto se programan en intervalos exactos de 30 minutos (ej. 8:00 AM, 8:30 AM, 9:00 AM... 1:00 PM, 1:30 PM, 2:00 PM, 2:30 PM, etc.).\n"
+		"- Si el paciente pide una hora intermedia o no estándar (ej. 1:42 PM, 2:15 PM, etc.):\n"
+		"  * NUNCA digas que coincide con el almuerzo si la hora no está entre las 12:00 PM y la 1:00 PM.\n"
+		"  * Explica amablemente que las citas se asignan en bloques de 30 minutos.\n"
+		"  * Ofrece SIEMPRE el horario disponible POSTERIOR o más cercano (por ejemplo, si pide 1:42 PM, ofrece las 2:00 PM o 2:30 PM). NUNCA ofrezcas turnos anteriores a la hora solicitada (como 1:00 PM o 1:30 PM) ni que ya hayan pasado en el día.\n"
+		"- Si el paciente pide una hora sin especificar fecha:\n"
+		"  * Si la hora es para hoy y aún no ha pasado, consulta disponibilidad para HOY.\n"
+		"  * Si la conversación venía discutiendo otra fecha previa, aclara la fecha con calidez para que el paciente tenga total certeza.\n\n"
 		"PROTOCOLO PARA MODIFICAR / REPROGRAMAR CITAS:\n"
 		"1. Identificar al paciente por su cédula 🆔 (pídela si no la tienes).\n"
-		"2. SIEMPRE consultar disponibilidad primero con consultar_disponibilidad_tool para la fecha/especialidad deseada antes de proponer horarios, asegurando que la hora elegida esté disponible y NO coincida con horarios de almuerzo (ej. 12:00 PM a 1:00 PM) ni esté fuera del turno laboral.\n"
-		"3. Si el paciente pide una hora en la que el doctor no atiende o está en almuerzo (ej. 12:00 PM), explícaselo amablemente y sugiérele los turnos válidos más cercanos.\n"
+		"2. SIEMPRE consultar disponibilidad primero con consultar_disponibilidad_tool para la fecha/especialidad deseada antes de proponer horarios, asegurando que la hora elegida esté disponible y NO coincida con horarios de almuerzo (12:00 PM a 1:00 PM) ni esté fuera del turno laboral.\n"
+		"3. Si el paciente pide una hora en la que el doctor no atiende o está en almuerzo (12:00 PM a 1:00 PM), explícaselo amablemente y sugiérele el turno válido posterior más cercano.\n"
 		"4. Presentar la Propuesta de Cambio de Cita con esta ficha visual:\n\n"
 		"📋 *Propuesta de Cambio de Cita:*\n"
 		"• 👤 *Paciente:* [Nombre] | 🆔 *Cédula:* [Cédula]\n"
@@ -99,12 +116,19 @@ SYSTEM_MESSAGE = SystemMessage(
 		"• 📅 *Nueva Fecha:* [Día y Fecha]\n"
 		"• ⏰ *Nuevo Horario:* [Hora propuesta]\n\n"
 		"¿Confirmas estos datos para reprogramar tu cita? 😊\n\n"
-		"5. SOLO si el paciente confirma de forma explícita (ej. 'Sí', 'Confirmo', 'De acuerdo'), invocar modificar_cita_tool.\n\n"
 		"PROTOCOLO PARA CANCELAR CITAS:\n"
 		"1. Identificar al paciente por su cédula 🆔 (pídela si no la tienes).\n"
 		"2. Consultar sus citas activas con consultar_cita_por_cedula_tool.\n"
 		"3. Pedir confirmación explícita indicando la fecha, hora y doctor de la cita que se va a cancelar.\n"
 		"4. SOLO tras confirmación explícita del paciente, invocar cancelar_cita_tool.\n\n"
+		"PROTOCOLO PARA CONSULTAR CITAS Y SUS DETALLES:\n"
+		"1. Si el paciente pide ver, consultar o conocer los detalles de una cita:\n"
+		"   - Si ya conoces su cédula (por mensajes previos o resumen), invoca INMEDIATAMENTE consultar_cita_por_cedula_tool con esa cédula.\n"
+		"   - Si NO conoces su cédula, solicítasela amablemente antes de consultar.\n"
+		"2. Presenta la información encontrada con formato claro y emojis amables.\n\n"
+		"REGLA CRÍTICA DE EJECUCIÓN DE HERRAMIENTAS:\n"
+		"- NUNCA respondas con textos de espera simulados como '[Consultando información en el sistema...]', 'Buscando en el sistema...', 'Espera un momento', etc.\n"
+		"- Si necesitas consultar, agendar, modificar o cancelar citas, o ver doctores/servicios, DEBES invocar la herramienta directamente mediante llamada a función (tool call) en el mismo turno, SIN generar texto preliminar.\n\n"
 		"Nunca des diagnósticos médicos invasivos ni reemplaces la evaluación de un odontólogo en consultorio. "
 		"Ante síntomas de urgencia severa, recomienda acudir a urgencias médicas."
 	)
@@ -122,18 +146,17 @@ def get_llm_with_tools():
 		modificar_cita_tool,
 		consultar_doctores_tool,
 		consultar_servicios_y_precios_tool,
+		confirmar_cita_tool,
 	]
 	primary_llm = get_chat_llm(temperature=0, max_tokens=400)
 	bound_primary = primary_llm.bind_tools(tools)
 
 	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
 	if is_gemini:
-		fallback_model_names = [
-			m for m in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-flash-lite-latest"]
-			if m != settings.gemini_model
-		]
+		valid_gemini_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+		fallback_model_names = [m for m in valid_gemini_models if m != settings.gemini_model]
 		fallback_bounds = []
-		for m_name in fallback_model_names[:2]:
+		for m_name in fallback_model_names:
 			try:
 				fb_llm = get_chat_llm(model=m_name, temperature=0, max_tokens=400, provider="gemini")
 				fallback_bounds.append(fb_llm.bind_tools(tools))
@@ -278,16 +301,23 @@ async def summarize_conversation_node(state: AgentState) -> dict:
 	messages = state.get("messages", [])
 	total = len(messages)
 
-	# Separar los mensajes hist\u00f3ricos de los recientes.
-	historic_messages = messages[: total - RECENT_MESSAGES_KEEP]
-	recent_messages = messages[total - RECENT_MESSAGES_KEEP :]
+	# Separar los mensajes históricos de los recientes asegurando no cortar parejas de tool calls
+	cut_idx = max(0, total - RECENT_MESSAGES_KEEP)
+	while cut_idx > 0 and isinstance(messages[cut_idx], ToolMessage):
+		cut_idx -= 1
+	if cut_idx < total and cut_idx > 0 and isinstance(messages[cut_idx - 1], AIMessage) and getattr(messages[cut_idx - 1], "tool_calls", None):
+		while cut_idx < total and isinstance(messages[cut_idx], ToolMessage):
+			cut_idx += 1
 
-	# Construir la transcripci\u00f3n del historial a resumir.
+	historic_messages = messages[:cut_idx]
+	recent_messages = messages[cut_idx:]
+
+	# Construir la transcripción del historial a resumir.
 	lines: list[str] = []
 	for msg in historic_messages:
 		if isinstance(msg, HumanMessage):
 			lines.append(f"Paciente: {msg.content}")
-		elif isinstance(msg, AIMessage) and msg.content:
+		elif isinstance(msg, AIMessage) and msg.content and not msg.content.startswith("[Consultando"):
 			lines.append(f"Asistente: {msg.content}")
 		# Los SystemMessage y ToolMessage internos se omiten intencionalmente;
 		# solo interesan los turnos que el resumen debe preservar.
@@ -301,8 +331,8 @@ async def summarize_conversation_node(state: AgentState) -> dict:
 		"Eres un asistente que genera resúmenes concisos de conversaciones de WhatsApp "
 		"entre un paciente y el chatbot del consultorio odontológico Nexus Odonto. "
 		"Genera un único párrafo corto (máximo 120 palabras) en español que capture:"
-		" el nombre del paciente (si fue mencionado), los servicios o especialidades que "
-		"consultó, las citas agendadas o canceladas, y cualquier información relevante "
+		" el nombre del paciente (si fue mencionado), su número de cédula (si fue mencionado),"
+		" los servicios o especialidades que consultó, las citas agendadas o canceladas, y cualquier información relevante "
 		"para continuar la atención. No incluyas saludos ni explicaciones extra."
 	)
 	human_text = f"Transcripción a resumir:\n{transcript}"
@@ -323,18 +353,19 @@ async def summarize_conversation_node(state: AgentState) -> dict:
 	except Exception as exc:
 		# Si el resumen falla, conservamos el anterior para no perder contexto.
 		logger.warning("[Summarizer] Error al resumir historial: %s", exc)
-		new_summary = previous_summary or "Conversaci\u00f3n previa sin resumen disponible."
+		new_summary = previous_summary or "Conversación previa sin resumen disponible."
 
 	# El SystemMessage de resumen pasa como primer "mensaje" del hilo reducido;
-	# los nodos siguientes lo ver\u00e1n como contexto hist\u00f3rico en el prompt.
+	# los nodos siguientes lo verán como contexto histórico en el prompt.
 	summary_message = SystemMessage(
-		content=f"[RESUMEN DE CONVERSACI\u00d3N PREVIA]\n{new_summary}"
+		content=f"[RESUMEN DE CONVERSACIÓN PREVIA]\n{new_summary}"
 	)
 
-	# Se reemplaza la lista completa. add_messages acumula, por eso devolvemos
-	# el campo como una nueva lista usando la clave especial que borra el estado.
+	# Remover del checkpointer los mensajes históricos para no inflar el estado indefinidamente
+	removals = [RemoveMessage(id=m.id) for m in historic_messages if getattr(m, "id", None)]
+
 	return {
-		"messages": [summary_message, *recent_messages],
+		"messages": [*removals, summary_message],
 		"conversation_summary": new_summary,
 	}
 
@@ -356,10 +387,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 	context_str = (
 		f"Fecha actual del consultorio: {fecha_str} ({dia_nombre}) | Hora actual en Colombia: {hora_str}.\n"
 		"REGLAS OBLIGATORIAS DE FECHAS Y HORARIOS:\n"
-		f"1. Hoy es {fecha_str} ({dia_nombre}). Cuando el paciente diga 'hoy', 'mañana' o un día relativo, calcula la fecha partiendo de hoy.\n"
-		f"2. NUNCA ofrezcas horarios en el pasado respecto a la hora actual ({hora_str}).\n"
-		"3. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
-		"4. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
+		f"1. Hoy es {fecha_str} ({dia_nombre}). Cuando el paciente diga 'hoy', 'mañana', o pida una hora sin fecha, calcula o consulta partiendo de hoy ({fecha_str}).\n"
+		f"2. NUNCA ofrezcas horarios en el pasado respecto a la hora actual en Colombia ({hora_str}).\n"
+		f"3. Si el paciente pide una hora que no está en punto o y media (ej. 1:42 PM), ofrece el turno POSTERIOR más cercano (ej. 2:00 PM o 2:30 PM). NUNCA ofrezcas turnos anteriores (como 1:00 PM o 1:30 PM).\n"
+		"4. El horario de almuerzo es únicamente de 12:00 PM a 1:00 PM. Horas de la tarde NUNCA coinciden con almuerzo.\n"
+		"5. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
+		"6. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
 	)
 	
 	combined_system_message = SystemMessage(
@@ -371,16 +404,19 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
 
 	for msg in state.get("messages", []):
+		# Filtrar mensajes transitorios o placeholders que pudieran haber quedado en historial previo
+		if isinstance(msg, AIMessage) and msg.content and "[Consultando información" in msg.content:
+			continue
 		if isinstance(msg, SystemMessage):
 			chat_messages.append(HumanMessage(content=f"[Contexto / Resumen de conversación previa]:\n{msg.content}"))
 		elif is_gemini and isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and not msg.content:
 			# En Gemini, un AIMessage con tool_calls de turnos anteriores sin thought_signature causa error 400.
-			# Lo convertimos a un mensaje de transición legible.
-			chat_messages.append(AIMessage(content="[Consultando información en el sistema...]"))
+			# Se omite para que no genere error de firma faltante.
+			continue
 		elif is_gemini and isinstance(msg, ToolMessage):
 			# En Gemini, convertimos ToolMessage a un turno de contexto del sistema.
 			tool_name = getattr(msg, "name", None) or "herramienta"
-			chat_messages.append(HumanMessage(content=f"[Resultado del sistema ({tool_name})]:\n{msg.content}"))
+			chat_messages.append(HumanMessage(content=f"[Información del sistema ({tool_name})]:\n{msg.content}"))
 		else:
 			chat_messages.append(msg)
 	

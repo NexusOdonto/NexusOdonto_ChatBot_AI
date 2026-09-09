@@ -74,12 +74,14 @@ def _generar_slots_desde_regla(
         lend = leh * 60 + lem
 
         slots = []
-        while cur + duracion_min <= end:
-            if not (cur < lend and (cur + duracion_min) > lstart):
+        step_min = 30
+        dur_min = max(30, min(duracion_min, 60))
+        while cur + dur_min <= end:
+            if not (cur < lend and (cur + dur_min) > lstart):
                 h = cur // 60
                 m = cur % 60
                 slots.append(f"{h:02d}:{m:02d}")
-            cur += duracion_min
+            cur += step_min
         return slots
     except Exception:
         return [str(start_time_str)[:5]]
@@ -207,6 +209,10 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
             if horarios:
                 slots = []
                 for h in horarios:
+                    h_prof = str(_obtener_valor(h, "professionalId", "profesionalId") or "")
+                    if h_prof and h_prof.lower() != str(prof_id).lower():
+                        continue
+
                     start_day = _obtener_valor(h, "startDay", "diaInicio")
                     end_day = _obtener_valor(h, "endDay", "diaFin")
                     start_time = _obtener_valor(h, "startTime", "horaInicio")
@@ -227,8 +233,8 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                                 inicio = str(inicio)[:5]
                             slots.append(inicio)
 
-                # Eliminar duplicados manteniendo orden
-                unique_slots = list(dict.fromkeys(slots))
+                # Eliminar duplicados y ordenar cronológicamente
+                unique_slots = sorted(list(dict.fromkeys(slots)))
 
                 # Filtrar turnos ya ocupados por citas existentes
                 try:
@@ -257,8 +263,10 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                     now_bogota = datetime.now()
 
                 if str(fecha)[:10] == now_bogota.strftime("%Y-%m-%d"):
-                    current_hhmm = now_bogota.strftime("%H:%M")
-                    unique_slots = [s for s in unique_slots if s > current_hhmm]
+                    # Mínimo 30 minutos de anticipación para citas del mismo día
+                    min_dt = now_bogota + timedelta(minutes=30)
+                    min_hhmm = min_dt.strftime("%H:%M")
+                    unique_slots = [s for s in unique_slots if s >= min_hhmm]
                 if unique_slots:
                     # Agrupar visualmente slots mañana y tarde
                     manana = [s for s in unique_slots if int(s.split(":")[0]) < 12]
@@ -325,6 +333,12 @@ async def _agendar_cita_impl(
                 paciente = await dotnet_client.buscar_paciente_por_person_id(str(person_id))
                 if paciente:
                     paciente_id = paciente.get("id")
+                else:
+                    # La persona existe en Persons pero aún no está en Patients: crearlo directamente
+                    logger.info(f"[Agenda] Persona {person_id} existe pero no tiene registro en Patients. Creando paciente...")
+                    nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(person_id))
+                    if nuevo_pac:
+                        paciente_id = nuevo_pac.get("id")
 
         if not paciente_id:
             # El paciente no existe: crearlo con datos básicos usando su número de WA como teléfono
@@ -338,6 +352,16 @@ async def _agendar_cita_impl(
                 paciente_id = resultado_registro.get("patientId") or resultado_registro.get("id")
                 logger.info(f"[Agenda] Paciente creado exitosamente con ID: {paciente_id}")
             else:
+                # Si falló (por ejemplo conflicto porque la persona ya existía con otro formato de documento)
+                logger.info(f"[Agenda] Onboarding básico no retornó ID. Buscando persona para vincular paciente...")
+                persona_reintento = await dotnet_client.buscar_persona_por_documento(cedula.strip())
+                if persona_reintento and persona_reintento.get("id"):
+                    nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(persona_reintento["id"]))
+                    if nuevo_pac:
+                        paciente_id = nuevo_pac.get("id")
+                        logger.info(f"[Agenda] Paciente vinculado tras resolución de conflicto con ID: {paciente_id}")
+
+            if not paciente_id:
                 return (
                     "⚠️ No pude registrar tus datos en el sistema. "
                     "Por favor comunícate con recepción al *+57 324 6030217* para que te atiendan. 😊"
@@ -398,8 +422,30 @@ async def _agendar_cita_impl(
                     starts_dt = datetime.now()
 
             ends_dt = starts_dt + timedelta(minutes=duracion_min)
+
+            # Ajustar ends_dt si cruza el horario de almuerzo (12:00 a 13:00) o fin de jornada (17:00)
+            if starts_dt.hour < 12 and ends_dt.hour >= 12 and (ends_dt.hour > 12 or ends_dt.minute > 0):
+                ends_dt = starts_dt.replace(hour=12, minute=0, second=0)
+            elif starts_dt.hour < 17 and ends_dt.hour >= 17 and (ends_dt.hour > 17 or ends_dt.minute > 0):
+                ends_dt = starts_dt.replace(hour=17, minute=0, second=0)
+
             starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%S")
             ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+            # Validar que si la cita es para hoy, tenga al menos 20 minutos de margen de anticipación
+            try:
+                from zoneinfo import ZoneInfo
+                now_bogota = datetime.now(ZoneInfo("America/Bogota"))
+                if starts_dt.date() == now_bogota.date():
+                    dt_check = starts_dt.replace(tzinfo=ZoneInfo("America/Bogota"))
+                    if dt_check < now_bogota + timedelta(minutes=20):
+                        hora_sol = starts_dt.strftime("%I:%M %p")
+                        return (
+                            f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos). "
+                            "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊"
+                        )
+            except Exception:
+                pass
         except Exception as dt_err:
             logger.warning(f"[Agenda Tools] Error formateando fechas ({fecha_hora_inicio}): {dt_err}")
             now = datetime.now()
@@ -781,6 +827,91 @@ async def _modificar_cita_impl(
         return "Lo siento, ocurrió un problema al modificar la cita. Por favor intenta de nuevo o llama a recepción."
 
 
+async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str:
+    """Confirma la asistencia del paciente a una cita activa o programada."""
+    try:
+        cedula = (cedula or "").strip()
+        cita_id = (cita_id or "").strip()
+
+        if not cedula:
+            return "Para confirmar tu cita, por favor indícame tu *número de cédula* 🆔. 😊"
+
+        # Obtener citas del paciente
+        citas = await dotnet_client.buscar_citas_por_cedula(cedula)
+        if not citas:
+            return (
+                f"📋 *Consulta de Citas* 🦷✨\n\n"
+                f"No encontré citas registradas para la cédula *{cedula}*.\n\n"
+                "Si deseas agendar una nueva cita, ¡con gusto te ayudo! 😊"
+            )
+
+        # Filtrar citas que no estén canceladas ni atendidas
+        citas_activas = [
+            c for c in citas
+            if str(c.get("statusName", "")).lower() not in ("cancelada", "completed", "atendida")
+        ]
+        if not citas_activas:
+            return f"No tienes citas pendientes por confirmar para la cédula *{cedula}*. Todas se encuentran completadas o canceladas. 😊"
+
+        cita_a_confirmar = None
+        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
+            for c in citas_activas:
+                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
+                if c_id == cita_id.lower():
+                    cita_a_confirmar = c
+                    break
+
+        if not cita_a_confirmar:
+            if len(citas_activas) == 1:
+                cita_a_confirmar = citas_activas[0]
+            else:
+                cita_a_confirmar = citas_activas[0]
+
+        target_id = str(cita_a_confirmar.get("id") or cita_a_confirmar.get("citaId"))
+        res = await dotnet_client.confirmar_estado_cita(target_id)
+        if not res.get("success"):
+            return (
+                "Hubo un pequeño problema al confirmar tu cita en el sistema. "
+                "Por favor comunícate directamente con recepción al +57 324 6030217 para asegurar tu asistencia. 😊"
+            )
+
+        # Formatear datos para respuesta agradable
+        doctor = cita_a_confirmar.get("professionalName", "Especialista Odontológico")
+        servicio = cita_a_confirmar.get("serviceName", "Consulta Odontológica")
+        starts_at_raw = cita_a_confirmar.get("startsAt") or ""
+        
+        fecha_display = starts_at_raw[:10]
+        hora_display = starts_at_raw[11:16]
+        try:
+            clean_start = str(starts_at_raw).replace("Z", "").split(".")[0]
+            dt = datetime.fromisoformat(clean_start)
+            dias = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            meses = [
+                "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+            ]
+            fecha_display = f"{dias[dt.weekday()]}, {dt.day} de {meses[dt.month - 1]} de {dt.year}"
+            hora_display = dt.strftime("%I:%M %p").lstrip("0")
+        except Exception:
+            pass
+
+        return (
+            f"¡Excelente! Tu cita ha sido *confirmada exitosamente* en nuestro sistema 🎉✅\n\n"
+            f"📋 *Resumen de tu Cita Confirmada:*\n"
+            f"• 👤 *Cédula:* {cedula}\n"
+            f"• 👨‍⚕️ *Especialista:* {doctor}\n"
+            f"• 🦷 *Tratamiento:* {servicio}\n"
+            f"• 📅 *Fecha:* {fecha_display}\n"
+            f"• ⏰ *Horario:* {hora_display}\n"
+            f"• 📍 *Sede:* Cr 24 #35-12, Santander\n\n"
+            f"💡 *Recomendación:* Por favor llega 10 a 15 minutos antes de tu turno para prepararte con calma.\n\n"
+            f"¡El equipo de Nexus Odonto te espera con gusto! ¿Hay algo más en lo que te pueda colaborar hoy? 😊🦷"
+        )
+    except Exception as exc:
+        logger.error(f"Error confirmando cita para cédula {cedula}: {exc}", exc_info=True)
+        return "Lo siento, ocurrió un problema al confirmar tu cita. Por favor intenta de nuevo en unos minutos o contacta a recepción."
+
+
 async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
     try:
         especialidades = await dotnet_client.obtener_especialidades() or []
@@ -967,3 +1098,19 @@ def consultar_servicios_y_precios_tool() -> str:
     Usa esta herramienta cuando el usuario pregunte qué servicios prestan, qué tratamientos hacen, o cuánto cuestan los procedimientos.
     """
     return _run_sync(_consultar_servicios_impl())
+
+
+@tool
+def confirmar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
+    """
+    Confirma formalmente la asistencia del paciente a una cita activa o recordatorio en el sistema Nexus Odonto.
+    Actualiza el estado de la cita en la base de datos a CONFIRMADA (verde).
+    
+    Parámetros:
+    - cedula: Número de cédula o documento de identidad del paciente (OBLIGATORIO).
+    - cita_id: (Opcional) ID de la cita a confirmar si se conoce. Si se omite, el sistema confirmará automáticamente su cita más próxima activa.
+    
+    Usa esta herramienta cuando el paciente responda a un recordatorio diciendo 'Confirmo', 'Sí confirmo', 'Confirmo mi cita',
+    'Confirmo mi asistencia', 'Allá estaré', o cuando solicite explícitamente confirmar su cita.
+    """
+    return _run_sync(_confirmar_cita_impl(cedula, cita_id))

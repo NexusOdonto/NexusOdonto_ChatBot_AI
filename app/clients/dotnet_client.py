@@ -701,7 +701,7 @@ class DotNetClient:
         return None
 
     async def buscar_persona_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
-        """Busca si existe una persona registrada con el número de documento dado."""
+        """Busca si existe una persona registrada con el número de documento dado, comparando dígitos."""
         if not document_number:
             return None
         personas = await self.obtener_personas()
@@ -709,12 +709,36 @@ class DotNetClient:
             return None
 
         clean_doc = str(document_number).strip().lower()
+        doc_digits = "".join(c for c in clean_doc if c.isdigit())
+
         for persona in personas:
             if not isinstance(persona, dict):
                 continue
             doc = str(persona.get("documentNumber") or "").strip().lower()
-            if doc == clean_doc:
+            p_digits = "".join(c for c in doc if c.isdigit())
+            if doc == clean_doc or (doc_digits and doc_digits == p_digits):
                 return persona
+        return None
+
+    async def crear_paciente_para_persona(
+        self,
+        person_id: str,
+        contacto_emergencia: str = "Recepción Nexus",
+        telefono_emergencia: str = "+573246030217",
+    ) -> Optional[Dict[str, Any]]:
+        """Crea el registro en la tabla Patients para una persona que ya existe en Persons."""
+        url = f"{self.base_url}/Patients"
+        payload = {
+            "personId": str(person_id),
+            "emergencyContact": contacto_emergencia,
+            "emergencyPhone": telefono_emergencia,
+        }
+        res = await self._request_with_retry("POST", url, json=payload)
+        if res and res.status_code in (200, 201):
+            logger.info(f"[.NET Client] Registro de paciente creado exitosamente para personId: {person_id}")
+            return res.json()
+        if res:
+            logger.warning(f"[.NET Client] Error creando paciente para personId {person_id} (HTTP {res.status_code}): {res.text}")
         return None
 
     async def buscar_paciente_por_person_id(self, person_id: str) -> Optional[Dict[str, Any]]:
@@ -896,13 +920,25 @@ class DotNetClient:
                     if isinstance(items, dict):
                         items = items.get("items", [])
                     for conv in items:
-                        if (
-                            str(conv.get("chatIdentifier", "")).strip() == ident
-                            and not conv.get("closedAt")
-                        ):
+                        if str(conv.get("chatIdentifier", "")).strip() == ident:
                             conv_id = str(conv.get("id"))
+                            # Si la conversación ya existe (incluso cerrada o en otro estado), se reutiliza.
+                            # Si estaba cerrada o en estado distinto de ACTIVA, se reabre en .NET.
+                            if conv.get("closedAt") or str(conv.get("conversationStatusId")) != self.STATUS_ACTIVA:
+                                try:
+                                    url_put = f"{self.base_url}/ChatbotConversations/{conv_id}"
+                                    payload_put = {
+                                        "conversationStatusId": self.STATUS_ACTIVA,
+                                        "patientId": conv.get("patientId") or patient_id,
+                                        "closedAt": None,
+                                    }
+                                    await self._request_with_retry("PUT", url_put, json=payload_put)
+                                    logger.info(f"[.NET Client] Conversación {conv_id} reabierta como ACTIVA para {ident}")
+                                except Exception as e_put:
+                                    logger.warning(f"[.NET Client] Error al reabrir conversación {conv_id}: {e_put}")
+
                             self._conversations_cache[ident] = conv_id
-                            logger.info(f"[.NET Client] Conversación activa recuperada para {ident}: {conv_id}")
+                            logger.info(f"[.NET Client] Conversación recuperada para {ident}: {conv_id}")
                             return conv_id
                 except Exception as e:
                     logger.debug(f"[.NET Client] Error parseando conversaciones existentes: {e}")
@@ -1017,6 +1053,148 @@ class DotNetClient:
     def limpiar_cache_conversacion(self, chat_identifier: str) -> None:
         """Limpia el ID en caché cuando la conversación se reinicia."""
         self._conversations_cache.pop(str(chat_identifier).strip(), None)
+
+    async def obtener_citas_agendadas_para_recordatorio(self, fecha: str) -> List[Dict[str, Any]]:
+        """Obtiene las citas programadas para una fecha específica, enriquecidas con paciente, teléfono, servicio y doctor.
+        
+        Solo incluye citas con estado AGENDADA (Scheduled: 10000000-0000-0000-0000-000000000001) para no enviar recordatorios
+        de citas ya confirmadas, canceladas o completadas.
+        """
+        citas_raw = await self.consultar_citas("")
+        if not citas_raw:
+            return []
+        
+        citas_list = citas_raw if isinstance(citas_raw, list) else citas_raw.get("items", [])
+        clean_fecha = str(fecha).strip()
+        
+        STATUS_AGENDADA = "10000000-0000-0000-0000-000000000001"
+        
+        # Filtrar por fecha de inicio y estado agendada
+        citas_filtradas = []
+        for c in citas_list:
+            if not isinstance(c, dict):
+                continue
+            starts = str(c.get("startsAt") or "")
+            status_id = str(c.get("appointmentStatusId") or "").lower()
+            if starts.startswith(clean_fecha) and status_id == STATUS_AGENDADA.lower():
+                citas_filtradas.append(c)
+                
+        if not citas_filtradas:
+            return []
+
+        # Cargar catálogos y entidades para enriquecer
+        try:
+            from datetime import datetime
+            patients = await self.obtener_catalogo("Patients") or []
+            persons = await self.obtener_personas() or []
+            profs = await self.obtener_profesionales() or []
+            servs = await self.obtener_servicios() or []
+            convs = await self.obtener_catalogo("ChatbotConversations") or []
+
+            patient_map = {str(p.get("id")).lower(): p for p in patients if isinstance(p, dict)}
+            person_map = {str(p.get("id")).lower(): p for p in persons if isinstance(p, dict)}
+            prof_map = {str(p.get("id")).lower(): p.get("name") or p.get("nombre") for p in profs if isinstance(p, dict)}
+            serv_map = {str(s.get("id")).lower(): s.get("name") or s.get("nombre") for s in servs if isinstance(s, dict)}
+            
+            # Mapeo de paciente a chatIdentifier de WhatsApp
+            patient_conv_map = {}
+            for cv in convs:
+                if isinstance(cv, dict):
+                    pid = str(cv.get("patientId") or "").lower()
+                    chat_id = cv.get("chatIdentifier") or ""
+                    if pid and chat_id and "@" in chat_id:
+                        patient_conv_map[pid] = chat_id
+
+            citas_enriquecidas = []
+            for c in citas_filtradas:
+                cita_id = str(c.get("id"))
+                patient_id = str(c.get("patientId") or "").lower()
+                prof_id = str(c.get("professionalId") or "").lower()
+                serv_id = str(c.get("serviceId") or "").lower()
+
+                patient_obj = patient_map.get(patient_id, {})
+                person_id = str(patient_obj.get("personId") or "").lower()
+                person_obj = person_map.get(person_id, {})
+
+                first_name = (person_obj.get("firstName") or "").strip()
+                last_name = (person_obj.get("lastName") or "").strip()
+                full_name = f"{first_name} {last_name}".strip() or "Paciente"
+                doc_number = (person_obj.get("documentNumber") or "").strip()
+
+                # Resolver teléfono: Person.phone -> ChatbotConversation -> Patient.emergencyPhone
+                phone_raw = (person_obj.get("phone") or "").strip()
+                if not phone_raw and patient_id in patient_conv_map:
+                    phone_raw = patient_conv_map[patient_id]
+                if not phone_raw:
+                    phone_raw = (patient_obj.get("emergencyPhone") or "").strip()
+
+                # Normalizar teléfono para WhatsApp
+                phone_clean = "".join(ch for ch in phone_raw if ch.isdigit() or ch == "+")
+                if phone_raw.endswith("@s.whatsapp.net"):
+                    phone_clean = phone_raw.replace("@s.whatsapp.net", "")
+                if phone_clean and not phone_clean.startswith("+") and len(phone_clean) == 10:
+                    phone_clean = f"+57{phone_clean}"
+
+                # Formatear hora (ej. 11:30 AM)
+                starts_at_str = str(c.get("startsAt") or "")
+                time_formatted = starts_at_str
+                try:
+                    dt = datetime.fromisoformat(starts_at_str)
+                    time_formatted = dt.strftime("%I:%M %p").lstrip("0")
+                except Exception:
+                    pass
+
+                citas_enriquecidas.append({
+                    "id": cita_id,
+                    "startsAt": starts_at_str,
+                    "timeFormatted": time_formatted,
+                    "date": clean_fecha,
+                    "patientId": patient_id,
+                    "patientName": full_name,
+                    "documentNumber": doc_number,
+                    "phone": phone_clean,
+                    "professionalId": prof_id,
+                    "professionalName": prof_map.get(prof_id, "Especialista Odontológico"),
+                    "serviceId": serv_id,
+                    "serviceName": serv_map.get(serv_id, "Consulta Odontológica"),
+                    "reasonForVisit": c.get("reasonForVisit") or "Consulta Odontológica",
+                })
+
+            return citas_enriquecidas
+        except Exception as e:
+            logger.error(f"[.NET Client] Error enriqueciendo citas para recordatorio: {e}", exc_info=True)
+            return []
+
+    async def confirmar_estado_cita(self, cita_id: str) -> Dict[str, Any]:
+        """Actualiza el estado de una cita a CONFIRMADA (10000000-0000-0000-0000-000000000002)."""
+        STATUS_CONFIRMADA = "10000000-0000-0000-0000-000000000002"
+        # Obtener datos de la cita actual para mantener los demás campos
+        url_get = f"{self.base_url}/Appointments/{cita_id}"
+        resp_get = await self._request_with_retry("GET", url_get)
+        if not resp_get or resp_get.status_code != 200:
+            return {"success": False, "error": f"No se pudo consultar la cita {cita_id}"}
+        
+        cita = resp_get.json()
+        payload = {
+            "patientId": cita.get("patientId"),
+            "professionalId": cita.get("professionalId"),
+            "serviceId": cita.get("serviceId"),
+            "startsAt": cita.get("startsAt"),
+            "endsAt": cita.get("endsAt"),
+            "appointmentStatusId": STATUS_CONFIRMADA,
+            "appointmentOriginId": cita.get("appointmentOriginId"),
+            "reasonForVisit": cita.get("reasonForVisit"),
+            "notes": ((cita.get("notes") or "") + " | Confirmada vía Chatbot WhatsApp").strip(),
+        }
+        url_put = f"{self.base_url}/Appointments/{cita_id}"
+        resp_put = await self._request_with_retry("PUT", url_put, json=payload)
+        if resp_put and resp_put.status_code in (200, 204):
+            logger.info(f"[.NET Client] Cita {cita_id} confirmada exitosamente en el sistema.")
+            return {"success": True, "citaId": cita_id, "status": "CONFIRMADA"}
+        
+        err = resp_put.text[:300] if resp_put else "Sin respuesta"
+        logger.warning(f"[.NET Client] Error confirmando cita {cita_id}: {err}")
+        return {"success": False, "error": err}
 
 
 # Instancia reutilizable para el bot y las tools

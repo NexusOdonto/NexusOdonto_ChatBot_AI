@@ -66,6 +66,14 @@ async def resume_conversation(request: ResumeConversationRequest):
             "573238891073": "57213628510462@lid",
             "573238891073@s.whatsapp.net": "57213628510462@lid",
         }
+        clean_num = phone_number.replace("@s.whatsapp.net", "").replace("+", "").strip()
+        if clean_num:
+            if clean_num not in targets:
+                targets.append(clean_num)
+            full_jid = f"{clean_num}@s.whatsapp.net"
+            if full_jid not in targets:
+                targets.append(full_jid)
+
         if phone_number in ALIAS_MAP and ALIAS_MAP[phone_number] not in targets:
             targets.append(ALIAS_MAP[phone_number])
 
@@ -75,7 +83,12 @@ async def resume_conversation(request: ResumeConversationRequest):
                 checkpointer = get_checkpointer_instance()
                 if checkpointer:
                     await checkpointer.clear_thread(t)
+                try:
+                    await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+                except Exception:
+                    pass
                 dotnet_client.limpiar_cache_conversacion(t)
+                asyncio.create_task(dotnet_client.obtener_o_crear_conversacion(t))
                 logger.info(f"[Handoff] Estado reactivado y limpiado para {t}")
             except Exception as t_err:
                 logger.warning(f"[Handoff] Error reactivando hilo {t}: {t_err}")

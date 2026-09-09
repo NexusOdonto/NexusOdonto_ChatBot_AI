@@ -95,8 +95,46 @@ def _is_escalation_request(message: str) -> bool:
 
 async def _is_escalated(thread_id: str) -> bool:
     # El estado persistido evita que el bot responda mientras recepción atiende.
-    state = await get_graph().aget_state(get_thread_config(thread_id))
-    return state.values.get("conversation_status") == "ESCALADA"
+    try:
+        state = await get_graph().aget_state(get_thread_config(thread_id))
+        is_graph_escalated = state.values.get("conversation_status") == "ESCALADA"
+    except Exception:
+        is_graph_escalated = False
+
+    if not is_graph_escalated:
+        return False
+
+    # Si LangGraph tiene el hilo como ESCALADA, verificar si recepción ya resolvió o cerró el ticket en .NET
+    try:
+        convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
+        clean_tid = thread_id.replace("@s.whatsapp.net", "").replace("+", "").strip()
+        matched_conv = None
+        for c in convs:
+            c_ident = str(c.get("chatIdentifier", "")).replace("@s.whatsapp.net", "").replace("+", "").strip()
+            if c_ident and (c_ident == clean_tid or clean_tid.endswith(c_ident) or c_ident.endswith(clean_tid)):
+                matched_conv = c
+                break
+
+        if matched_conv:
+            conv_id = str(matched_conv.get("id"))
+            tickets = await dotnet_client.obtener_catalogo("SupportTickets") or []
+            STATUS_RESUELTO = "c0000000-0000-0000-0000-000000000004"
+            STATUS_CERRADO = "c0000000-0000-0000-0000-000000000005"
+
+            has_pending_ticket = any(
+                str(t.get("chatbotConversationId", "")).lower() == conv_id.lower()
+                and str(t.get("ticketStatusId", "")).lower() not in (STATUS_RESUELTO, STATUS_CERRADO)
+                for t in tickets
+            )
+            if not has_pending_ticket:
+                logger.info(f"[Webhook] Ticket resuelto/cerrado en .NET para {thread_id}. Reactivando atención del bot.")
+                config = get_thread_config(thread_id)
+                await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+                return False
+    except Exception as e:
+        logger.warning(f"[Webhook] No se pudo verificar estado de ticket en .NET para {thread_id}: {e}")
+
+    return True
 
 
 async def _escalate_conversation(thread_id: str, phone_number: str, message: str) -> bool:
@@ -334,7 +372,16 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
                 last_message = messages[-1]
                 if isinstance(last_message, AIMessage) and last_message.content:
                     from app.core.llm_factory import extract_text_content
-                    respuesta_texto = extract_text_content(last_message.content)
+                    respuesta_texto = extract_text_content(last_message.content).strip()
+
+                    # Salvaguarda: Nunca enviar mensajes de carga intermediarios como respuesta final al paciente
+                    if respuesta_texto.startswith("[Consultando información") or respuesta_texto == "[Consultando información en el sistema...]":
+                        logger.warning(f"[Webhook] Mensaje placeholder detectado ('{respuesta_texto}') para {numero_paciente}. Ajustando a respuesta asistida.")
+                        respuesta_texto = (
+                            "¡Con mucho gusto te ayudo a consultar los detalles de tus citas! 📋✨\n\n"
+                            "Por favor indícame o confírmame tu número de cédula 🆔 para mostrártelos de inmediato en el sistema. 😊"
+                        )
+
                     await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
                     # Guardar respuesta del bot en base de datos Oracle
                     confidence = float(result.get("rag_confidence", 1.0))

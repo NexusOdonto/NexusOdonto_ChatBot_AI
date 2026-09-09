@@ -155,7 +155,8 @@ def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
     keywords_pregunta_no_cacheables = [
         "agendar", "agenda", "turno", "turnos", "reserva", "reservar",
         "apartar", "para mañana", "para hoy", "mañana a las", "hoy a las",
-        "el lunes a las", "el martes a las", "el miercoles a las", "el jueves a las", "el viernes a las"
+        "el lunes a las", "el martes a las", "el miercoles a las", "el jueves a las", "el viernes a las",
+        "consultar", "detalles", "mis citas", "ver mis citas", "mi cita", "cédula", "cedula",
     ]
     for kw in keywords_pregunta_no_cacheables:
         if kw in p_lower:
@@ -180,6 +181,8 @@ def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
         "te gustaría agendar",
         "por favor confirma",
         "detalles de tu cita",
+        "[consultando",
+        "consultando información",
     ]
 
     for palabra in palabras_no_cacheables:
