@@ -10,6 +10,7 @@ from app.agents.tools.agenda_tools import (
 	modificar_cita_tool,
 	consultar_doctores_tool,
 	consultar_servicios_y_precios_tool,
+	confirmar_cita_tool,
 )
 from app.graph.nodes import (
 	chatbot_node,
@@ -76,6 +77,7 @@ def create_graph(checkpointer: BaseCheckpointSaver) -> None:
 			modificar_cita_tool,
 			consultar_doctores_tool,
 			consultar_servicios_y_precios_tool,
+			confirmar_cita_tool,
 		]),
 	)
 

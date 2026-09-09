@@ -2,6 +2,7 @@ import os
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 import httpx
@@ -10,7 +11,10 @@ from dotenv import load_dotenv
 
 from app.agents.tools.qdrant_tool import initialize_qdrant
 from app.core.config import settings
-from app.services.appointment_reminders import enviar_recordatorios_citas
+from app.services.appointment_reminders import (
+    enviar_recordatorios_citas,
+    enviar_recordatorios_30_minutos,
+)
 from app.graph.builder import create_graph
 from app.session.postgres_checkpointer import PostgresCheckpointer
 
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Importar los routers de la API
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.agent_handoff import router as handoff_router
+from app.api.routes.reminders import router as reminders_router
 
 # Inicialización de la aplicación FastAPI
 app = FastAPI(
@@ -75,6 +80,8 @@ app.add_middleware(
 app.include_router(webhook_router, tags=["WhatsApp Webhook"])
 app.include_router(handoff_router, tags=["Agent Handoff & Messaging"])
 app.include_router(handoff_router, prefix="/api/v1", tags=["Agent Handoff & Messaging (v1)"])
+app.include_router(reminders_router, tags=["Recordatorios de Citas"])
+app.include_router(reminders_router, prefix="/api/v1", tags=["Recordatorios de Citas (v1)"])
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -96,7 +103,7 @@ async def startup() -> None:
     # Comprueba la conexión y prepara la colección antes de atender solicitudes.
     initialize_qdrant()
     scheduler.add_job(
-                # El job consulta las citas de mañana y envía los recordatorios.
+        # El job consulta las citas de mañana y envía los recordatorios.
         enviar_recordatorios_citas,
         CronTrigger(
             hour=settings.reminder_schedule_hour,
@@ -108,9 +115,18 @@ async def startup() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        # El job monitorea citas de hoy y envía recordatorio 30 minutos antes.
+        enviar_recordatorios_30_minutos,
+        IntervalTrigger(minutes=2, timezone=settings.reminder_timezone),
+        id="appointment-reminders-30m",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
     logger.info(
-        "Recordatorios programados diariamente a las %02d:%02d (%s)",
+        "Recordatorios programados: Diario a las %02d:%02d (%s) y en tiempo real cada 2 min (30 min antes de la cita)",
         settings.reminder_schedule_hour,
         settings.reminder_schedule_minute,
         settings.reminder_timezone,
