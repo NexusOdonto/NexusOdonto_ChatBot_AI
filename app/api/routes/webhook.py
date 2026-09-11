@@ -1,6 +1,8 @@
 import logging
 import re
 import asyncio
+import time
+from collections import OrderedDict
 from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
@@ -21,6 +23,50 @@ from app.services.semantic_cache import buscar_en_cache, guardar_en_cache
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["WhatsApp Webhook"])
+
+# Dedupe inbound webhook deliveries (global + instance, or Evolution retries)
+_MESSAGE_DEDUPE_TTL_SECONDS = 90
+_SEEN_MESSAGE_IDS: OrderedDict[str, float] = OrderedDict()
+_CHAT_LOCKS: dict[str, asyncio.Lock] = {}
+_CHAT_LOCKS_GUARD = asyncio.Lock()
+
+
+def _prune_seen_message_ids(now: float) -> None:
+    while _SEEN_MESSAGE_IDS:
+        oldest_id, seen_at = next(iter(_SEEN_MESSAGE_IDS.items()))
+        if now - seen_at <= _MESSAGE_DEDUPE_TTL_SECONDS:
+            break
+        _SEEN_MESSAGE_IDS.popitem(last=False)
+
+
+def _is_duplicate_message_id(message_id: str | None) -> bool:
+    """Return True if this message key.id was already accepted within the TTL window."""
+    if not message_id:
+        return False
+    now = time.monotonic()
+    _prune_seen_message_ids(now)
+    if message_id in _SEEN_MESSAGE_IDS:
+        return True
+    _SEEN_MESSAGE_IDS[message_id] = now
+    _SEEN_MESSAGE_IDS.move_to_end(message_id)
+    return False
+
+
+async def _get_chat_lock(chat_id: str) -> asyncio.Lock:
+    async with _CHAT_LOCKS_GUARD:
+        lock = _CHAT_LOCKS.get(chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _CHAT_LOCKS[chat_id] = lock
+        return lock
+
+
+async def _with_chat_lock(chat_id: str, coro):
+    """Serialize processing per chat so the same conversation is not handled in parallel."""
+    lock = await _get_chat_lock(chat_id)
+    async with lock:
+        return await coro
+
 
 # Mensaje amigable si falla la API de .NET, base de datos o el bot
 MENSAJE_FALLBACK_PACIENTE = (
@@ -324,23 +370,35 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
         result = await get_graph().ainvoke(invoke_input, config)
 
         if result.get("conversation_status") == "ESCALADA":
-            # Escalado inmediato (ej: triage de urgencia detectado en emergency_check_node)
-            messages = result.get("messages", [])
-            if messages:
-                last_message = messages[-1]
-                if isinstance(last_message, AIMessage) and last_message.content:
-                    from app.core.llm_factory import extract_text_content
-                    resp_urg = extract_text_content(last_message.content)
-                    await evolution_client.enviar_mensaje(numero_paciente, resp_urg)
-                    asyncio.create_task(
-                        dotnet_client.registrar_mensaje(
-                            chat_identifier=numero_paciente,
-                            rol="CHATBOT",
-                            contenido=resp_urg,
-                            rag_confidence=result.get("rag_confidence", 1.0),
+            # Escalado inmediato (ej: triage de urgencia en emergency_check_node).
+            # Si el nodo del grafo ya envió por WhatsApp (emergency_detected), no reenviar el AIMessage.
+            already_sent_by_graph = bool(result.get("emergency_detected"))
+            if not already_sent_by_graph:
+                messages = result.get("messages", [])
+                if messages:
+                    last_message = messages[-1]
+                    if isinstance(last_message, AIMessage) and last_message.content:
+                        from app.core.llm_factory import extract_text_content
+                        resp_urg = extract_text_content(last_message.content)
+                        await evolution_client.enviar_mensaje(numero_paciente, resp_urg)
+                        asyncio.create_task(
+                            dotnet_client.registrar_mensaje(
+                                chat_identifier=numero_paciente,
+                                rol="CHATBOT",
+                                contenido=resp_urg,
+                                rag_confidence=result.get("rag_confidence", 1.0),
+                            )
                         )
-                    )
-            await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
+            if already_sent_by_graph:
+                # Ticket + WhatsApp ya hechos en emergency_check_node; solo asegurar estado local.
+                config = get_thread_config(numero_paciente)
+                await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+                logger.info(
+                    f"[BG] Emergencia ya notificada por el grafo para {numero_paciente}; "
+                    "se omite reenvío de AIMessage y MENSAJE_ESCALAMIENTO."
+                )
+            else:
+                await _escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             return
 
         if result.get("rag_confidence", 1.0) < settings.rag_min_confidence:
@@ -450,6 +508,11 @@ async def receive_whatsapp_message(request: Request):
             if data.key and data.key.fromMe:
                 return {"status": "ignored", "reason": "self_message"}
 
+            message_id = getattr(data.key, "id", None) if data.key else None
+            if _is_duplicate_message_id(message_id):
+                logger.info(f"[Webhook] Mensaje duplicado ignorado (key.id={message_id})")
+                return {"status": "ignored", "reason": "duplicate_message_id"}
+
             # Extraer número del paciente completo (con el sufijo de whatsapp)
             remote_jid = data.key.remoteJid if (data.key and data.key.remoteJid) else ""
             if not remote_jid:
@@ -503,7 +566,10 @@ async def receive_whatsapp_message(request: Request):
                 logger.info(f"[Webhook] Audio recibido de {numero_paciente}. Encolando transcripción y procesamiento...")
                 raw_payload_data = raw_json.get("data", {})
                 asyncio.create_task(
-                    _process_whatsapp_audio(numero_paciente, raw_payload_data, unwrapped_message)
+                    _with_chat_lock(
+                        numero_paciente,
+                        _process_whatsapp_audio(numero_paciente, raw_payload_data, unwrapped_message),
+                    )
                 )
             elif is_unsupported_media:
                 caption = ""
@@ -513,7 +579,10 @@ async def receive_whatsapp_message(request: Request):
 
                 logger.info(f"[Webhook] Medio no soportado recibido de {numero_paciente} (caption: '{caption}'). Encolando aviso...")
                 asyncio.create_task(
-                    _process_whatsapp_unsupported_media(numero_paciente, caption)
+                    _with_chat_lock(
+                        numero_paciente,
+                        _process_whatsapp_unsupported_media(numero_paciente, caption),
+                    )
                 )
             else:
                 # Extraer texto del mensaje (incluye respuestas de botones/listas)
@@ -536,7 +605,10 @@ async def receive_whatsapp_message(request: Request):
                 if mensaje_texto:
                     logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
                     asyncio.create_task(
-                        _process_whatsapp_message(numero_paciente, mensaje_texto)
+                        _with_chat_lock(
+                            numero_paciente,
+                            _process_whatsapp_message(numero_paciente, mensaje_texto),
+                        )
                     )
                 else:
                     logger.warning(f"[Webhook] Mensaje no reconocido o vacío de {numero_paciente}: {unwrapped_message}")

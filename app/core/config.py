@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     webhook_signature_header: str = "x-webhook-signature"
 
     # Configuración de la API externa y reintentos de comunicación.
-    agent_internal_secret: str = ""
+    agent_internal_secret: str = "TOKEN_SECRETO_INTERNO_NET_2026"
     dotnet_auth_login: str = Field(
         default="",
         validation_alias=AliasChoices("DOTNET_AUTH_LOGIN", "DOTNET_API_USER"),

@@ -15,6 +15,7 @@ class EvolutionClient:
         self.instance_name: str = os.getenv("EVOLUTION_INSTANCE_NAME", os.getenv("INSTANCE_NAME", "clinica_odonto"))
         self.api_key: str = os.getenv("EVOLUTION_API_KEY", "")
         self.timeout: float = float(os.getenv("EVOLUTION_API_TIMEOUT", "15.0"))
+        self._default_delay_ms: int = int(os.getenv("EVOLUTION_SEND_DELAY_MS", "400"))
 
     def _get_headers(self) -> Dict[str, str]:
         """Encabezados requeridos por Evolution API."""
@@ -46,12 +47,14 @@ class EvolutionClient:
 
         return dest
 
-    async def enviar_mensaje(self, numero: str, texto: str, delay: int = 1200) -> Optional[Dict[str, Any]]:
+    async def enviar_mensaje(self, numero: str, texto: str, delay: int | None = None) -> Optional[Dict[str, Any]]:
         """
         Envía un mensaje de texto a través de Evolution API v2.
         Endpoint: POST /message/sendText/{instance_name}
         Payload: {"number": numero, "text": texto, "delay": delay}
         """
+        if delay is None:
+            delay = self._default_delay_ms
         url = f"{self.base_url}/message/sendText/{self.instance_name}"
         target_number = self._normalize_destination(numero)
         
@@ -84,7 +87,7 @@ class EvolutionClient:
         descripcion: str,
         botones: list[Dict[str, str]],
         pie: str = "",
-        delay: int = 1200,
+        delay: int | None = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Envía un mensaje interactivo con botones de respuesta rápida vía Evolution API v2.
@@ -96,6 +99,8 @@ class EvolutionClient:
 
         WhatsApp permite máximo 3 botones por mensaje.
         """
+        if delay is None:
+            delay = self._default_delay_ms
         url = f"{self.base_url}/message/sendButtons/{self.instance_name}"
         payload = {
             "number": numero,
@@ -138,7 +143,7 @@ class EvolutionClient:
         texto_boton: str,
         secciones: list[Dict[str, Any]],
         pie: str = "",
-        delay: int = 1200,
+        delay: int | None = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Envía un mensaje interactivo tipo lista de selección vía Evolution API v2.
@@ -148,6 +153,8 @@ class EvolutionClient:
           - "title": nombre de la sección
           - "rows": [{"title": "Opción", "description": "Detalle", "rowId": "ID_TECNICO"}]
         """
+        if delay is None:
+            delay = self._default_delay_ms
         url = f"{self.base_url}/message/sendList/{self.instance_name}"
         payload = {
             "number": numero,

@@ -650,11 +650,11 @@ class DotNetClient:
         """Autentica un paciente mediante documento y contraseña.
 
         Endpoint: POST /api/auth/login
-        Payload: {documentNumber, password}
+        Payload: {loginId, password}  (loginId = cédula / documentNumber)
         Retorna el JWT y datos de sesión si es exitoso.
         """
         login_endpoint = f"{self._auth_url}/login"
-        payload = {"documentNumber": document_number, "password": password}
+        payload = {"loginId": document_number, "password": password}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(

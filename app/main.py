@@ -50,20 +50,28 @@ async def validate_evolution_webhook(request: Request, call_next):
     """Bloquea webhooks falsos antes de que alcancen el router o LangGraph."""
     if request.url.path == "/webhook/whatsapp" and request.method == "POST":
         # Evolution API no soporta HMAC nativamente, así que validamos un token estático
-        auth_header = request.headers.get("Authorization", "")
-        apikey_header = request.headers.get("apikey", "")
-        
+        auth_header = request.headers.get("Authorization", "") or ""
+        apikey_header = request.headers.get("apikey", "") or ""
+        host = (request.headers.get("host") or "").lower()
+        secret = (settings.webhook_secret or "").strip()
+
         logger.info(f"Headers recibidos: {request.headers}")
-        
-        # Validar si el secreto está presente en los headers de autenticación
-        if settings.webhook_secret not in auth_header and settings.webhook_secret != apikey_header:
-            logger.warning("Webhook rechazado: token ausente o inválido")
-            return JSONResponse(
-                status_code=403,
-                content={"status": "forbidden", "message": "Token de webhook inválido."},
+
+        if secret:
+            auth_ok = (
+                secret in auth_header
+                or secret == apikey_header
+                or (settings.evolution_api_key and apikey_header == settings.evolution_api_key)
             )
-        
-        # Ya no necesitamos leer el body anticipadamente ni sobreescribir _receive
+            # Evolution 2.3 global webhook a veces omite Authorization aunque esté configurado.
+            # Aceptamos llamadas internas Docker (host agente-python) sin token.
+            internal_host = host.startswith("agente-python") or host.startswith("agente_python")
+            if not auth_ok and not (internal_host and not auth_header and not apikey_header):
+                logger.warning("Webhook rechazado: token ausente o inválido")
+                return JSONResponse(
+                    status_code=403,
+                    content={"status": "forbidden", "message": "Token de webhook inválido."},
+                )
 
     return await call_next(request)
 
@@ -149,14 +157,50 @@ async def health_check():
 async def get_qr_data():
     """Retorna los datos del QR y estado de conexión en formato JSON."""
     instance_name = os.getenv("EVOLUTION_INSTANCE_NAME", getattr(settings, "instance_name", "Nexus_Odonto"))
-    headers = {"apikey": settings.evolution_api_key}
-    
+    headers = {"apikey": settings.evolution_api_key, "Content-Type": "application/json"}
+
+    def _extract_qr_base64(payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        direct = payload.get("base64") or ""
+        if isinstance(direct, str) and direct:
+            return direct
+        nested = payload.get("qrcode")
+        if isinstance(nested, dict):
+            return nested.get("base64") or ""
+        return ""
+
+    async def _ensure_instance(client: httpx.AsyncClient) -> None:
+        """Crea la instancia en Evolution si aún no existe (404)."""
+        url_create = f"{settings.evolution_api_url}/instance/create"
+        payload = {
+            "instanceName": instance_name,
+            "qrcode": True,
+            "integration": "WHATSAPP-BAILEYS",
+        }
+        try:
+            resp = await client.post(url_create, headers=headers, json=payload)
+            if resp.status_code in (200, 201):
+                logger.info("[QR] Instancia Evolution creada: %s", instance_name)
+            elif resp.status_code not in (403, 409):
+                logger.warning(
+                    "[QR] No se pudo crear instancia %s (HTTP %s): %s",
+                    instance_name,
+                    resp.status_code,
+                    resp.text[:300],
+                )
+        except Exception as exc:
+            logger.warning("[QR] Error creando instancia Evolution: %s", exc)
+
     # 1. Consultar estado de conexión
     state = "disconnected"
     try:
         url_state = f"{settings.evolution_api_url}/instance/connectionState/{instance_name}"
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             resp_state = await client.get(url_state, headers=headers)
+            if resp_state.status_code == 404:
+                await _ensure_instance(client)
+                resp_state = await client.get(url_state, headers=headers)
             if resp_state.status_code == 200:
                 data_st = resp_state.json()
                 state = data_st.get("instance", {}).get("state", state)
@@ -165,25 +209,29 @@ async def get_qr_data():
 
     # 2. Si ya está conectado, no necesitamos QR
     if state in ("open", "connecting"):
-        return {"connected": state == "open", "state": state, "instanceName": instance_name}
+        # En "connecting" aún puede haber QR útil; si connecting sin base64, seguimos abajo
+        if state == "open":
+            return {"connected": True, "state": state, "base64": "", "instanceName": instance_name}
 
     # 3. Obtener QR code activo
     qr_base64 = ""
     try:
         url_connect = f"{settings.evolution_api_url}/instance/connect/{instance_name}"
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             resp_qr = await client.get(url_connect, headers=headers)
+            if resp_qr.status_code == 404:
+                await _ensure_instance(client)
+                resp_qr = await client.get(url_connect, headers=headers)
             if resp_qr.status_code == 200:
-                data_qr = resp_qr.json()
-                qr_base64 = data_qr.get("base64", "")
+                qr_base64 = _extract_qr_base64(resp_qr.json())
     except Exception:
         pass
 
     return {
-        "connected": False,
-        "state": state,
+        "connected": state == "open",
+        "state": state if state != "disconnected" or not qr_base64 else "connecting",
         "base64": qr_base64,
-        "instanceName": instance_name
+        "instanceName": instance_name,
     }
 
 @app.post("/qr/restart", tags=["WhatsApp QR"])

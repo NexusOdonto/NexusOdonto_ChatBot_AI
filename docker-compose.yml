@@ -4,8 +4,6 @@ services:
   evolution-whatsapp:
     image: evoapicloud/evolution-api:latest
     container_name: evolution_whatsapp
-    ports:
-      - "${EVOLUTION_PORT:-8085}:8080"
     environment:
       - AUTHENTICATION_API_KEY=CLAVE_SECRETA_ODONTO_2026
       - DATABASE_ENABLED=true
@@ -15,10 +13,21 @@ services:
       - CACHE_LOCAL_ENABLED=true
       - REDIS_ENABLED=false
       - WEBSOCKET_ENABLED=false
+      # Instance webhook only — avoid duplicate deliveries via global + instance webhooks
       - WEBHOOK_GLOBAL_ENABLED=false
       - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
-      - WEBHOOK_GLOBAL_AUTHORIZATION=${WEBHOOK_SECRET:-}
+      - WEBHOOK_GLOBAL_AUTHORIZATION=${WEBHOOK_SECRET:-SECRETO_COMPARTIDO_CON_EVOLUTION}
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+      - WEBHOOK_EVENTS_MESSAGES_UPDATE=true
+      - WEBHOOK_EVENTS_CONNECTION_UPDATE=true
+      # URL interna de la API (ayuda a Baileys a estabilizar el handshake)
+      - SERVER_URL=http://evolution-whatsapp:8080
+      - QRCODE_LIMIT=30
+      - NODE_OPTIONS=--dns-result-order=ipv4first
+      # Versión de WhatsApp Web que emula Baileys (sin sufijo -alpha)
+      - CONFIG_SESSION_PHONE_VERSION=2.3000.1047303469
+      - CONFIG_SESSION_PHONE_CLIENT=Chrome
+      - CONFIG_SESSION_PHONE_NAME=Chrome
     depends_on:
       - evolution-postgres
     volumes:
@@ -41,8 +50,6 @@ services:
   qdrant-db:
     image: qdrant/qdrant:v1.11.0
     container_name: qdrant_vector
-    ports:
-      - "6333:6333"
     networks:
       - odontologia_network
 
@@ -53,8 +60,6 @@ services:
       - POSTGRES_USER=bot_user
       - POSTGRES_PASSWORD=bot_password
       - POSTGRES_DB=bot_memory
-    ports:
-      - "5433:5432"
     volumes:
       - bot_memory_data:/var/lib/postgresql/data
     networks:
@@ -82,17 +87,17 @@ services:
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-CLAVE_SECRETA_ODONTO_2026}
-      - DOTNET_API_URL=http://host.docker.internal:5170/api/v1
+      - DOTNET_API_URL=http://odontologia_api:8080/api/v1
       - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN:-}
       - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD:-}
       - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory
       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
       - WEBHOOK_SIGNATURE_HEADER=${WEBHOOK_SIGNATURE_HEADER:-x-webhook-signature}
+      - AGENT_INTERNAL_SECRET=${AGENT_INTERNAL_SECRET:-TOKEN_SECRETO_INTERNO_NET_2026}
+      - EVOLUTION_SEND_DELAY_MS=${EVOLUTION_SEND_DELAY_MS:-400}
     depends_on:
       - qdrant-db
       - bot-memory-db
-    volumes:
-      - ./app:/app/app
     networks:
       - odontologia_network
 
@@ -103,4 +108,5 @@ volumes:
 
 networks:
   odontologia_network:
+    name: odontologia_network
     driver: bridge
