@@ -638,7 +638,8 @@ class DotNetClient:
             "address": "Consultorio Nexus Odonto",
             "emergencyContact": "Recepción Nexus",
             "emergencyPhone": "+573246030217",
-            "password": f"Nexus{cedula_clean}!"
+            "password": cedula_clean,
+            "mustChangePassword": True,
         }
         res = await self.registrar_paciente(onboard_payload)
         if res:

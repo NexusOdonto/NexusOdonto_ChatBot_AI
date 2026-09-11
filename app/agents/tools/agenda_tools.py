@@ -1,3 +1,4 @@
+import os
 import unicodedata
 import logging
 import asyncio
@@ -478,6 +479,7 @@ async def _agendar_cita_impl(
             hora_fin_str = ends_dt.strftime("%H:%M")
             fecha_str = starts_dt.strftime("%d/%m/%Y")
 
+            web_url = os.getenv("WEB_PORTAL_URL", "https://nexusodonto.com/login")
             return (
                 f"¡Cita Confirmada con Éxito! 🎉🦷✨\n\n"
                 f"📋 *Resumen de tu Cita:*\n"
@@ -490,10 +492,14 @@ async def _agendar_cita_impl(
                 f"• ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
                 f"• 🆔 *Código de Cita:* `{cita_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🌐 *Consulta y gestiona tus citas desde nuestra página web:*\n"
+                f"🔗 {web_url}\n"
+                f"• 👤 *Usuario:* `{cedula}`\n"
+                f"• 🔑 *Contraseña temporal:* `{cedula}`\n\n"
+                f"💡 *Nota:* Al ingresar por primera vez a la web, el sistema te solicitará crear tu propia contraseña por seguridad.\n\n"
                 f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
                 f"📞 *Atención:* +57 324 6030217\n\n"
-                f"💡 *Recomendación:* Por favor llega 10 minutos antes de tu hora programada.\n"
-                f"Para *consultar, modificar o cancelar* esta cita, usa tu cédula *{cedula}*. ¡Será un placer cuidar de tu sonrisa! 😊✨"
+                f"¡Será un placer cuidar de tu sonrisa! 😊✨"
             )
         else:
             return "Lo siento, ocurrió un inconveniente al registrar la cita en el sistema. Es posible que el horario seleccionado ya esté ocupado. ¿Te gustaría intentar con otro horario disponible? 😊"
