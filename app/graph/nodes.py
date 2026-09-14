@@ -201,16 +201,19 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
 			except Exception as e:
 				logger.error(f"[Emergency Detector] Error enviando alerta por WhatsApp a {thread_id}: {e}")
 
-		# 2. Escalar ticket a nivel CRÍTICO en .NET inmediatamente
+		# 2. Escalar ticket a nivel CRÍTICO y actualizar estado en .NET inmediatamente
 		if thread_id:
 			try:
+				conv_id = await dotnet_client.obtener_o_crear_conversacion(thread_id)
+				if conv_id:
+					await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ESCALADA)
 				await dotnet_client.crear_ticket_soporte(
 					telefono=thread_id,
 					motivo=f"EMERGENCIA_MEDICA: {reason}",
 					prioridad="CRITICO",
 				)
 			except Exception as e:
-				logger.warning(f"[Emergency Detector] Error registrando ticket CRÍTICO en .NET para {thread_id}: {e}")
+				logger.warning(f"[Emergency Detector] Error registrando ticket/estado CRÍTICO en .NET para {thread_id}: {e}")
 
 		emergency_message = AIMessage(content=MENSAJE_EMERGENCIA_URGENCIAS)
 		return {

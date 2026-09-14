@@ -19,6 +19,16 @@ MENSAJE_EMERGENCIA_URGENCIAS = (
 
 # Patrones regex normalizados para detección determinista de emergencias severas
 EMERGENCY_PATTERNS = [
+    # Alerta y urgencias médicas/odontológicas explícitas
+    (r"\b(alerta|estado\s+de\s+alerta|alerta\s+medica|alerta\s+odontologica)\b", "ESTADO_DE_ALERTA"),
+    (r"\b(urgencia|urgencia\s+odontologica|emergencia|emergencia\s+medica)\b", "URGENCIA_ODONTOLOGICA"),
+    (r"\bdolor\s+(fuerte|severo|agudo|terrible|horrible|inaguantable|muy\s+fuerte)\b", "DOLOR_SEVERO"),
+    (r"\bme\s+duele\s+(mucho|demasiado|bastante)\b", "DOLOR_AGUDO"),
+    (r"\b(sangrado|sangre)\s+(en\s+la\s+boca|en\s+la\s+encia|en\s+las\s+encias|de\s+la\s+muela)\b", "SANGRADO_DENTAL"),
+    (r"\b(pus|mucha\s+pus|supuraci[oó]n)\b", "SUPURACION_DENTAL"),
+    (r"\b(cara|mejilla|enc[ií]a|labio)\s+(hinchada|inflamada|deforme)\b", "INFLAMACION_SEVERA"),
+    (r"\b(diente|muela)\s+(rot[oa]|partid[oa]|quebrad[oa]|floj[oa]\s+por\s+golpe)\b", "TRAUMA_DENTAL"),
+
     # Criterios explícitos del DoD
     (r"\bdolor\s+insoportable\b", "DOLOR_INSOPORTABLE"),
     (r"\bsangrado\s+que\s+no\s+para\b", "SANGRADO_QUE_NO_PARA"),
@@ -129,10 +139,10 @@ async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
 
 # Términos sospechosos que justifican activar el triage LLM si el regex directo no hizo match
 SUSPICIOUS_EMERGENCY_TERMS = {
-    "dolor", "sangr", "infect", "urgenc", "emerg", "hinch", "asfix", "respir",
+    "alerta", "dolor", "sangr", "infect", "urgenc", "emerg", "hinch", "asfix", "respir",
     "fractur", "trauma", "grave", "absces", "flemon", "arranc", "desmay",
     "fiebre", "morir", "auxilio", "ayuda", "insoportable", "inaguantable",
-    "hemorrag", "accidente", "golpe", "partio", "parti"
+    "hemorrag", "accidente", "golpe", "partio", "parti", "escalar"
 }
 
 
