@@ -57,10 +57,17 @@ class DotNetClient:
                 for payload in login_candidates:
                     try:
                         async with httpx.AsyncClient(timeout=self.timeout) as client:
+                            headers = {
+                                "Content-Type": "application/json",
+                                "Accept": "application/json",
+                            }
+                            # BOT_SERVICE login is rejected without the shared API↔bot secret.
+                            if self.secret_token:
+                                headers["X-Internal-Secret"] = self.secret_token
                             response = await client.post(
                                 login_endpoint,
                                 json=payload,
-                                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                                headers=headers,
                             )
                             if response.status_code == 200:
                                 data = response.json()
