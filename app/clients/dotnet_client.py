@@ -292,7 +292,34 @@ class DotNetClient:
 
                 c["professionalName"] = prof_dict.get(p_id, "Especialista Odontológico")
                 c["serviceName"] = serv_dict.get(s_id, "Consulta Odontológica")
-                c["statusName"] = status_dict.get(st_id, "Agendada")
+                
+                known_names = {
+                    "10000000-0000-0000-0000-000000000001": "Programada",
+                    "10000000-0000-0000-0000-000000000002": "Confirmada",
+                    "10000000-0000-0000-0000-000000000003": "En Atención",
+                    "10000000-0000-0000-0000-000000000004": "Completada",
+                    "10000000-0000-0000-0000-000000000005": "Cancelada",
+                    "10000000-0000-0000-0000-000000000006": "No Asistió",
+                }
+                if c.get("cancelledAt"):
+                    c["statusName"] = "Cancelada"
+                elif st_id in known_names:
+                    c["statusName"] = known_names[st_id]
+                else:
+                    raw_st = status_dict.get(st_id, "Programada")
+                    raw_upper = str(raw_st).upper()
+                    if "NO_ASIST" in raw_upper or "NO ASIST" in raw_upper:
+                        c["statusName"] = "No Asistió"
+                    elif "CONFIRM" in raw_upper:
+                        c["statusName"] = "Confirmada"
+                    elif "ATENC" in raw_upper:
+                        c["statusName"] = "En Atención"
+                    elif "COMPLET" in raw_upper:
+                        c["statusName"] = "Completada"
+                    elif "CANCEL" in raw_upper:
+                        c["statusName"] = "Cancelada"
+                    else:
+                        c["statusName"] = "Programada"
         except Exception as enrich_err:
             logger.warning(f"[.NET Client] Error enriqueciendo citas de paciente: {enrich_err}")
 
@@ -518,15 +545,35 @@ class DotNetClient:
         return None
 
     async def obtener_appointment_status_id(self, code: str = "AGENDADA") -> str:
-        """Obtiene el ID del estado de cita por código."""
+        """Obtiene el ID del estado de cita por código o nombre."""
+        c_upper = str(code).strip().upper().replace(" ", "_")
+        fallback_map = {
+            "PENDIENTE": "10000000-0000-0000-0000-000000000001",
+            "AGENDADA": "10000000-0000-0000-0000-000000000001",
+            "PROGRAMADA": "10000000-0000-0000-0000-000000000001",
+            "SCHEDULED": "10000000-0000-0000-0000-000000000001",
+            "CONFIRMADA": "10000000-0000-0000-0000-000000000002",
+            "CONFIRMED": "10000000-0000-0000-0000-000000000002",
+            "EN_ATENCION": "10000000-0000-0000-0000-000000000003",
+            "ATTENDING": "10000000-0000-0000-0000-000000000003",
+            "COMPLETADA": "10000000-0000-0000-0000-000000000004",
+            "COMPLETED": "10000000-0000-0000-0000-000000000004",
+            "CANCELADA": "10000000-0000-0000-0000-000000000005",
+            "CANCELLED": "10000000-0000-0000-0000-000000000005",
+            "NO_ASISTIO": "10000000-0000-0000-0000-000000000006",
+            "NO_SHOW": "10000000-0000-0000-0000-000000000006",
+            "NOSHOW": "10000000-0000-0000-0000-000000000006",
+        }
         url = f"{self.base_url}/AppointmentStatuses"
         response = await self._request_with_retry("GET", url)
         if response and response.status_code == 200:
             statuses = response.json() if isinstance(response.json(), list) else []
             for s in statuses:
-                if str(s.get("code")).upper() == code.upper():
+                s_code = str(s.get("code") or "").upper()
+                s_name = str(s.get("name") or "").upper().replace(" ", "_")
+                if s_code == c_upper or s_name == c_upper:
                     return str(s.get("id"))
-        return "10000000-0000-0000-0000-000000000001"
+        return fallback_map.get(c_upper, "10000000-0000-0000-0000-000000000001")
 
     async def obtener_appointment_origin_id(self, code: str = "AGENTE_BOT") -> str:
         """Obtiene el ID del origen de cita por código."""

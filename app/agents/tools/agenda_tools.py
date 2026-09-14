@@ -237,22 +237,53 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                 # Eliminar duplicados y ordenar cronológicamente
                 unique_slots = sorted(list(dict.fromkeys(slots)))
 
-                # Filtrar turnos ya ocupados por citas existentes
+                # Filtrar turnos ya ocupados por citas existentes considerando traslapes de intervalos
                 try:
-                    citas_existentes = await dotnet_client.consultar_citas(fecha[:10]) or []
+                    fecha_target = str(fecha)[:10]
+                    citas_existentes = await dotnet_client.consultar_citas(fecha_target) or []
                     if isinstance(citas_existentes, dict):
                         citas_existentes = citas_existentes.get("items", [])
-                    horas_ocupadas = set()
+
+                    # Extraer citas del profesional en la fecha consultada que no estén canceladas
+                    intervalos_ocupados = []
                     for c in citas_existentes:
-                        c_prof = str(c.get("professionalId") or "")
+                        c_prof = str(c.get("professionalId") or "").lower()
                         c_canc = c.get("cancelledAt")
-                        if c_prof.lower() == str(prof_id).lower() and not c_canc:
-                            c_start = str(c.get("startsAt") or "")
-                            if "T" in c_start:
-                                horas_ocupadas.add(c_start.split("T")[1][:5])
-                            elif " " in c_start:
-                                horas_ocupadas.add(c_start.split(" ")[1][:5])
-                    unique_slots = [s for s in unique_slots if s not in horas_ocupadas]
+                        c_st_id = str(c.get("appointmentStatusId") or "").lower()
+                        
+                        # Ignorar si es de otro profesional o si está cancelada
+                        if c_prof != str(prof_id).lower() or c_canc or c_st_id == "10000000-0000-0000-0000-000000000005":
+                            continue
+
+                        c_start_raw = str(c.get("startsAt") or c.get("fechaHoraInicio") or "").replace("Z", "").split(".")[0].replace(" ", "T")
+                        c_end_raw = str(c.get("endsAt") or c.get("fechaHoraFin") or "").replace("Z", "").split(".")[0].replace(" ", "T")
+
+                        if c_start_raw and c_start_raw[:10] == fecha_target:
+                            try:
+                                dt_c_start = datetime.fromisoformat(c_start_raw)
+                                if c_end_raw:
+                                    dt_c_end = datetime.fromisoformat(c_end_raw)
+                                else:
+                                    dt_c_end = dt_c_start + timedelta(minutes=duracion_servicio or 45)
+                                intervalos_ocupados.append((dt_c_start, dt_c_end))
+                            except Exception as parse_err:
+                                logger.debug(f"[Agenda] Error parseando cita existente: {parse_err}")
+
+                    # Descartar slots candidatos que colisionen con citas existentes
+                    slots_libres = []
+                    for s in unique_slots:
+                        try:
+                            slot_start_dt = datetime.strptime(f"{fecha_target}T{s}:00", "%Y-%m-%dT%H:%M:%S")
+                            slot_end_dt = slot_start_dt + timedelta(minutes=duracion_servicio)
+
+                            # Hay colisión si: slot_inicio < cita_fin AND slot_fin > cita_inicio
+                            colision = any(slot_start_dt < c_end and slot_end_dt > c_start for c_start, c_end in intervalos_ocupados)
+                            if not colision:
+                                slots_libres.append(s)
+                        except Exception:
+                            slots_libres.append(s)
+
+                    unique_slots = slots_libres
                 except Exception as c_err:
                     logger.warning(f"[Agenda] Error consultando citas ocupadas: {c_err}")
 
@@ -509,7 +540,7 @@ async def _agendar_cita_impl(
 
 
 async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
-    """Busca y formatea las citas de un paciente usando su número de cédula."""
+    """Busca y formatea las citas de un paciente discriminando próximas vs historial."""
     try:
         cedula = cedula.strip()
         if not cedula:
@@ -528,61 +559,129 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
             return (
                 f"📋 *Consulta de Citas* 🦷✨\n\n"
                 f"🆔 *Cédula:* {cedula}\n\n"
-                "Actualmente no tienes citas activas registradas en nuestro sistema.\n\n"
+                "Actualmente no tienes citas registradas en nuestro sistema.\n\n"
                 "💡 ¿Te gustaría agendar una nueva cita? Con gusto te ayudo. 😊"
             )
 
-        tarjetas_citas = []
-        for i, c in enumerate(citas, 1):
+        try:
+            from zoneinfo import ZoneInfo
+            now_colombia = datetime.now(ZoneInfo("America/Bogota"))
+        except Exception:
+            now_colombia = datetime.now()
+
+        proximas = []
+        historial = []
+
+        for c in citas:
             prof_nom = c.get("professionalName", "Especialista Odontológico")
             serv_nom = c.get("serviceName", "Consulta Odontológica")
-            estado = c.get("statusName", "Agendada")
+            estado = c.get("statusName", "Programada")
             starts_at_raw = c.get("startsAt") or c.get("fechaHoraInicio") or ""
             ends_at_raw = c.get("endsAt") or c.get("fechaHoraFin") or ""
             cita_id = c.get("id") or c.get("citaId") or c.get("appointmentId") or "N/A"
             motivo = c.get("reasonForVisit") or ""
+            status_id = str(c.get("appointmentStatusId") or "").lower()
 
+            dt_start = None
+            dt_end = None
             fecha_display = ""
             hora_display = ""
+
             try:
                 if starts_at_raw:
-                    clean_start = str(starts_at_raw).replace("Z", "").split(".")[0]
+                    clean_start = str(starts_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
                     dt_start = datetime.fromisoformat(clean_start)
                     fecha_display = dt_start.strftime("%d/%m/%Y")
                     hora_start_str = dt_start.strftime("%I:%M %p")
 
                     if ends_at_raw:
-                        clean_end = str(ends_at_raw).replace("Z", "").split(".")[0]
+                        clean_end = str(ends_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
                         dt_end = datetime.fromisoformat(clean_end)
                         hora_end_str = dt_end.strftime("%I:%M %p")
                         hora_display = f"{hora_start_str} - {hora_end_str}"
                     else:
+                        dt_end = dt_start + timedelta(minutes=45)
                         hora_display = hora_start_str
             except Exception:
                 fecha_display = str(starts_at_raw)[:10]
                 hora_display = str(starts_at_raw)[11:16]
 
-            motivo_line = f"\n   • 📝 *Motivo:* {motivo}" if motivo else ""
-            id_line = f"\n   • 🔑 *ID de Cita:* `{cita_id}`"
+            # Clasificación inteligente de estado
+            is_cancelled = bool(c.get("cancelledAt")) or status_id == "10000000-0000-0000-0000-000000000005" or "cancel" in estado.lower()
+            is_completed = status_id == "10000000-0000-0000-0000-000000000004" or "complet" in estado.lower()
+            is_noshow = status_id == "10000000-0000-0000-0000-000000000006" or "no_asist" in estado.lower() or "no asist" in estado.lower()
 
-            tarjetas_citas.append(
-                f"{i}️⃣ *Cita #{i}*\n"
-                f"   • 🦷 *Tratamiento:* {serv_nom}\n"
-                f"   • 👨‍⚕️ *Especialista:* {prof_nom}\n"
-                f"   • 📅 *Fecha:* {fecha_display}\n"
-                f"   • ⏰ *Horario:* {hora_display}\n"
-                f"   • 📌 *Estado:* {estado}{motivo_line}{id_line}"
-            )
+            if is_noshow:
+                estado = "No Asistió"
+
+            # Si la hora programada ya pasó por más de 45 minutos y no se completó, considerar vencida / no asistió
+            if dt_start and not is_cancelled and not is_completed and not is_noshow:
+                dt_cmp = dt_start.replace(tzinfo=now_colombia.tzinfo) if dt_start.tzinfo is None and now_colombia.tzinfo else dt_start
+                if dt_cmp < (now_colombia - timedelta(minutes=45)):
+                    estado = "No Asistió (Vencida)"
+                    is_noshow = True
+
+            c_info = {
+                "id": cita_id,
+                "profesional": prof_nom,
+                "servicio": serv_nom,
+                "estado": estado,
+                "fecha": fecha_display,
+                "hora": hora_display,
+                "motivo": motivo,
+                "dt_start": dt_start,
+            }
+
+            if is_cancelled or is_completed or is_noshow:
+                historial.append(c_info)
+            elif dt_start:
+                dt_cmp = dt_start.replace(tzinfo=now_colombia.tzinfo) if dt_start.tzinfo is None and now_colombia.tzinfo else dt_start
+                if dt_cmp >= (now_colombia - timedelta(minutes=15)):
+                    proximas.append(c_info)
+                else:
+                    historial.append(c_info)
+            else:
+                proximas.append(c_info)
+
+        # Ordenar próximas cronológicamente
+        proximas.sort(key=lambda x: x["dt_start"] or datetime.max)
+        # Ordenar historial de más reciente a más antigua
+        historial.sort(key=lambda x: x["dt_start"] or datetime.min, reverse=True)
+
+        bloques = []
+
+        if proximas:
+            bloques.append(f"📅 *Tus Próximas Citas Programadas:*")
+            for i, c in enumerate(proximas, 1):
+                motivo_line = f"\n   • 📝 *Motivo:* {c['motivo']}" if c["motivo"] else ""
+                bloques.append(
+                    f"{i}️⃣ *Cita #{i}*\n"
+                    f"   • 🦷 *Tratamiento:* {c['servicio']}\n"
+                    f"   • 👨‍⚕️ *Especialista:* {c['profesional']}\n"
+                    f"   • 📅 *Fecha:* {c['fecha']}\n"
+                    f"   • ⏰ *Horario:* {c['hora']}\n"
+                    f"   • 📌 *Estado:* {c['estado']}{motivo_line}\n"
+                    f"   • 🔑 *ID de Cita:* `{c['id']}`"
+                )
+        else:
+            bloques.append("✨ *No tienes citas pendientes o próximas por asistir.*")
+
+        if historial:
+            bloques.append("📜 *Historial de Citas Anteriores:*")
+            for c in historial[:3]:  # Máximo 3 registros
+                bloques.append(f"• 🦷 *{c['servicio']}* con {c['profesional']}\n  📅 {c['fecha']} a las {c['hora']} — Estado: _{c['estado']}_")
+
+        cuerpo = "\n\n".join(bloques)
 
         return (
             f"📋 *Tus Citas en Nexus Odonto* 🦷✨\n\n"
             f"🆔 *Cédula:* {cedula}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{cuerpo}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            + "\n\n".join(tarjetas_citas)
-            + "\n━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
             f"📞 *Atención / Cambios:* +57 324 6030217\n\n"
-            f"💡 _Si deseas reprogramar o cancelar alguna cita, dime el ID de la cita o descríbeme cuál deseas modificar._ 😊"
+            f"💡 _Si deseas reprogramar o cancelar alguna de tus citas próximas, dime el ID o la fecha y con gusto te ayudo._ 😊"
         )
     except Exception as exc:
         logger.error(f"Error consultando citas por cédula {cedula}: {exc}", exc_info=True)
