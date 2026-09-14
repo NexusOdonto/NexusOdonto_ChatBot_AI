@@ -26,6 +26,9 @@ class EvolutionClient:
 
     def _normalize_destination(self, numero: str) -> str:
         dest = str(numero).strip()
+        if dest.startswith("+"):
+            dest = dest[1:].strip()
+
         # Aliases de LIDs que fueron mapeados o provienen de chats con LIDs de WhatsApp
         LID_ALIASES = {
             "573001112233": "233783743803574@lid",

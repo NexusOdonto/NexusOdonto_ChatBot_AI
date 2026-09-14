@@ -233,11 +233,14 @@ class DotNetClient:
             )
         return None
 
-    async def consultar_citas(self, fecha: str) -> Optional[Any]:
-        """Consulta las citas de una fecha en el backend .NET."""
+    async def consultar_citas(self, fecha: str = "") -> Optional[Any]:
+        """Consulta las citas de una fecha en el backend .NET. Si fecha está vacía, consulta todas sin query params."""
         url = f"{self.base_url}/Appointments"
-        params = {"fecha": fecha, "date": fecha}
-        response = await self._request_with_retry("GET", url, params=params)
+        params = {}
+        if fecha and str(fecha).strip():
+            clean_f = str(fecha).strip()
+            params = {"fecha": clean_f, "date": clean_f}
+        response = await self._request_with_retry("GET", url, params=params if params else None)
         if response and response.status_code == 200:
             return response.json()
         return None
@@ -431,11 +434,77 @@ class DotNetClient:
                 asyncio.create_task(
                     self.actualizar_estado_conversacion(conv_id, self.STATUS_ESCALADA, patient_id)
                 )
+            # Emitir también notificación en /Notifications para que el panel web avise inmediatamente
+            asyncio.create_task(
+                self.crear_notificacion(
+                    titulo=f"Alerta: {human_reason}",
+                    mensaje=f"Paciente {formatted_phone}: {human_reason}",
+                    prioridad=prioridad,
+                    patient_id=patient_id,
+                    conversation_id=conv_id,
+                    telefono=formatted_phone,
+                )
+            )
             return response.json()
 
         logger.warning(
             f"[.NET Client] No se pudo registrar el ticket (HTTP {response.status_code if response else 'None'})"
         )
+        return None
+
+    async def crear_notificacion(
+        self,
+        titulo: str,
+        mensaje: str,
+        prioridad: str = "URGENTE",
+        patient_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        telefono: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Crea una notificación en el backend .NET (/Notifications) para alertar al personal en el panel de recepción."""
+        try:
+            url = f"{self.base_url}/Notifications"
+            priorities = await self._obtener_notification_priorities()
+            priority_id = None
+            prio_upper = prioridad.upper()
+            for p in priorities:
+                code = (p.get("code") or "").upper()
+                if prio_upper in ("CRITICO", "CRÍTICO", "URGENTE") and code == "URGENTE":
+                    priority_id = p.get("id")
+                    break
+                if prio_upper in ("ALTA", "HIGH") and code == "ALTA":
+                    priority_id = p.get("id")
+                    break
+                if prio_upper in ("MEDIA", "NORMAL") and code == "NORMAL":
+                    priority_id = p.get("id")
+                    break
+            if not priority_id and priorities:
+                priority_id = priorities[0].get("id")
+
+            payload = {
+                "title": titulo,
+                "message": mensaje,
+                "description": mensaje,
+                "content": mensaje,
+                "isRead": False,
+            }
+            if priority_id:
+                payload["notificationPriorityId"] = priority_id
+            if patient_id:
+                payload["patientId"] = patient_id
+            if conversation_id:
+                payload["chatbotConversationId"] = conversation_id
+            if telefono:
+                payload["phone"] = telefono
+
+            resp = await self._request_with_retry("POST", url, json=payload)
+            if resp and resp.status_code in (200, 201):
+                logger.info(f"[.NET Client] Notificación creada en /Notifications para {telefono or 'recepción'}")
+                return resp.json()
+            elif resp:
+                logger.debug(f"[.NET Client] /Notifications retornó HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as notif_err:
+            logger.debug(f"[.NET Client] Error intentando crear notificación en /Notifications: {notif_err}")
         return None
 
     async def obtener_contexto_conversacion(
@@ -1058,26 +1127,35 @@ class DotNetClient:
     async def obtener_citas_agendadas_para_recordatorio(self, fecha: str) -> List[Dict[str, Any]]:
         """Obtiene las citas programadas para una fecha específica, enriquecidas con paciente, teléfono, servicio y doctor.
         
-        Solo incluye citas con estado AGENDADA (Scheduled: 10000000-0000-0000-0000-000000000001) para no enviar recordatorios
-        de citas ya confirmadas, canceladas o completadas.
+        Solo incluye citas activas no canceladas para emitir los recordatorios por WhatsApp.
         """
-        citas_raw = await self.consultar_citas("")
+        clean_fecha = str(fecha).strip()
+        # 1. Intentar consultar citas filtradas por fecha o todas sin filtro
+        citas_raw = await self.consultar_citas(clean_fecha)
+        if not citas_raw:
+            citas_raw = await self.consultar_citas("")
         if not citas_raw:
             return []
         
         citas_list = citas_raw if isinstance(citas_raw, list) else citas_raw.get("items", [])
-        clean_fecha = str(fecha).strip()
         
-        STATUS_AGENDADA = "10000000-0000-0000-0000-000000000001"
+        # 2. Resolver dinámicamente el ID del estado AGENDADA
+        status_agendada_id = await self.obtener_appointment_status_id("AGENDADA")
+        valid_status_ids = {status_agendada_id.lower(), "10000000-0000-0000-0000-000000000001"}
         
-        # Filtrar por fecha de inicio y estado agendada
+        # Filtrar por fecha de inicio y descartar canceladas
         citas_filtradas = []
         for c in citas_list:
             if not isinstance(c, dict):
                 continue
-            starts = str(c.get("startsAt") or "")
+            starts = str(c.get("startsAt") or c.get("fechaHoraInicio") or "")
             status_id = str(c.get("appointmentStatusId") or "").lower()
-            if starts.startswith(clean_fecha) and status_id == STATUS_AGENDADA.lower():
+            is_cancelled = bool(c.get("cancelledAt")) or "cancel" in str(c.get("statusName", "")).lower()
+            
+            date_matches = clean_fecha in starts or starts.startswith(clean_fecha)
+            status_matches = (status_id in valid_status_ids) or not status_id
+            
+            if date_matches and not is_cancelled and status_matches:
                 citas_filtradas.append(c)
                 
         if not citas_filtradas:
@@ -1129,15 +1207,20 @@ class DotNetClient:
                 if not phone_raw:
                     phone_raw = (patient_obj.get("emergencyPhone") or "").strip()
 
-                # Normalizar teléfono para WhatsApp
-                phone_clean = "".join(ch for ch in phone_raw if ch.isdigit() or ch == "+")
-                if phone_raw.endswith("@s.whatsapp.net"):
-                    phone_clean = phone_raw.replace("@s.whatsapp.net", "")
-                if phone_clean and not phone_clean.startswith("+") and len(phone_clean) == 10:
-                    phone_clean = f"+57{phone_clean}"
+                # Normalizar teléfono para WhatsApp (Evolution API)
+                if "@lid" in phone_raw:
+                    phone_clean = phone_raw
+                else:
+                    digits = "".join(ch for ch in phone_raw if ch.isdigit())
+                    if len(digits) == 10:
+                        phone_clean = f"57{digits}"
+                    elif len(digits) > 10:
+                        phone_clean = digits
+                    else:
+                        phone_clean = digits
 
                 # Formatear hora (ej. 11:30 AM)
-                starts_at_str = str(c.get("startsAt") or "")
+                starts_at_str = str(c.get("startsAt") or c.get("fechaHoraInicio") or "")
                 time_formatted = starts_at_str
                 try:
                     dt = datetime.fromisoformat(starts_at_str)

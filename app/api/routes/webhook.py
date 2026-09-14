@@ -263,7 +263,7 @@ async def _process_whatsapp_unsupported_media(numero_paciente: str, caption: str
     """Gestiona la recepción de fotos, videos, documentos o archivos no procesables directamente."""
     try:
         if await _is_escalated(numero_paciente):
-            if _is_resume_request(mensaje_texto):
+            if caption and _is_resume_request(caption):
                 logger.info(f"[BG] Paciente solicita volver con el bot: {numero_paciente}")
                 checkpointer = get_checkpointer_instance()
                 for t in [numero_paciente, "573001112233@s.whatsapp.net", "233783743803574@lid"]:

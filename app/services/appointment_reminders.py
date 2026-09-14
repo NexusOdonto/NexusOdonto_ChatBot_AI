@@ -254,7 +254,9 @@ async def enviar_recordatorios_30_minutos(dry_run: bool = False) -> Dict[str, An
             continue
 
         try:
-            clean_starts = str(starts_at_str).replace("Z", "")
+            clean_starts = str(starts_at_str).replace("Z", "").strip().replace(" ", "T")
+            if "." in clean_starts:
+                clean_starts = clean_starts.split(".")[0]
             dt_cita = datetime.fromisoformat(clean_starts)
             if dt_cita.tzinfo is None:
                 dt_cita = dt_cita.replace(tzinfo=tz)

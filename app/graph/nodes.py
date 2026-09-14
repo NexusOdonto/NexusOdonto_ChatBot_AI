@@ -198,10 +198,15 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
 		if thread_id:
 			try:
 				await evolution_client.enviar_mensaje(numero=thread_id, texto=MENSAJE_EMERGENCIA_URGENCIAS)
+				# Persistir mensaje del bot en Oracle DB
+				import asyncio
+				asyncio.create_task(
+					dotnet_client.registrar_mensaje(thread_id, "CHATBOT", MENSAJE_EMERGENCIA_URGENCIAS)
+				)
 			except Exception as e:
 				logger.error(f"[Emergency Detector] Error enviando alerta por WhatsApp a {thread_id}: {e}")
 
-		# 2. Escalar ticket a nivel CRÍTICO y actualizar estado en .NET inmediatamente
+		# 2. Escalar ticket a nivel CRÍTICO, crear notificación y actualizar estado en .NET inmediatamente
 		if thread_id:
 			try:
 				conv_id = await dotnet_client.obtener_o_crear_conversacion(thread_id)
@@ -212,8 +217,15 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
 					motivo=f"EMERGENCIA_MEDICA: {reason}",
 					prioridad="CRITICO",
 				)
+				await dotnet_client.crear_notificacion(
+					titulo=f"🚨 Emergencia Médica: {reason}",
+					mensaje=f"Atención urgente solicitada por {thread_id}: {user_text}",
+					prioridad="CRITICO",
+					conversation_id=conv_id,
+					telefono=thread_id,
+				)
 			except Exception as e:
-				logger.warning(f"[Emergency Detector] Error registrando ticket/estado CRÍTICO en .NET para {thread_id}: {e}")
+				logger.warning(f"[Emergency Detector] Error registrando ticket/notificación CRÍTICA en .NET para {thread_id}: {e}")
 
 		emergency_message = AIMessage(content=MENSAJE_EMERGENCIA_URGENCIAS)
 		return {
