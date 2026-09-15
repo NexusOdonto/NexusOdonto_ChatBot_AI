@@ -31,6 +31,120 @@ def _obtener_valor(obj: Dict[str, Any], *keys: str) -> Any:
                 return v
     return None
 
+
+# Mapeo de términos habituales en español a nombres de catálogo en inglés (especialidades)
+SINONIMOS_ESPANOL = {
+    "general": "General Dentistry",
+    "odontologia": "General Dentistry",
+    "odontologia general": "General Dentistry",
+    "limpieza": "General Dentistry",
+    "valoracion": "General Dentistry",
+    "revision": "General Dentistry",
+    "consulta": "General Dentistry",
+    "ortodoncia": "Orthodontics",
+    "brackets": "Orthodontics",
+    "frenillos": "Orthodontics",
+    "endodoncia": "Endodontics",
+    "conducto": "Endodontics",
+    "periodoncia": "Periodontics",
+    "encias": "Periodontics",
+    "odontopediatria": "Pediatric Dentistry",
+    "pediatria": "Pediatric Dentistry",
+    "ninos": "Pediatric Dentistry",
+    "cirugia": "Oral Surgery",
+    "cirugia oral": "Oral Surgery",
+    "extraccion": "Oral Surgery",
+    "cordales": "Oral Surgery",
+    "muela del juicio": "Oral Surgery",
+}
+
+
+def _aplicar_sinonimos_especialidad(norm_texto: str) -> str:
+    """Aplica sinónimos de especialidad sobre texto ya normalizado."""
+    if not norm_texto:
+        return norm_texto
+    for k, v in SINONIMOS_ESPANOL.items():
+        if k in norm_texto or norm_texto in k:
+            return _normalizar_texto(v)
+    return norm_texto
+
+
+def _es_servicio_activo(ser: Dict[str, Any]) -> bool:
+    """True si el servicio está activo o si no trae bandera de activo."""
+    active = _obtener_valor(ser, "isActive", "IsActive", "active", "activo")
+    if active is None:
+        return True
+    if isinstance(active, bool):
+        return active
+    if isinstance(active, (int, float)):
+        return active != 0
+    return str(active).strip().lower() not in ("false", "0", "no", "inactive", "inactivo")
+
+
+def _texto_coincide(norm_query: str, *candidatos: str) -> bool:
+    if not norm_query:
+        return False
+    for raw in candidatos:
+        norm = _normalizar_texto(raw or "")
+        if not norm:
+            continue
+        if norm_query in norm or norm in norm_query:
+            return True
+    return False
+
+
+def _buscar_servicio_por_texto(norm_query: str, servicios: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Busca un servicio activo por nombre, código, descripción o categoría."""
+    for ser in servicios:
+        if not _es_servicio_activo(ser):
+            continue
+        nombre = _obtener_valor(ser, "name", "nombre") or ""
+        code = _obtener_valor(ser, "code", "codigo") or ""
+        desc = _obtener_valor(ser, "description", "descripcion") or ""
+        category = _obtener_valor(ser, "category", "categoria", "Category") or ""
+        if _texto_coincide(norm_query, nombre, code, desc, category):
+            return ser
+    return None
+
+
+def _buscar_especialidad_por_texto(
+    norm_query: str, especialidades: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Busca una especialidad por nombre, código o descripción (con sinónimos)."""
+    norm_esp = _aplicar_sinonimos_especialidad(norm_query)
+    for esp in especialidades:
+        nombre = _obtener_valor(esp, "name", "nombre") or ""
+        code = _obtener_valor(esp, "code", "codigo") or ""
+        desc = _obtener_valor(esp, "description", "descripcion") or ""
+        if _texto_coincide(norm_esp, nombre, code, desc) or _texto_coincide(norm_query, nombre, code, desc):
+            return esp
+    return None
+
+
+def _nombres_servicios_activos(servicios: List[Dict[str, Any]]) -> List[str]:
+    nombres = []
+    for s in servicios:
+        if not _es_servicio_activo(s):
+            continue
+        nombre = _obtener_valor(s, "name", "nombre") or _obtener_valor(s, "code", "codigo")
+        if nombre:
+            nombres.append(str(nombre))
+    return nombres
+
+
+def _mensaje_catalogo_no_encontrado(consulta: str, servicios: List[Dict[str, Any]]) -> str:
+    nombres = _nombres_servicios_activos(servicios)
+    if nombres:
+        lista = ", ".join(nombres)
+        return (
+            f"No encontramos el servicio o especialidad '{consulta}' en nuestro catálogo. "
+            f"Servicios disponibles: {lista}"
+        )
+    return (
+        f"No encontramos el servicio o especialidad '{consulta}' en nuestro catálogo. "
+        "Por favor verifica el nombre e intenta de nuevo."
+    )
+
 def _run_sync(coro) -> Any:
     """Ejecuta una corrutina de forma síncrona, gestionando de forma segura los loops activos de asyncio."""
     try:
@@ -90,101 +204,78 @@ def _generar_slots_desde_regla(
 
 async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
     try:
-        norm_esp = _normalizar_texto(especialidad)
-        if not norm_esp:
+        norm_query = _normalizar_texto(especialidad)
+        if not norm_query:
             return "Por favor, indica una especialidad o servicio válido."
 
-        # Mapeo de términos habituales en español a nombres de catálogo en inglés
-        SINONIMOS_ESPANOL = {
-            "general": "General Dentistry",
-            "odontologia": "General Dentistry",
-            "odontologia general": "General Dentistry",
-            "limpieza": "General Dentistry",
-            "valoracion": "General Dentistry",
-            "revision": "General Dentistry",
-            "consulta": "General Dentistry",
-            "ortodoncia": "Orthodontics",
-            "brackets": "Orthodontics",
-            "frenillos": "Orthodontics",
-            "endodoncia": "Endodontics",
-            "conducto": "Endodontics",
-            "periodoncia": "Periodontics",
-            "encias": "Periodontics",
-            "odontopediatria": "Pediatric Dentistry",
-            "pediatria": "Pediatric Dentistry",
-            "ninos": "Pediatric Dentistry",
-            "cirugia": "Oral Surgery",
-            "cirugia oral": "Oral Surgery",
-            "extraccion": "Oral Surgery",
-            "cordales": "Oral Surgery",
-            "muela del juicio": "Oral Surgery",
-        }
-        for k, v in SINONIMOS_ESPANOL.items():
-            if k in norm_esp or norm_esp in k:
-                norm_esp = _normalizar_texto(v)
-                break
-        
-        # 1. Obtener especialidades desde el backend .NET
-        especialidades = await dotnet_client.obtener_especialidades()
-        if not especialidades:
-            return "En este momento no podemos acceder al catálogo de especialidades. Por favor intenta de nuevo más tarde."
-            
+        # 1. Catálogo de servicios primero (bookable por nombre/código/descripción/categoría)
+        servicios = await dotnet_client.obtener_servicios() or []
+        servicio_encontrado = _buscar_servicio_por_texto(norm_query, servicios)
+
+        especialidades = await dotnet_client.obtener_especialidades() or []
         especialidad_encontrada = None
-        for esp in especialidades:
-            nombre_esp = _obtener_valor(esp, "name", "nombre", "code", "codigo") or ""
-            desc_esp = _obtener_valor(esp, "description", "descripcion") or ""
-            code_esp = _obtener_valor(esp, "code", "codigo") or ""
-            if (
-                norm_esp in _normalizar_texto(nombre_esp)
-                or _normalizar_texto(nombre_esp) in norm_esp
-                or norm_esp in _normalizar_texto(code_esp)
-                or norm_esp in _normalizar_texto(desc_esp)
-            ):
-                especialidad_encontrada = esp
-                break
-                
-        if not especialidad_encontrada:
-            nombres = [
-                (_obtener_valor(e, "name", "nombre") or _obtener_valor(e, "code", "codigo"))
-                for e in especialidades
-            ]
-            return (
-                f"No encontramos la especialidad o servicio '{especialidad}' en nuestro catálogo. "
-                "Especialidades disponibles: " + ", ".join(filter(None, nombres))
-            )
-            
-        esp_id = _obtener_valor(especialidad_encontrada, "id", "especialidadId", "specialtyId")
-        esp_nombre = _obtener_valor(especialidad_encontrada, "name", "nombre") or especialidad
-        
-        # 2. Buscar profesionales (si vienen sin filtro o filtrados)
-        profesionales = await dotnet_client.obtener_profesionales(especialidad_id=esp_id)
-        if not profesionales:
-            # Fallback: consultar todos los profesionales
-            profesionales = await dotnet_client.obtener_profesionales()
-            
-        if not profesionales:
-            return f"No hay profesionales registrados o disponibles actualmente para la especialidad de {esp_nombre}."
-            
-        # 3. Buscar el servicio correspondiente para determinar la duración esperada
-        servicios = await dotnet_client.obtener_servicios()
-        servicio_encontrado = None
-        if servicios:
-            for ser in servicios:
-                nombre_ser = _obtener_valor(ser, "name", "nombre", "code", "codigo") or ""
-                desc_ser = _obtener_valor(ser, "description", "descripcion") or ""
-                if (
-                    norm_esp in _normalizar_texto(nombre_ser)
-                    or _normalizar_texto(nombre_ser) in norm_esp
-                    or norm_esp in _normalizar_texto(desc_ser)
-                ):
-                    servicio_encontrado = ser
+        esp_id = None
+        esp_nombre = None
+
+        if servicio_encontrado:
+            # Resolver especialidad opcional (categoría / nombre del servicio / sinónimos)
+            cat_servicio = _obtener_valor(servicio_encontrado, "category", "categoria", "Category") or ""
+            nombre_ser = _obtener_valor(servicio_encontrado, "name", "nombre") or ""
+            for candidato in (cat_servicio, nombre_ser, especialidad):
+                if not candidato:
+                    continue
+                especialidad_encontrada = _buscar_especialidad_por_texto(
+                    _normalizar_texto(str(candidato)), especialidades
+                )
+                if especialidad_encontrada:
                     break
-            if not servicio_encontrado:
-                servicio_encontrado = servicios[0]
-                
-        servicio_id = _obtener_valor(servicio_encontrado, "id", "servicioId", "serviceId") or 1
-        servicio_nombre = _obtener_valor(servicio_encontrado, "name", "nombre") or "Consulta General"
-        duracion_servicio = int(_obtener_valor(servicio_encontrado, "durationMinutes", "duracionMinutos") or 60)
+            if especialidad_encontrada:
+                esp_id = _obtener_valor(especialidad_encontrada, "id", "especialidadId", "specialtyId")
+                esp_nombre = _obtener_valor(especialidad_encontrada, "name", "nombre")
+        else:
+            # 2. Si no hay servicio, flujo por especialidades
+            if not especialidades:
+                return (
+                    "En este momento no podemos acceder al catálogo de servicios ni especialidades. "
+                    "Por favor intenta de nuevo más tarde."
+                )
+            especialidad_encontrada = _buscar_especialidad_por_texto(norm_query, especialidades)
+            if not especialidad_encontrada:
+                return _mensaje_catalogo_no_encontrado(especialidad, servicios)
+
+            esp_id = _obtener_valor(especialidad_encontrada, "id", "especialidadId", "specialtyId")
+            esp_nombre = _obtener_valor(especialidad_encontrada, "name", "nombre") or especialidad
+            # Match suave de servicio por especialidad; sin fallback a servicios[0]
+            servicio_encontrado = _buscar_servicio_por_texto(
+                _aplicar_sinonimos_especialidad(norm_query), servicios
+            ) or _buscar_servicio_por_texto(norm_query, servicios)
+
+        # 3. Profesionales: filtrar por especialidad si hay match; si no, todos los activos
+        profesionales = []
+        if esp_id:
+            profesionales = await dotnet_client.obtener_profesionales(especialidad_id=esp_id) or []
+        if not profesionales:
+            profesionales = await dotnet_client.obtener_profesionales() or []
+
+        etiqueta = (
+            (_obtener_valor(servicio_encontrado, "name", "nombre") if servicio_encontrado else None)
+            or esp_nombre
+            or especialidad
+        )
+        if not profesionales:
+            return f"No hay profesionales registrados o disponibles actualmente para {etiqueta}."
+
+        if servicio_encontrado:
+            servicio_id = _obtener_valor(servicio_encontrado, "id", "servicioId", "serviceId")
+            servicio_nombre = _obtener_valor(servicio_encontrado, "name", "nombre") or etiqueta
+            duracion_servicio = int(
+                _obtener_valor(servicio_encontrado, "durationMinutes", "duracionMinutos") or 60
+            )
+        else:
+            # Especialidad sin servicio concreto: no inventar servicios[0]
+            servicio_id = None
+            servicio_nombre = etiqueta
+            duracion_servicio = 60
         
         # Calcular día de la semana ISO (1=Lunes .. 7=Domingo)
         iso_day = None
@@ -318,7 +409,7 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                 resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin horarios registrados.")
                 
         if not resultados:
-            return f"No se encontraron espacios disponibles para *{esp_nombre}* en la fecha `{fecha}`. ¿Deseas consultar otro día? 😊"
+            return f"No se encontraron espacios disponibles para *{servicio_nombre}* en la fecha `{fecha}`. ¿Deseas consultar otro día? 😊"
             
         return (
             f"📅 *Horarios Disponibles para {servicio_nombre}* ✨\n"
@@ -417,24 +508,37 @@ async def _agendar_cita_impl(
         resolved_prof_id = resolved_prof.get("id") if resolved_prof else profesional_id
         prof_nombre_display = resolved_prof.get("name") if resolved_prof else "Especialista Odontológico"
 
-        # ── 3. Resolver servicio y duración ──────────────────────────────────────
+        # ── 3. Resolver servicio y duración (catálogo primero; sin fallback a servs[0]) ──
         servs = await dotnet_client.obtener_servicios() or []
         resolved_serv = None
+        norm_target = _normalizar_texto(str(servicio_id or ""))
         for s in servs:
-            if str(s.get("id")).lower() == str(servicio_id).lower():
+            if not _es_servicio_activo(s):
+                continue
+            if str(_obtener_valor(s, "id", "servicioId", "serviceId") or "").lower() == str(servicio_id).lower():
                 resolved_serv = s
                 break
-            s_name = _normalizar_texto(s.get("name") or "")
-            norm_target = _normalizar_texto(str(servicio_id))
-            if norm_target and (norm_target in s_name or s_name in norm_target):
+            s_name = _obtener_valor(s, "name", "nombre") or ""
+            s_code = _obtener_valor(s, "code", "codigo") or ""
+            s_desc = _obtener_valor(s, "description", "descripcion") or ""
+            if norm_target and _texto_coincide(norm_target, s_name, s_code, s_desc):
                 resolved_serv = s
                 break
-        if not resolved_serv and servs:
-            resolved_serv = servs[0]
-            
-        resolved_serv_id = resolved_serv.get("id") if resolved_serv else servicio_id
-        serv_nombre_display = resolved_serv.get("name") if resolved_serv else "Consulta Odontológica"
-        duracion_min = int(resolved_serv.get("durationMinutes") or 45) if resolved_serv else 45
+
+        if not resolved_serv:
+            # Si el usuario nombró un servicio concreto, no sustituir en silencio por el primero
+            if norm_target and norm_target not in ("none", "null", "n/a", ""):
+                return _mensaje_catalogo_no_encontrado(str(servicio_id), servs)
+            return (
+                "No pude identificar el servicio a agendar. "
+                + _mensaje_catalogo_no_encontrado(str(servicio_id or "desconocido"), servs)
+            )
+
+        resolved_serv_id = _obtener_valor(resolved_serv, "id", "servicioId", "serviceId") or servicio_id
+        serv_nombre_display = _obtener_valor(resolved_serv, "name", "nombre") or "Consulta Odontológica"
+        duracion_min = int(
+            _obtener_valor(resolved_serv, "durationMinutes", "duracionMinutos") or 45
+        )
 
         # ── 4. Calcular startsAt y endsAt en formato ISO 8601 ───────────────────
         try:
