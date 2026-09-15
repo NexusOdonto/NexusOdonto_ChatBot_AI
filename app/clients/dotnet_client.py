@@ -527,13 +527,13 @@ class DotNetClient:
                     break
             if not priority_id and priorities:
                 priority_id = priorities[0].get("id")
-        if not priority_id:
-            if prio_upper in ("CRITICO", "CRÃTICO", "URGENTE"):
-                priority_id = "50000000-0000-0000-0000-000000000004"
-            elif prio_upper in ("ALTA", "HIGH"):
-                priority_id = "50000000-0000-0000-0000-000000000003"
-            else:
-                priority_id = "50000000-0000-0000-0000-000000000002"
+            if not priority_id:
+                if prio_upper in ("CRITICO", "CRÍTICO", "URGENTE"):
+                    priority_id = "50000000-0000-0000-0000-000000000004"
+                elif prio_upper in ("ALTA", "HIGH"):
+                    priority_id = "50000000-0000-0000-0000-000000000003"
+                else:
+                    priority_id = "50000000-0000-0000-0000-000000000002"
 
             payload = {
                 "title": titulo,
