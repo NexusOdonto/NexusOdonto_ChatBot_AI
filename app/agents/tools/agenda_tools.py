@@ -246,6 +246,14 @@ def _nombres_servicios_activos(servicios: List[Dict[str, Any]]) -> List[str]:
     return [_etiqueta_servicio(s) for s in _servicios_activos(servicios)]
 
 
+def _etiqueta_especialidad(nombre: Any) -> str:
+    """Etiqueta amigable en español para nombres de especialidad del API."""
+    raw = str(nombre or "").strip()
+    if not raw:
+        return "especialidad odontológica"
+    return ETIQUETAS_SERVICIO_ES.get(_normalizar_texto(raw), raw)
+
+
 def _mensaje_especialidad_sin_servicio_unico(
     consulta: str,
     esp_nombre: str,
@@ -253,10 +261,11 @@ def _mensaje_especialidad_sin_servicio_unico(
     todos_servicios: List[Dict[str, Any]],
 ) -> str:
     """Cuando el paciente nombra una especialidad: no decir 'no está en catálogo'; ofrecer servicios reales."""
+    esp_label = _etiqueta_especialidad(esp_nombre)
     if relacionados:
         lista = "\n".join(f"• *{_etiqueta_servicio(s)}*" for s in relacionados[:12])
         return (
-            f"*{consulta}* corresponde a la especialidad *{esp_nombre}*. "
+            f"*{consulta}* corresponde a la especialidad *{esp_label}*. "
             "Para agendar necesito el servicio concreto. Estos son los activos relacionados:\n\n"
             f"{lista}\n\n"
             "¿Cuál de estos servicios deseas agendar? 😊"
@@ -264,14 +273,14 @@ def _mensaje_especialidad_sin_servicio_unico(
     lista_todos = _lista_servicios_whatsapp(todos_servicios)
     if lista_todos:
         return (
-            f"Tenemos la especialidad *{esp_nombre}*, pero ahora mismo no hay un servicio "
+            f"Tenemos la especialidad *{esp_label}*, pero ahora mismo no hay un servicio "
             "activo específicamente asociado para agendar con ese nombre.\n\n"
             "Servicios activos disponibles:\n"
             f"{lista_todos}\n\n"
             "¿Cuál de estos te gustaría agendar? 😊"
         )
     return (
-        f"Tenemos la especialidad *{esp_nombre}*, pero no hay servicios activos agendables "
+        f"Tenemos la especialidad *{esp_label}*, pero no hay servicios activos agendables "
         "en este momento. ¿Deseas que te ayude con otra consulta? 😊"
     )
 
