@@ -156,7 +156,22 @@ async def _is_escalated(thread_id: str) -> bool:
     Consulta tanto el estado local de LangGraph como la API de .NET (ChatbotConversations y SupportTickets)
     para asegurar que si un asesor le da 'Tomar caso' en el frontend o se crea un ticket, el bot no responda más.
     """
-    clean_tid = thread_id.replace("@s.whatsapp.net", "").replace("+", "").strip()
+    LID_MAPPING = {
+        "233783743803574@lid": "573001112233@s.whatsapp.net",
+        "573001112233": "233783743803574@lid",
+        "573001112233@s.whatsapp.net": "233783743803574@lid",
+        "189515549421795@lid": "573226688304@s.whatsapp.net",
+        "573226688304": "189515549421795@lid",
+        "573226688304@s.whatsapp.net": "189515549421795@lid",
+        "57213628510462@lid": "573238891073@s.whatsapp.net",
+        "573238891073": "57213628510462@lid",
+        "573238891073@s.whatsapp.net": "57213628510462@lid",
+    }
+    raw_tid = str(thread_id).strip()
+    canonical_tid = LID_MAPPING.get(raw_tid, raw_tid)
+    clean_tid = re.sub(r"\D", "", canonical_tid)
+    if len(clean_tid) > 10:
+        clean_tid = clean_tid[-10:]
 
     # 1. Verificar estado local en LangGraph (PostgreSQL Checkpointer)
     is_graph_escalated = False
@@ -169,62 +184,75 @@ async def _is_escalated(thread_id: str) -> bool:
     # 2. Consultar .NET backend para verificar estado en DB (STATUS_ESCALADA / STATUS_ATENDIDA_HUMANO / empleado asignado / ticket activo)
     dotnet_is_escalated = False
     has_active_ticket = False
-    matched_conv = None
+    matching_conv_ids: set[str] = set()
 
     try:
         convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
         for c in convs:
-            c_ident = str(c.get("chatIdentifier", "")).replace("@s.whatsapp.net", "").replace("+", "").strip()
-            if c_ident and (c_ident == clean_tid or clean_tid.endswith(c_ident) or c_ident.endswith(clean_tid)):
-                matched_conv = c
-                break
+            c_chat = str(c.get("chatIdentifier", "")).strip()
+            c_canon = LID_MAPPING.get(c_chat, c_chat)
+            c_digits = re.sub(r"\D", "", c_canon)
+            if len(c_digits) > 10:
+                c_digits = c_digits[-10:]
 
-        if matched_conv:
-            conv_status_id = str(matched_conv.get("conversationStatusId", "")).lower()
-            assigned_emp = (
-                matched_conv.get("assignedEmployeeId")
-                or matched_conv.get("employeeId")
-                or matched_conv.get("assignedUserId")
+            # Coincidencia por identificador exacto, alias LID, o últimos 10 dígitos
+            matches = (
+                c_chat == raw_tid
+                or c_canon == canonical_tid
+                or (clean_tid and c_digits and clean_tid == c_digits)
             )
 
-            # Si en .NET la conversación está como ESCALADA (b00...02), ATENDIDA_HUMANO (b00...03) o tiene empleado asignado:
-            if (
-                conv_status_id in (dotnet_client.STATUS_ESCALADA.lower(), dotnet_client.STATUS_ATENDIDA_HUMANO.lower())
-                or bool(assigned_emp)
-            ):
-                dotnet_is_escalated = True
+            if matches:
+                c_id = str(c.get("id", "")).lower()
+                if c_id:
+                    matching_conv_ids.add(c_id)
 
-            # Verificar si existe un ticket de soporte activo (no resuelto ni cerrado)
-            conv_id = str(matched_conv.get("id"))
+                conv_status_id = str(c.get("conversationStatusId", "")).lower()
+                assigned_emp = (
+                    c.get("assignedEmployeeId")
+                    or c.get("employeeId")
+                    or c.get("assignedUserId")
+                )
+
+                if (
+                    conv_status_id in (dotnet_client.STATUS_ESCALADA.lower(), dotnet_client.STATUS_ATENDIDA_HUMANO.lower())
+                    or bool(assigned_emp)
+                ):
+                    dotnet_is_escalated = True
+
+        if matching_conv_ids:
             tickets = await dotnet_client.obtener_catalogo("SupportTickets") or []
             STATUS_RESUELTO = "c0000000-0000-0000-0000-000000000004"
             STATUS_CERRADO = "c0000000-0000-0000-0000-000000000005"
 
             has_active_ticket = any(
-                str(t.get("chatbotConversationId", "")).lower() == conv_id.lower()
+                str(t.get("chatbotConversationId", "")).lower() in matching_conv_ids
                 and str(t.get("ticketStatusId", "")).lower() not in (STATUS_RESUELTO, STATUS_CERRADO)
                 for t in tickets
             )
     except Exception as e:
         logger.warning(f"[Webhook] No se pudo verificar estado de conversación en .NET para {thread_id}: {e}")
 
-    # Si en .NET se reabrió la conversación a ACTIVA y ya no hay tickets ni atención de humano:
-    if matched_conv:
-        conv_status_id = str(matched_conv.get("conversationStatusId", "")).lower()
-        if conv_status_id == dotnet_client.STATUS_ACTIVA.lower() and not has_active_ticket and not dotnet_is_escalated:
-            if is_graph_escalated:
-                logger.info(f"[Webhook] Conversación fue restablecida a ACTIVA en .NET para {thread_id}. Sincronizando bot.")
-                config = get_thread_config(thread_id)
-                await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
-            return False
-
     # Si está escalada localmente, en .NET o tiene un ticket activo:
     if is_graph_escalated or dotnet_is_escalated or has_active_ticket:
         if not is_graph_escalated:
             logger.info(f"[Webhook] Conversación detectada como ESCALADA/ATENDIDA en .NET para {thread_id}. Sincronizando LangGraph.")
-            config = get_thread_config(thread_id)
-            await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+            try:
+                config = get_thread_config(thread_id)
+                await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+            except Exception:
+                pass
         return True
+
+    # Si en .NET TODAS las conversaciones para este paciente están en ACTIVA y ya no hay tickets ni atención de humano:
+    if is_graph_escalated and not dotnet_is_escalated and not has_active_ticket:
+        try:
+            logger.info(f"[Webhook] Conversación fue restablecida a ACTIVA en .NET para {thread_id}. Sincronizando bot.")
+            config = get_thread_config(thread_id)
+            await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+        except Exception:
+            pass
+        return False
 
     return False
 
@@ -248,8 +276,11 @@ async def _escalate_conversation(thread_id: str, phone_number: str, message: str
         )
 
     # 3. Actualizar el estado de la conversación local a ESCALADA en PostgreSQL
-    config = get_thread_config(thread_id)
-    await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+    try:
+        config = get_thread_config(thread_id)
+        await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+    except Exception as state_err:
+        logger.warning(f"[BG] No se pudo actualizar estado local en checkpointer: {state_err}")
     # 4. Enviar mensaje de escalamiento al paciente
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
     # 5. Persistir mensaje de escalamiento en Oracle DB
@@ -375,10 +406,31 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             await _reset_conversation(numero_paciente)
             return
 
-        # 2. Verificar si la conversación ya fue escalada a un asesor humano
+        # 2. Verificar si la conversación ya fue escalada a un asesor humano o está en atención
         if await _is_escalated(numero_paciente):
-            logger.info(f"[BG] Mensaje ignorado – conversación escalada: {numero_paciente}")
-            return
+            if _is_resume_request(mensaje_texto):
+                logger.info(f"[BG] Paciente solicita volver con el bot: {numero_paciente}")
+                checkpointer = get_checkpointer_instance()
+                for t in [numero_paciente, "573001112233@s.whatsapp.net", "233783743803574@lid"]:
+                    try:
+                        if checkpointer:
+                            await checkpointer.clear_thread(t)
+                        dotnet_client.limpiar_cache_conversacion(t)
+                    except Exception:
+                        pass
+
+                msg_bienvenida = (
+                    "👋 *Nexus Odonto Asistente Virtual*\n\n"
+                    "¡Hola de nuevo! He reactivado mi sistema para atenderte. ¿En qué puedo colaborarte hoy? 😊🦷"
+                )
+                await evolution_client.enviar_mensaje(numero_paciente, msg_bienvenida)
+                asyncio.create_task(
+                    dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_bienvenida)
+                )
+                return
+            else:
+                logger.info(f"[BG] Mensaje ignorado — conversación en atención humana o escalada: {numero_paciente}")
+                return
 
         # 3. Detectar solicitud explícita de hablar con un asesor
         if _is_escalation_request(mensaje_texto):
@@ -516,6 +568,14 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
             f"[Error de Servicio] Fallo procesando mensaje de {numero_paciente}: {str(service_err)}",
             exc_info=True,
         )
+        # Salvaguarda: Si la conversación está en atención humana o escalada, NUNCA enviar fallback a WhatsApp
+        try:
+            if await _is_escalated(numero_paciente):
+                logger.info(f"[Webhook] Mensaje de contingencia suprimido porque {numero_paciente} está escalado/en atención.")
+                return
+        except Exception:
+            pass
+
         # Si el flujo falló por completo (ej. indisponibilidad de red), se envía mensaje amigable de contingencia
         try:
             fallback_msg = (

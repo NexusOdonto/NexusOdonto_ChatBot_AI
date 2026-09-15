@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 from typing import Optional, Dict, Any
 import httpx
@@ -20,7 +21,7 @@ class EvolutionClient:
     def _get_headers(self) -> Dict[str, str]:
         """Encabezados requeridos por Evolution API."""
         return {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "apikey": self.api_key
         }
 
@@ -72,7 +73,8 @@ class EvolutionClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.post(url, json=payload, headers=self._get_headers())
+                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = await client.post(url, content=body_bytes, headers=self._get_headers())
                 response.raise_for_status()
                 logger.info(f"[Evolution API] Mensaje enviado exitosamente a {numero}")
                 return response.json()
@@ -118,7 +120,8 @@ class EvolutionClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.post(url, json=payload, headers=self._get_headers())
+                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = await client.post(url, content=body_bytes, headers=self._get_headers())
                 response.raise_for_status()
                 logger.info(f"[Evolution API] Botones enviados exitosamente a {numero}")
                 return response.json()
@@ -173,7 +176,8 @@ class EvolutionClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.post(url, json=payload, headers=self._get_headers())
+                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = await client.post(url, content=body_bytes, headers=self._get_headers())
                 response.raise_for_status()
                 logger.info(f"[Evolution API] Lista enviada exitosamente a {numero}")
                 return response.json()
@@ -208,7 +212,8 @@ class EvolutionClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.post(url, json=payload, headers=self._get_headers())
+                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = await client.post(url, content=body_bytes, headers=self._get_headers())
                 response.raise_for_status()
                 data = response.json()
                 logger.info("[Evolution API] Base64 multimedia obtenido exitosamente")

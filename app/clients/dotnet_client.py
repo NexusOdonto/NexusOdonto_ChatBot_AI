@@ -1,4 +1,5 @@
 import os
+import json as json_lib
 import logging
 import asyncio
 from typing import Optional, Dict, Any, List
@@ -58,7 +59,7 @@ class DotNetClient:
                     try:
                         async with httpx.AsyncClient(timeout=self.timeout) as client:
                             headers = {
-                                "Content-Type": "application/json",
+                                "Content-Type": "application/json; charset=utf-8",
                                 "Accept": "application/json",
                             }
                             # BOT_SERVICE login is rejected without the shared API↔bot secret.
@@ -88,7 +89,7 @@ class DotNetClient:
         """Encabezados con token JWT de autorización para que C# permita el acceso."""
         token = await self._get_valid_token(force_refresh=force_refresh)
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json",
         }
         if token:
@@ -405,6 +406,11 @@ class DotNetClient:
                 break
         if not reason_id and reasons:
             reason_id = reasons[0].get("id")
+        if not reason_id:
+            if "RAG" in motivo_upper:
+                reason_id = "d0000000-0000-0000-0000-000000000002"
+            else:
+                reason_id = "d0000000-0000-0000-0000-000000000001"
 
         priority_id = None
         prio_upper = prioridad.upper()
@@ -424,6 +430,13 @@ class DotNetClient:
                 break
         if not priority_id and priorities:
             priority_id = priorities[0].get("id")
+        if not priority_id:
+            if prio_upper in ("CRITICO", "CRÃTICO", "URGENTE"):
+                priority_id = "50000000-0000-0000-0000-000000000004"
+            elif prio_upper in ("ALTA", "HIGH"):
+                priority_id = "50000000-0000-0000-0000-000000000003"
+            else:
+                priority_id = "50000000-0000-0000-0000-000000000002"
 
         # 2. Obtener o crear la conversación en .NET para vincularla al ticket
         conv_id = await self.obtener_o_crear_conversacion(telefono)
@@ -514,6 +527,13 @@ class DotNetClient:
                     break
             if not priority_id and priorities:
                 priority_id = priorities[0].get("id")
+        if not priority_id:
+            if prio_upper in ("CRITICO", "CRÃTICO", "URGENTE"):
+                priority_id = "50000000-0000-0000-0000-000000000004"
+            elif prio_upper in ("ALTA", "HIGH"):
+                priority_id = "50000000-0000-0000-0000-000000000003"
+            else:
+                priority_id = "50000000-0000-0000-0000-000000000002"
 
             payload = {
                 "title": titulo,
@@ -783,7 +803,7 @@ class DotNetClient:
                 response = await client.post(
                     login_endpoint,
                     json=payload,
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -1048,7 +1068,13 @@ class DotNetClient:
                             conv_id = str(conv.get("id"))
                             # Si la conversación ya existe (incluso cerrada o en otro estado), se reutiliza.
                             # Si estaba cerrada o en estado distinto de ACTIVA, se reabre en .NET.
-                            if conv.get("closedAt") or str(conv.get("conversationStatusId")) != self.STATUS_ACTIVA:
+                            # IMPORTANTE: Si estÃ¡ en ESCALADA o ATENDIDA_HUMANO, NUNCA sobreescribir a ACTIVA.
+                            conv_status = str(conv.get("conversationStatusId", "")).lower()
+                            is_human_or_escalated = conv_status in (
+                                self.STATUS_ESCALADA.lower(),
+                                self.STATUS_ATENDIDA_HUMANO.lower(),
+                            )
+                            if (conv.get("closedAt") or conv_status == self.STATUS_CERRADA.lower()) and not is_human_or_escalated:
                                 try:
                                     url_put = f"{self.base_url}/ChatbotConversations/{conv_id}"
                                     payload_put = {
