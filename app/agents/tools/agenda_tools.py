@@ -32,6 +32,19 @@ def _obtener_valor(obj: Dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _validar_cedula(cedula: str) -> Optional[str]:
+    """Valida que la cédula sea solo dígitos y tenga al menos 7 caracteres.
+    Retorna None si es válida, o un mensaje de error amigable si no lo es.
+    """
+    solo_digitos = "".join(c for c in cedula if c.isdigit())
+    if len(solo_digitos) < 7:
+        return (
+            f"⚠️ La cédula *{cedula}* no parece ser válida (debe tener al menos 7 dígitos).\n"
+            "Por favor verifica el número e inténtalo de nuevo. 🆔"
+        )
+    return None
+
+
 # Mapeo de términos habituales en español a nombres de catálogo en inglés (especialidades)
 SINONIMOS_ESPANOL = {
     "general": "General Dentistry",
@@ -60,18 +73,31 @@ SINONIMOS_ESPANOL = {
 
 # Aliases de búsqueda para servicios (español paciente → términos que pueden aparecer en el catálogo)
 ALIAS_BUSQUEDA_SERVICIO = {
-    "limpieza": ["limpieza", "profilaxis", "prophylaxis", "cleaning", "higiene"],
-    "profilaxis": ["profilaxis", "prophylaxis", "limpieza", "cleaning"],
-    "valoracion": ["valoracion", "assessment", "evaluacion", "consulta general"],
-    "revision": ["revision", "assessment", "valoracion", "chequeo"],
-    "resina": ["resina", "composite", "obturation", "relleno", "resin"],
-    "ortodoncia": ["ortodoncia", "orthodontics", "brackets", "alineadores", "frenillos"],
+    "limpieza": ["limpieza", "profilaxis", "prophylaxis", "cleaning", "higiene", "dental cleaning", "dental prophylaxis"],
+    "profilaxis": ["profilaxis", "prophylaxis", "limpieza", "cleaning", "dental prophylaxis", "dental cleaning"],
+    "valoracion": ["valoracion", "assessment", "evaluacion", "consulta general", "general assessment", "dental assessment"],
+    "revision": ["revision", "assessment", "valoracion", "chequeo", "general assessment"],
+    "resina": ["resina", "composite", "obturation", "relleno", "resin", "composite resin", "composite filling"],
+    "ortodoncia": ["ortodoncia", "orthodontics", "brackets", "alineadores", "frenillos", "orthodontic"],
     "endodoncia": ["endodoncia", "endodontics", "conducto", "root canal"],
-    "periodoncia": ["periodoncia", "periodontics", "encias", "gingival"],
-    "extraccion": ["extraccion", "extraction", "cirugia", "surgery", "cordales"],
-    "cirugia": ["cirugia", "surgery", "extraccion", "extraction"],
-    "blanqueamiento": ["blanqueamiento", "whitening", "bleaching"],
-    "implante": ["implante", "implant"],
+    "periodoncia": ["periodoncia", "periodontics", "encias", "gingival", "gum"],
+    "extraccion": ["extraccion", "extraction", "cirugia", "surgery", "cordales", "tooth extraction"],
+    "cirugia": ["cirugia", "surgery", "extraccion", "extraction", "oral surgery"],
+    "blanqueamiento": ["blanqueamiento", "whitening", "bleaching", "teeth whitening"],
+    "implante": ["implante", "implant", "dental implant"],
+    "corona": ["corona", "crown", "dental crown", "porcelain crown"],
+    "carilla": ["carilla", "veneer", "dental veneer", "porcelain veneer"],
+    "injerto": ["injerto", "graft", "gum graft", "injerto de encia", "injerto gingival", "tejido blando"],
+    "graft": ["graft", "injerto", "gum graft", "injerto de encia"],
+    "puente": ["puente", "bridge", "dental bridge", "fixed bridge"],
+    "protesis": ["protesis", "prosthesis", "denture", "dentadura", "dental prosthesis"],
+    "radiografia": ["radiografia", "xray", "x-ray", "radiograph", "radiologia"],
+    "fluoruro": ["fluoruro", "fluoride", "fluoride treatment", "aplicacion de fluor"],
+    "sellante": ["sellante", "sealant", "dental sealant", "fissure sealant"],
+    "brackets": ["brackets", "ortodoncia", "orthodontics", "braces", "alineadores"],
+    "alineadores": ["alineadores", "aligners", "invisalign", "clear aligners", "brackets"],
+    "ninos": ["ninos", "pediatric", "pediatria", "odontopediatria", "odontologia infantil"],
+    "infantil": ["infantil", "pediatric", "ninos", "pediatric dentistry"],
 }
 
 # Etiquetas amigables en español para nombres seed en inglés (sin inventar servicios nuevos)
@@ -106,20 +132,48 @@ def _aplicar_sinonimos_especialidad(norm_texto: str) -> str:
     return norm_texto
 
 
+def _variantes_desde_etiquetas_es(norm_query: str) -> List[str]:
+    """Mapeo INVERSO: dado un texto en español del usuario, devuelve los nombres en inglés
+    del catálogo que coincidan con etiquetas conocidas en ETIQUETAS_SERVICIO_ES.
+    Ejemplo: 'injerto de encia' → ['gum graft']
+    Esto permite que el bot encuentre servicios aunque la BD los tenga en inglés.
+    """
+    variantes = []
+    if not norm_query:
+        return variantes
+    for nombre_en, etiqueta_es in ETIQUETAS_SERVICIO_ES.items():
+        norm_etiqueta = _normalizar_texto(etiqueta_es)
+        if not norm_etiqueta:
+            continue
+        # Coincidencia si la consulta contiene la etiqueta o viceversa
+        if norm_query in norm_etiqueta or norm_etiqueta in norm_query:
+            nv = _normalizar_texto(nombre_en)
+            if nv and nv not in variantes:
+                variantes.append(nv)
+    return variantes
+
+
 def _variantes_busqueda_servicio(norm_query: str) -> List[str]:
-    """Expande la consulta con aliases y sinónimos de especialidad para matching de servicios."""
+    """Expande la consulta con aliases, sinónimos de especialidad y mapeo inverso de etiquetas."""
     variantes = [norm_query] if norm_query else []
     if not norm_query:
         return variantes
+    # 1. Aliases de búsqueda directos
     for clave, aliases in ALIAS_BUSQUEDA_SERVICIO.items():
         if clave in norm_query or norm_query in clave:
             for alias in aliases:
                 na = _normalizar_texto(alias)
                 if na and na not in variantes:
                     variantes.append(na)
+    # 2. Sinónimos de especialidad
     sinonimo = _aplicar_sinonimos_especialidad(norm_query)
     if sinonimo and sinonimo not in variantes:
         variantes.append(sinonimo)
+    # 3. Mapeo INVERSO: etiqueta española → nombre en inglés del catálogo
+    #    Ej: usuario dice 'injerto de encia' → agrega 'gum graft' como variante
+    for v_en in _variantes_desde_etiquetas_es(norm_query):
+        if v_en not in variantes:
+            variantes.append(v_en)
     return variantes
 
 
@@ -165,7 +219,8 @@ def _servicios_activos(servicios: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _buscar_servicio_por_texto(norm_query: str, servicios: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Busca un servicio activo por nombre, código, descripción o categoría (con aliases)."""
+    """Busca un servicio activo por nombre, código, descripción o categoría (con aliases y mapeo inverso)."""
+    # Paso 1: búsqueda con variantes expandidas (aliases + mapeo inverso español↔inglés)
     for variante in _variantes_busqueda_servicio(norm_query):
         for ser in servicios:
             if not _es_servicio_activo(ser):
@@ -175,9 +230,43 @@ def _buscar_servicio_por_texto(norm_query: str, servicios: List[Dict[str, Any]])
             code = _obtener_valor(ser, "code", "codigo") or ""
             desc = _obtener_valor(ser, "description", "descripcion") or ""
             category = _obtener_valor(ser, "category", "categoria", "Category") or ""
+            # Etiqueta española del nombre en inglés (mapeo directo)
             etiqueta_es = ETIQUETAS_SERVICIO_ES.get(_normalizar_texto(nombre), "")
             if _texto_coincide(variante, nombre, display, code, desc, category, etiqueta_es):
                 return ser
+
+    # Paso 2: búsqueda permisiva por tokens (palabras clave ≥4 letras)
+    # Garantiza que un servicio nuevo agregado desde el frontend (sin alias registrado)
+    # pueda encontrarse si alguna palabra clave del nombre coincide con la consulta.
+    tokens_query = [t for t in norm_query.split() if len(t) >= 4]
+    if tokens_query:
+        mejor_candidato = None
+        mejor_score = 0
+        for ser in servicios:
+            if not _es_servicio_activo(ser):
+                continue
+            nombre = _normalizar_texto(_obtener_valor(ser, "name", "nombre") or "")
+            display = _normalizar_texto(_obtener_valor(ser, "displayName", "DisplayName", "nombreDisplay") or "")
+            desc = _normalizar_texto(_obtener_valor(ser, "description", "descripcion") or "")
+            etiqueta_es = _normalizar_texto(ETIQUETAS_SERVICIO_ES.get(nombre, ""))
+            # Concatenar todos los campos buscables del servicio
+            campo_total = f"{nombre} {display} {desc} {etiqueta_es}"
+            # Contar cuántos tokens del query aparecen en el servicio
+            score = sum(1 for t in tokens_query if t in campo_total)
+            # También: tokens del nombre del servicio que aparecen en el query
+            tokens_servicio = [t for t in nombre.split() if len(t) >= 4]
+            score += sum(1 for t in tokens_servicio if t in norm_query)
+            if score > mejor_score:
+                mejor_score = score
+                mejor_candidato = ser
+        # Solo retornar si al menos la mitad de los tokens hacen match (umbral mínimo)
+        if mejor_candidato and mejor_score >= max(1, len(tokens_query) // 2):
+            logger.debug(
+                f"[Servicio] Match por tokens (score={mejor_score}) para query '{norm_query}' "
+                f"→ '{_obtener_valor(mejor_candidato, 'name', 'nombre')}'"
+            )
+            return mejor_candidato
+
     return None
 
 
@@ -357,6 +446,61 @@ def _generar_slots_desde_regla(
         return [str(start_time_str)[:5]]
 
 
+def _formatear_hora_ampm(hora_str: str) -> str:
+    """Convierte una hora en formato 24h (ej. '08:00', '14:30', '14:30:00') a formato 12h AM/PM (ej. '08:00 AM', '02:30 PM')."""
+    if not hora_str:
+        return ""
+    texto = str(hora_str).strip()
+    if "AM" in texto.upper() or "PM" in texto.upper():
+        return texto
+    try:
+        partes = texto.split(":")
+        h = int(partes[0])
+        m = int(partes[1]) if len(partes) > 1 else 0
+        ampm = "AM" if h < 12 else "PM"
+        h12 = h % 12
+        if h12 == 0:
+            h12 = 12
+        return f"{h12:02d}:{m:02d} {ampm}"
+    except Exception:
+        return texto
+
+
+def _parsear_fecha_hora_flexible(texto: str) -> Optional[datetime]:
+    """Parsea fechas en ISO, 'YYYY-MM-DD HH:MM', o con AM/PM (ej: '2026-09-16 02:30 PM')."""
+    if not texto:
+        return None
+    import re
+    raw = str(texto).strip()
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*(AM|PM))?", raw, re.IGNORECASE)
+    if m:
+        fecha_p = m.group(1)
+        h = int(m.group(2))
+        minute = int(m.group(3))
+        sec = int(m.group(4) or 0)
+        ampm = m.group(5)
+        if ampm:
+            ampm = ampm.upper()
+            if ampm == "PM" and h < 12:
+                h += 12
+            elif ampm == "AM" and h == 12:
+                h = 0
+        elif "PM" in raw.upper() and h < 12:
+            h += 12
+        elif "AM" in raw.upper() and h == 12:
+            h = 0
+        return datetime.strptime(f"{fecha_p}T{h:02d}:{minute:02d}:{sec:02d}", "%Y-%m-%dT%H:%M:%S")
+
+    if len(raw) == 10 and re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return datetime.strptime(f"{raw}T08:00:00", "%Y-%m-%dT%H:%M:%S")
+
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00").replace(" ", "T"))
+    except Exception:
+        pass
+    return None
+
+
 async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
     try:
         norm_query = _normalizar_texto(especialidad)
@@ -490,48 +634,91 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                 # Filtrar turnos ya ocupados por citas existentes considerando traslapes de intervalos
                 try:
                     fecha_target = str(fecha)[:10]
-                    citas_existentes = await dotnet_client.consultar_citas(fecha_target) or []
-                    if isinstance(citas_existentes, dict):
-                        citas_existentes = citas_existentes.get("items", [])
+                    citas_raw = await dotnet_client.consultar_citas(fecha_target)
+                    if not citas_raw:
+                        citas_raw = await dotnet_client.consultar_citas("")
+                    if isinstance(citas_raw, dict):
+                        citas_existentes = citas_raw.get("items", [])
+                    elif isinstance(citas_raw, list):
+                        citas_existentes = citas_raw
+                    else:
+                        citas_existentes = []
 
                     # Extraer citas del profesional en la fecha consultada que no estén canceladas
                     intervalos_ocupados = []
                     for c in citas_existentes:
-                        c_prof = str(c.get("professionalId") or "").lower()
-                        c_canc = c.get("cancelledAt")
-                        c_st_id = str(c.get("appointmentStatusId") or "").lower()
-                        
-                        # Ignorar si es de otro profesional o si está cancelada
-                        if c_prof != str(prof_id).lower() or c_canc or c_st_id == "10000000-0000-0000-0000-000000000005":
+                        if not isinstance(c, dict):
+                            continue
+                        c_prof = str(
+                            c.get("professionalId")
+                            or c.get("profesionalId")
+                            or c.get("employeeId")
+                            or c.get("doctorId")
+                            or ""
+                        ).lower().strip()
+                        c_canc = c.get("cancelledAt") or c.get("cancelado")
+                        c_st_id = str(c.get("appointmentStatusId") or "").lower().strip()
+                        c_st_name = str(c.get("statusName") or c.get("status") or c.get("estado") or "").lower()
+
+                        # Ignorar si es de otro profesional (si prof_id está definido)
+                        if prof_id and c_prof and c_prof != str(prof_id).lower().strip():
                             continue
 
-                        c_start_raw = str(c.get("startsAt") or c.get("fechaHoraInicio") or "").replace("Z", "").split(".")[0].replace(" ", "T")
-                        c_end_raw = str(c.get("endsAt") or c.get("fechaHoraFin") or "").replace("Z", "").split(".")[0].replace(" ", "T")
+                        # Omitir si la cita está cancelada (ID 5 o texto con 'cancel')
+                        if c_canc or c_st_id == "10000000-0000-0000-0000-000000000005" or "cancel" in c_st_name:
+                            continue
+
+                        c_start_raw = str(
+                            c.get("startsAt")
+                            or c.get("fechaHoraInicio")
+                            or c.get("startDateTime")
+                            or c.get("startTime")
+                            or ""
+                        ).replace("Z", "").split(".")[0].replace(" ", "T")
+
+                        c_end_raw = str(
+                            c.get("endsAt")
+                            or c.get("fechaHoraFin")
+                            or c.get("endDateTime")
+                            or c.get("endTime")
+                            or ""
+                        ).replace("Z", "").split(".")[0].replace(" ", "T")
+
+                        if len(c_start_raw) <= 8 and ":" in c_start_raw:
+                            c_start_raw = f"{fecha_target}T{c_start_raw}"
+                        if len(c_end_raw) <= 8 and ":" in c_end_raw:
+                            c_end_raw = f"{fecha_target}T{c_end_raw}"
 
                         if c_start_raw and c_start_raw[:10] == fecha_target:
                             try:
                                 dt_c_start = datetime.fromisoformat(c_start_raw)
-                                if c_end_raw:
+                                if c_end_raw and len(c_end_raw) >= 16:
                                     dt_c_end = datetime.fromisoformat(c_end_raw)
                                 else:
-                                    dt_c_end = dt_c_start + timedelta(minutes=duracion_servicio or 45)
+                                    c_dur = int(c.get("durationMinutes") or duracion_servicio or 45)
+                                    dt_c_end = dt_c_start + timedelta(minutes=c_dur)
                                 intervalos_ocupados.append((dt_c_start, dt_c_end))
                             except Exception as parse_err:
                                 logger.debug(f"[Agenda] Error parseando cita existente: {parse_err}")
 
                     # Descartar slots candidatos que colisionen con citas existentes
+                    dur_eval = max(30, int(duracion_servicio or 30))
                     slots_libres = []
                     for s in unique_slots:
                         try:
-                            slot_start_dt = datetime.strptime(f"{fecha_target}T{s}:00", "%Y-%m-%dT%H:%M:%S")
-                            slot_end_dt = slot_start_dt + timedelta(minutes=duracion_servicio)
+                            s_clean = s[:5]
+                            slot_start_dt = datetime.strptime(f"{fecha_target}T{s_clean}:00", "%Y-%m-%dT%H:%M:%S")
+                            slot_end_dt = slot_start_dt + timedelta(minutes=dur_eval)
 
                             # Hay colisión si: slot_inicio < cita_fin AND slot_fin > cita_inicio
-                            colision = any(slot_start_dt < c_end and slot_end_dt > c_start for c_start, c_end in intervalos_ocupados)
+                            colision = any(
+                                slot_start_dt < c_end and slot_end_dt > c_start
+                                for c_start, c_end in intervalos_ocupados
+                            )
                             if not colision:
-                                slots_libres.append(s)
+                                slots_libres.append(s_clean)
                         except Exception:
-                            slots_libres.append(s)
+                            slots_libres.append(s[:5])
 
                     unique_slots = slots_libres
                 except Exception as c_err:
@@ -550,17 +737,9 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
                     min_hhmm = min_dt.strftime("%H:%M")
                     unique_slots = [s for s in unique_slots if s >= min_hhmm]
                 if unique_slots:
-                    # Agrupar visualmente slots mañana y tarde
-                    manana = [s for s in unique_slots if int(s.split(":")[0]) < 12]
-                    tarde = [s for s in unique_slots if int(s.split(":")[0]) >= 12]
-                    
-                    horarios_str_list = []
-                    if manana:
-                        horarios_str_list.append(f"   🌅 *Mañana:* " + ", ".join(manana))
-                    if tarde:
-                        horarios_str_list.append(f"   🌇 *Tarde:* " + ", ".join(tarde))
-                    
-                    bloque_horarios = "\n".join(horarios_str_list) if horarios_str_list else ("   ⏰ " + ", ".join(unique_slots))
+                    # Formato AM / PM sin división de Mañana/Tarde
+                    slots_ampm = [_formatear_hora_ampm(s) for s in unique_slots]
+                    bloque_horarios = "   ⏰ " + ", ".join(slots_ampm)
                     resultados.append(f"👨‍⚕️ *{prof_nombre}*:\n{bloque_horarios}")
                 else:
                     resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin turnos disponibles para esta fecha.")
@@ -600,9 +779,15 @@ async def _agendar_cita_impl(
     """
     try:
         thread_id = config.get("configurable", {}).get("thread_id", "")
-        
+        cedula = (cedula or "").strip()
+
+        # ── Validar cédula antes de cualquier llamada a la API ───────────────────
+        error_cedula = _validar_cedula(cedula)
+        if error_cedula:
+            return error_cedula
+
         # ── 1. Resolver paciente por cédula ──────────────────────────────────────
-        persona = await dotnet_client.buscar_persona_por_documento(cedula.strip())
+        persona = await dotnet_client.buscar_persona_por_documento(cedula)
         paciente_id = None
         nombre_display = nombre_paciente
 
@@ -712,19 +897,9 @@ async def _agendar_cita_impl(
         # ── 4. Calcular startsAt y endsAt en formato ISO 8601 ───────────────────
         try:
             raw = str(fecha_hora_inicio).strip()
-            if "T" not in raw and " " not in raw and len(raw) == 10:
-                raw += "T08:00:00"
-            raw = raw.replace(" ", "T")
-
-            try:
-                starts_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except Exception:
-                import re
-                m = re.search(r"(\d{4}-\d{2}-\d{2})[T\s](\d{1,2}):(\d{2})", raw)
-                if m:
-                    starts_dt = datetime.strptime(f"{m.group(1)}T{int(m.group(2)):02d}:{m.group(3)}:00", "%Y-%m-%dT%H:%M:%S")
-                else:
-                    starts_dt = datetime.now()
+            starts_dt = _parsear_fecha_hora_flexible(raw)
+            if not starts_dt:
+                starts_dt = datetime.now()
 
             ends_dt = starts_dt + timedelta(minutes=duracion_min)
 
@@ -818,6 +993,9 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
         cedula = cedula.strip()
         if not cedula:
             return "Por favor, indícame tu número de cédula para poder consultar tus citas. 🆔"
+        error_cedula = _validar_cedula(cedula)
+        if error_cedula:
+            return error_cedula
 
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
 
@@ -969,6 +1147,9 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
 
         if not cedula:
             return "Para cancelar tu cita, necesito tu *número de cédula* 🆔. ¿Me la puedes indicar? 😊"
+        error_cedula = _validar_cedula(cedula)
+        if error_cedula:
+            return error_cedula
 
         # Obtener citas del paciente
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
@@ -1070,6 +1251,9 @@ async def _modificar_cita_impl(
                 "• La *nueva fecha y horario* deseado (ej: 2026-09-04 14:00)\n\n"
                 "¿Me puedes proporcionar esos datos? 😊"
             )
+        error_cedula = _validar_cedula(cedula)
+        if error_cedula:
+            return error_cedula
 
         # Buscar citas del paciente
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
@@ -1110,14 +1294,14 @@ async def _modificar_cita_impl(
 
         # Calcular nuevas fechas
         try:
-            raw = str(nueva_fecha_hora).strip().replace(" ", "T")
-            if "T" not in raw and len(raw) == 10:
-                raw += "T08:00:00"
-            starts_dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            raw = str(nueva_fecha_hora).strip()
+            starts_dt = _parsear_fecha_hora_flexible(raw)
+            if not starts_dt:
+                raise ValueError("Formato no reconocido")
         except Exception:
             return (
                 f"❌ No pude interpretar la fecha '{nueva_fecha_hora}'.\n"
-                "Por favor usa el formato: *YYYY-MM-DD HH:MM* (ej: 2026-09-04 14:00)"
+                "Por favor usa el formato: *YYYY-MM-DD HH:MM AM/PM* (ej: 2026-09-04 02:00 PM o 14:00)"
             )
 
         # Determinar duración del servicio actual
@@ -1213,6 +1397,9 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
 
         if not cedula:
             return "Para confirmar tu cita, por favor indícame tu *número de cédula* 🆔. 😊"
+        error_cedula = _validar_cedula(cedula)
+        if error_cedula:
+            return error_cedula
 
         # Obtener citas del paciente
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)

@@ -242,13 +242,25 @@ class DotNetClient:
         return None
 
     async def consultar_citas(self, fecha: str = "") -> Optional[Any]:
-        """Consulta las citas de una fecha en el backend .NET. Si fecha está vacía, consulta todas sin query params."""
+        """Consulta las citas de una fecha en el backend .NET. Si fecha está vacía o el filtro falla, consulta todas sin query params."""
         url = f"{self.base_url}/Appointments"
-        params = {}
-        if fecha and str(fecha).strip():
-            clean_f = str(fecha).strip()
-            params = {"fecha": clean_f, "date": clean_f}
-        response = await self._request_with_retry("GET", url, params=params if params else None)
+        clean_f = str(fecha).strip() if fecha else ""
+        if clean_f:
+            response = await self._request_with_retry("GET", url, params={"date": clean_f})
+            if response and response.status_code == 200:
+                payload = response.json()
+                items = payload if isinstance(payload, list) else payload.get("items", [])
+                if items:
+                    return payload
+            response = await self._request_with_retry("GET", url, params={"fecha": clean_f})
+            if response and response.status_code == 200:
+                payload = response.json()
+                items = payload if isinstance(payload, list) else payload.get("items", [])
+                if items:
+                    return payload
+
+        # Fallback seguro: consultar sin parámetros para que el llamador filtre por fecha en memoria
+        response = await self._request_with_retry("GET", url)
         if response and response.status_code == 200:
             return response.json()
         return None
