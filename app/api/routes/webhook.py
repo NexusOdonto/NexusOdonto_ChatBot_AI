@@ -821,7 +821,7 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, re
                 "¡Hola! 👋 En este momento estamos experimentando una alta demanda en nuestro sistema digital.\n\n"
                 "Para consultar disponibilidad, agendar citas o atender cualquier duda, puedes comunicarte directamente con nuestro equipo:\n"
                 "📞 *WhatsApp / Teléfono:* +57 324 6030217\n"
-                "📍 *Consultorio:* Cr 24 #35-12, Santander\n"
+                "📍 *Consultorio:* Calle 100 # 15-20, Centro Médico Odontológico\n"
                 "⏰ *Horario:* Lunes a Sábado de 8:00 AM a 6:00 PM\n\n"
                 "¡Con gusto te atenderemos! 😊🦷"
             )

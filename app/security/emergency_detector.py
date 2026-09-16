@@ -12,7 +12,7 @@ MENSAJE_EMERGENCIA_URGENCIAS = (
     "🚨 *ATENCIÓN DE URGENCIA ODONTOLÓGICA / MÉDICA* 🚨\n\n"
     "Hemos detectado que puedes estar presentando una situación de emergencia que requiere atención presencial inmediata.\n\n"
     "⚠️ *Por tu seguridad, suspende el uso de este chat y acude de inmediato a un centro médico de urgencias o servicio de emergencias odontológicas más cercano.*\n\n"
-    "📍 *Consultorio Nexus Odonto:* Cr 24 #35-12, Santander\n"
+    "📍 *Consultorio Nexus Odonto:* Calle 100 # 15-20, Centro Médico Odontológico\n"
     "📞 *Línea directa / Urgencias:* +57 324 6030217\n\n"
     "Hemos escalado tu caso inmediatamente a nuestro equipo humano con prioridad *CRÍTICA*."
 )

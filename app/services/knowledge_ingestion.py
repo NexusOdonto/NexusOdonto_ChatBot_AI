@@ -192,8 +192,10 @@ CONOCIMIENTO_CLINICO_DOCUMENTOS: List[dict] = [
         "contenido": (
             "Información General de Nexus Odonto:\n"
             "- Nombre: Consultorio Odontológico Nexus Odonto.\n"
-            "- Horario de atención: Lunes a Viernes de 8:00 AM a 6:00 PM. Sábados de 8:00 AM a 1:00 PM. Domingos y festivos cerrado.\n"
+            "- Dirección / Ubicación: Calle 100 # 15-20, Centro Médico Odontológico.\n"
+            "- Horario de atención: Lunes a Sábado de 8:00 AM a 6:00 PM. Domingos y festivos cerrado.\n"
             "- Canales de atención: WhatsApp y llamadas al +57 324 6030217.\n"
+            "- Correo electrónico: soporte@nexusodonto.com.\n"
             "- Formas de pago: Efectivo, tarjetas de débito/crédito y transferencias bancarias."
         ),
     },
