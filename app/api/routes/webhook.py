@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
 from app.clients.evolution_client import evolution_client
+from app.clients.evolution_client import is_bot_message_id
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
 from app.graph.builder import get_graph
@@ -30,39 +31,199 @@ _SEEN_MESSAGE_IDS: OrderedDict[str, float] = OrderedDict()
 _CHAT_LOCKS: dict[str, asyncio.Lock] = {}
 _CHAT_LOCKS_GUARD = asyncio.Lock()
 
-# ─── Anti-spam / Rate Limit por usuario ──────────────────────────────────────
-# Si el usuario envía más de _SPAM_MAX_MSGS mensajes en _SPAM_WINDOW_SECONDS
-# segundos, los mensajes extra se descartan y se envía UNA advertencia.
-_SPAM_WINDOW_SECONDS = 10          # Ventana deslizante
-_SPAM_MAX_MSGS = 5                 # Mensajes permitidos por ventana
-# {numero_paciente: deque de timestamps}
-_SPAM_TIMESTAMPS: dict[str, list] = {}
-# {numero_paciente: timestamp de la última advertencia enviada}
+# ─── Anti-spam / Rate Limit & Debounce por usuario ────────────────────────────
+_SPAM_WINDOW_SECONDS = 5.0          # Ventana para medir ráfagas de mensajes (segundos)
+_SPAM_MAX_BURST = 3                 # Máximo de mensajes en esa ventana antes de activar bloqueo
+_SPAM_PENALTY_SECONDS = 15.0        # Segundos que el usuario queda silenciado si hace spam
+_SPAM_WARN_COOLDOWN = 30.0          # Segundos mínimos entre avisos de advertencia al mismo usuario
+_DEBOUNCE_WAIT_SECONDS = 2.0        # Tiempo de espera (segundos) para agrupar mensajes fragmentados
+
+_SPAM_TIMESTAMPS: dict[str, list[float]] = {}
+_SPAM_BLOCKED_UNTIL: dict[str, float] = {}
 _SPAM_WARNED_AT: dict[str, float] = {}
-_SPAM_WARN_COOLDOWN = 30           # Segundos entre advertencias al mismo usuario
+
+_USER_MESSAGE_BUFFERS: dict[str, list[str]] = {}
+_USER_DEBOUNCE_TASKS: dict[str, asyncio.Task] = {}
 
 
-def _is_spam(numero_paciente: str) -> bool:
-    """Retorna True si el usuario supera el rate-limit y debe ser silenciado.
-    Mantiene una ventana deslizante de timestamps por usuario.
-    """
-    now = time.monotonic()
-    timestamps = _SPAM_TIMESTAMPS.get(numero_paciente, [])
-    # Descartar timestamps fuera de la ventana
-    timestamps = [t for t in timestamps if now - t < _SPAM_WINDOW_SECONDS]
-    timestamps.append(now)
-    _SPAM_TIMESTAMPS[numero_paciente] = timestamps
-    return len(timestamps) > _SPAM_MAX_MSGS
+def _is_user_spam_blocked(numero_paciente: str) -> bool:
+    """Retorna True si el usuario se encuentra dentro del período de penalización por spam."""
+    return time.monotonic() < _SPAM_BLOCKED_UNTIL.get(numero_paciente, 0.0)
 
 
 def _should_warn_spam(numero_paciente: str) -> bool:
-    """Retorna True si todavía no hemos enviado la advertencia anti-spam recientemente."""
     now = time.monotonic()
     last_warn = _SPAM_WARNED_AT.get(numero_paciente, 0.0)
     if now - last_warn > _SPAM_WARN_COOLDOWN:
         _SPAM_WARNED_AT[numero_paciente] = now
         return True
     return False
+
+
+def _check_and_trigger_spam(numero_paciente: str) -> bool:
+    """Verifica si los mensajes recientes del usuario constituyen spam en tiempo real.
+    Si superan el umbral, cancela buffers pendientes, bloquea al usuario temporalmente
+    y envía UNA advertencia.
+    """
+    now = time.monotonic()
+    timestamps = _SPAM_TIMESTAMPS.get(numero_paciente, [])
+    timestamps = [t for t in timestamps if now - t < _SPAM_WINDOW_SECONDS]
+    timestamps.append(now)
+    _SPAM_TIMESTAMPS[numero_paciente] = timestamps
+
+    if len(timestamps) > _SPAM_MAX_BURST:
+        # Activar penalización por spam
+        _SPAM_BLOCKED_UNTIL[numero_paciente] = now + _SPAM_PENALTY_SECONDS
+
+        # Limpiar buffers acumulados y cancelar tarea de debounce pendiente
+        _USER_MESSAGE_BUFFERS.pop(numero_paciente, None)
+        existing_task = _USER_DEBOUNCE_TASKS.pop(numero_paciente, None)
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        if _should_warn_spam(numero_paciente):
+            logger.warning(
+                f"[Anti-spam Gate] Ráfaga de spam detectada para {numero_paciente} "
+                f"({len(timestamps)} msgs en {_SPAM_WINDOW_SECONDS}s). Enviando aviso."
+            )
+            spam_msg = (
+                "⚠️ Estás enviando muchos mensajes seguidos.\n"
+                "Por favor espera un momento y escribe tu consulta en un solo mensaje para poder atenderte bien. 😊"
+            )
+            asyncio.create_task(evolution_client.enviar_mensaje(numero_paciente, spam_msg))
+        else:
+            logger.info(f"[Anti-spam Gate] Mensaje extra de spam descartado silenciosamente para {numero_paciente}")
+
+        return True
+
+    return False
+
+
+def _is_nonsense_or_gibberish(texto: str) -> bool:
+    """Detecta si el mensaje es spam de letras/números repetidos, teclado aporreado o sin sentido."""
+    raw = texto.strip()
+    if not raw:
+        return False
+
+    # No filtrar comandos ni solicitudes del sistema
+    if _is_reset_request(raw) or _is_resume_request(raw) or _is_escalation_request(raw):
+        return False
+
+    # Si contiene palabras clave del ámbito odontológico o cortesía, NUNCA es gibberish
+    KEYWORDS_CLINICA = {
+        "cita", "citas", "agendar", "agenda", "apartar", "programar", "horario", "horarios",
+        "doctor", "doctora", "odontologo", "odontologa", "precio", "precios", "costo",
+        "cuanto", "cuánto", "vale", "servicio", "servicios", "limpieza", "diseño",
+        "ortodoncia", "bracket", "brackets", "calza", "resina", "extraccion", "extracción",
+        "cordal", "cordales", "corona", "implante", "dolor", "urgencia", "emergencia",
+        "cedula", "cédula", "documento", "nombre", "hola", "buenos", "buenas", "tardes",
+        "dias", "días", "noches", "gracias", "cancelar", "modificar", "reprogramar",
+        "confirmar", "asistir", "consulta", "telefono", "teléfono", "direccion", "dirección",
+        "si", "sí", "no", "ok", "vale", "listo", "dale", "bien", "perfecto"
+    }
+    palabras_lower = [p.strip(".,;:!?()[]\"'").lower() for p in raw.split()]
+    if any(p in KEYWORDS_CLINICA for p in palabras_lower):
+        return False
+
+    # Validar si son únicamente dígitos numéricos
+    solo_digitos = "".join(c for c in raw if c.isdigit())
+    chars_sin_separadores = raw.replace(" ", "").replace(".", "").replace("-", "")
+    if solo_digitos and len(solo_digitos) == len(chars_sin_separadores):
+        # Cédulas o teléfonos válidos (7 a 12 dígitos)
+        if 7 <= len(solo_digitos) <= 12:
+            return False
+        # Opciones válidas de menú interactivo
+        if solo_digitos in ("1", "2", "3", "4", "5"):
+            return False
+        # Números aleatorios cortos (< 7 dígitos) o excesivamente largos (> 12) sin contexto
+        return True
+
+    # Análisis de repetición y aporreo si el mensaje tiene 3 palabras o menos
+    if len(palabras_lower) <= 3:
+        # 1. Caracteres repetidos 4 o más veces seguidas (ej: "aaaaa", "11111", "jjjjj", ".......", "????")
+        if re.search(r"(.)\1{3,}", raw, re.IGNORECASE):
+            return True
+
+        # 2. Patrones repetidos en bucle (ej: "asdasdasd", "12121212", "qweqweqwe")
+        if re.search(r"^(.{2,4})\1{2,}$", raw.replace(" ", ""), re.IGNORECASE):
+            return True
+
+        # 3. Palabras largas sin vocales o aporreo de teclado (ej: "sdfghjkl", "zxcvbnm", "qwrtyp")
+        for p in palabras_lower:
+            solo_letras = re.sub(r"[^a-záéíóúñ]", "", p)
+            if len(solo_letras) >= 6:
+                vocales = len(re.findall(r"[aeiouáéíóú]", solo_letras))
+                if vocales == 0:
+                    return True
+                if len(solo_letras) >= 8 and (vocales / len(solo_letras)) < 0.15:
+                    return True
+
+    return False
+
+
+def _enqueue_user_message(numero_paciente: str, mensaje_texto: str) -> None:
+    """Encola el mensaje para debouncing y valida spam en tiempo real al llegar el webhook."""
+    # 1. Descartar si el usuario está en penalización activa por spam
+    if _is_user_spam_blocked(numero_paciente):
+        logger.info(f"[Anti-spam Gate] Mensaje de {numero_paciente} descartado (penalización activa)")
+        return
+
+    # 2. Validar ráfaga de mensajes en tiempo real
+    if _check_and_trigger_spam(numero_paciente):
+        return
+
+    # 3. Registrar el mensaje individual en base de datos para que el frontend lo visualice de inmediato
+    asyncio.create_task(
+        dotnet_client.registrar_mensaje(
+            chat_identifier=numero_paciente,
+            rol="USUARIO",
+            contenido=mensaje_texto,
+        )
+    )
+
+    # 4. Acumular en el buffer del usuario para agrupar mensajes continuos
+    if numero_paciente not in _USER_MESSAGE_BUFFERS:
+        _USER_MESSAGE_BUFFERS[numero_paciente] = []
+    _USER_MESSAGE_BUFFERS[numero_paciente].append(mensaje_texto.strip())
+
+    # 5. Si ya había un temporizador esperando, cancelarlo para extender la ventana y agrupar el nuevo mensaje
+    existing_task = _USER_DEBOUNCE_TASKS.get(numero_paciente)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+
+    # 6. Lanzar temporizador de agrupación (espera antes de procesar con el bot)
+    _USER_DEBOUNCE_TASKS[numero_paciente] = asyncio.create_task(
+        _debounce_worker(numero_paciente)
+    )
+
+
+async def _debounce_worker(numero_paciente: str) -> None:
+    """Espera la ventana de silencio para agrupar mensajes fragmentados y enviarlos juntos al bot."""
+    try:
+        await asyncio.sleep(_DEBOUNCE_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        # Se canceló porque llegó otro mensaje antes de vencer el tiempo
+        return
+
+    mensajes = _USER_MESSAGE_BUFFERS.pop(numero_paciente, [])
+    _USER_DEBOUNCE_TASKS.pop(numero_paciente, None)
+
+    if not mensajes:
+        return
+
+    # Unir fragmentos en un solo mensaje completo
+    if len(mensajes) == 1:
+        texto_final = mensajes[0]
+    else:
+        texto_final = "\n".join(mensajes)
+        logger.info(f"[Debounce] Agrupados {len(mensajes)} mensajes para {numero_paciente} en una sola consulta: '{texto_final}'")
+
+    asyncio.create_task(
+        _with_chat_lock(
+            numero_paciente,
+            _process_whatsapp_message(numero_paciente, texto_final, registrar_usuario_db=False),
+        )
+    )
 
 
 def _prune_seen_message_ids(now: float) -> None:
@@ -107,6 +268,31 @@ MENSAJE_FALLBACK_PACIENTE = (
     "En este momento nuestro sistema de agenda está en mantenimiento o presentando intermitencias. "
     "Por favor, intenta nuevamente en unos minutos. ¡Disculpa las molestias!"
 )
+
+
+async def _registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> None:
+    """Registra en el backend .NET un mensaje enviado manualmente desde el celular vinculado.
+    Se usa el rol ASESOR para que el frontend lo muestre como mensaje del operador en tiempo real.
+    También sincroniza el mensaje en el estado de LangGraph para mantener el contexto de la conversación.
+    """
+    try:
+        logger.info(f"[fromMe-Humano] Registrando respuesta manual del asesor para {numero_paciente}: '{mensaje_texto}'")
+        await dotnet_client.registrar_mensaje(
+            chat_identifier=numero_paciente,
+            rol="ASESOR",
+            contenido=mensaje_texto,
+        )
+        try:
+            # Sincronizar con el historial en LangGraph para que el LLM sepa qué respondió el asesor
+            config = get_thread_config(numero_paciente)
+            await get_graph().aupdate_state(
+                config,
+                {"messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")]},
+            )
+        except Exception as graph_err:
+            logger.debug(f"[fromMe-Humano] No se pudo sincronizar en LangGraph (normal si no hay sesión activa): {graph_err}")
+    except Exception as e:
+        logger.warning(f"[fromMe-Humano] No se pudo registrar mensaje del asesor: {e}")
 
 MENSAJE_ESCALAMIENTO = (
     "Entiendo. Un asesor de la clínica revisará tu solicitud y te contactará pronto."
@@ -416,7 +602,7 @@ async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, 
         )
 
 
-async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) -> None:
+async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, registrar_usuario_db: bool = False) -> None:
     """Procesa el mensaje del paciente en segundo plano.
 
     Esta corutina se ejecuta desacoplada del ciclo request/response para que
@@ -426,32 +612,37 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
     El número de WhatsApp (numero_paciente) es el identificador de la conversación.
     """
     try:
-        # 0. Anti-spam: descartar si el usuario está enviando demasiados mensajes
-        if _is_spam(numero_paciente):
-            if _should_warn_spam(numero_paciente):
-                logger.warning(f"[Anti-spam] Demasiados mensajes de {numero_paciente}. Enviando advertencia.")
-                spam_msg = (
-                    "⚠️ Estás enviando muchos mensajes seguidos. "
-                    "Por favor espera un momento antes de continuar. "
-                    "Cuando estés listo, con gusto te atiendo. 😊"
+        # Registrar en DB solo si no fue registrado previamente por _enqueue_user_message
+        if registrar_usuario_db:
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="USUARIO",
+                    contenido=mensaje_texto,
                 )
-                asyncio.create_task(evolution_client.enviar_mensaje(numero_paciente, spam_msg))
-            else:
-                logger.info(f"[Anti-spam] Mensaje de {numero_paciente} descartado (spam silencioso).")
-            return
-
-        # Registrar de inmediato el mensaje entrante del usuario en la base de datos Oracle
-        asyncio.create_task(
-            dotnet_client.registrar_mensaje(
-                chat_identifier=numero_paciente,
-                rol="USUARIO",
-                contenido=mensaje_texto,
             )
-        )
 
         # 1. Comandos de reinicio de conversación
         if _is_reset_request(mensaje_texto):
             await _reset_conversation(numero_paciente)
+            return
+
+        # 2. Filtrar mensajes sin sentido o aporreo de teclado (gibberish / spam de letras o números)
+        if _is_nonsense_or_gibberish(mensaje_texto):
+            logger.info(f"[Spam Filter] Mensaje sin sentido detectado de {numero_paciente}: '{mensaje_texto}'")
+            resp_gibberish = (
+                "No logro comprender tu mensaje 🤔. Por favor escribe con palabras claras lo que necesitas "
+                "(por ejemplo: agendar una cita, consultar precios o ver servicios y horarios) y con gusto te ayudo. 😊🦷"
+            )
+            await evolution_client.enviar_mensaje(numero_paciente, resp_gibberish)
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=resp_gibberish,
+                    rag_confidence=1.0,
+                )
+            )
             return
 
         # 2. Verificar si la conversación ya fue escalada a un asesor humano o está en atención
@@ -663,9 +854,51 @@ async def receive_whatsapp_message(request: Request):
         if payload.data:
             data = payload.data
 
-            # Ignorar mensajes emitidos por el bot antes de cualquier procesamiento
+            # Mensajes enviados desde el dispositivo vinculado (fromMe)
             if data.key and data.key.fromMe:
-                return {"status": "ignored", "reason": "self_message"}
+                # Obtener el ID del mensaje para distinguir bot vs humano
+                msg_id_from_me = getattr(data.key, "id", None) or ""
+                if is_bot_message_id(msg_id_from_me):
+                    # Es un eco del propio bot — ya fue registrado al enviarlo
+                    return {"status": "ignored", "reason": "self_message_bot"}
+
+                # Es un mensaje escrito manualmente por el operador en el celular vinculado
+                remote_jid_me = data.key.remoteJid if (data.key and data.key.remoteJid) else ""
+                participant_me = getattr(data.key, "participant", None) or getattr(data, "sender", None)
+                if "@lid" in str(remote_jid_me) and participant_me and "@s.whatsapp.net" in str(participant_me):
+                    destinatario = str(participant_me)
+                else:
+                    destinatario = remote_jid_me
+
+                LID_MAPPING = {
+                    "233783743803574@lid": "573001112233@s.whatsapp.net",
+                    "189515549421795@lid": "573226688304@s.whatsapp.net",
+                    "57213628510462@lid": "573238891073@s.whatsapp.net",
+                }
+                if str(destinatario).strip() in LID_MAPPING:
+                    destinatario = LID_MAPPING[str(destinatario).strip()]
+
+                raw_msg_me = data.message or {}
+                unwrapped_me = unwrap_message_dict(raw_msg_me)
+                texto_asesor = (
+                    unwrapped_me.get("conversation")
+                    or (unwrapped_me.get("extendedTextMessage") or {}).get("text", "")
+                    or ""
+                )
+                if not texto_asesor:
+                    for k in ["imageMessage", "videoMessage", "documentMessage"]:
+                        if k in unwrapped_me and isinstance(unwrapped_me[k], dict):
+                            cap = unwrapped_me[k].get("caption", "")
+                            if cap:
+                                texto_asesor = cap
+                                break
+
+                if texto_asesor and destinatario:
+                    asyncio.create_task(
+                        _registrar_mensaje_asesor(destinatario, texto_asesor)
+                    )
+                    logger.info(f"[fromMe-Humano] Mensaje del asesor registrado hacia {destinatario}: {texto_asesor}")
+                return {"status": "ignored", "reason": "self_message_human_registered"}
 
             message_id = getattr(data.key, "id", None) if data.key else None
             if _is_duplicate_message_id(message_id):
@@ -722,6 +955,8 @@ async def receive_whatsapp_message(request: Request):
             )
 
             if is_audio:
+                if _is_user_spam_blocked(numero_paciente) or _check_and_trigger_spam(numero_paciente):
+                    return {"status": "ignored", "reason": "spam_blocked"}
                 logger.info(f"[Webhook] Audio recibido de {numero_paciente}. Encolando transcripción y procesamiento...")
                 raw_payload_data = raw_json.get("data", {})
                 asyncio.create_task(
@@ -731,6 +966,8 @@ async def receive_whatsapp_message(request: Request):
                     )
                 )
             elif is_unsupported_media:
+                if _is_user_spam_blocked(numero_paciente) or _check_and_trigger_spam(numero_paciente):
+                    return {"status": "ignored", "reason": "spam_blocked"}
                 caption = ""
                 for k in ["imageMessage", "videoMessage", "documentMessage"]:
                     if k in unwrapped_message and isinstance(unwrapped_message[k], dict):
@@ -763,12 +1000,7 @@ async def receive_whatsapp_message(request: Request):
 
                 if mensaje_texto:
                     logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
-                    asyncio.create_task(
-                        _with_chat_lock(
-                            numero_paciente,
-                            _process_whatsapp_message(numero_paciente, mensaje_texto),
-                        )
-                    )
+                    _enqueue_user_message(numero_paciente, mensaje_texto)
                 else:
                     logger.warning(f"[Webhook] Mensaje no reconocido o vacío de {numero_paciente}: {unwrapped_message}")
 

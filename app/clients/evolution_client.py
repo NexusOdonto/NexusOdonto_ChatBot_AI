@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import time
+from collections import OrderedDict
 from typing import Optional, Dict, Any
 import httpx
 from dotenv import load_dotenv
@@ -8,6 +10,31 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+# ─── IDs de mensajes enviados por el bot ──────────────────────────────────────────────
+# Guardamos el key.id de cada mensaje que el bot envía a través de Evolution.
+# Cuando el webhook recibe el eco fromMe con ese mismo ID, lo reconoce como bot
+# y no lo registra como mensaje de asesor humano.
+_BOT_SENT_IDS: OrderedDict[str, float] = OrderedDict()
+_BOT_SENT_TTL = 120  # segundos hasta descartar el ID
+
+
+def register_bot_message_id(msg_id: str) -> None:
+    """Registra el ID de un mensaje enviado por el bot para ignorar su eco fromMe."""
+    if not msg_id:
+        return
+    now = time.monotonic()
+    # Limpiar entradas viejas
+    to_remove = [k for k, ts in _BOT_SENT_IDS.items() if now - ts > _BOT_SENT_TTL]
+    for k in to_remove:
+        del _BOT_SENT_IDS[k]
+    _BOT_SENT_IDS[msg_id] = now
+
+
+def is_bot_message_id(msg_id: str) -> bool:
+    """Retorna True si el ID corresponde a un mensaje enviado por el bot."""
+    return bool(msg_id) and msg_id in _BOT_SENT_IDS
+
 
 class EvolutionClient:
     def __init__(self):
@@ -77,7 +104,17 @@ class EvolutionClient:
                 response = await client.post(url, content=body_bytes, headers=self._get_headers())
                 response.raise_for_status()
                 logger.info(f"[Evolution API] Mensaje enviado exitosamente a {numero}")
-                return response.json()
+                resp_data = response.json()
+                # Registrar el ID del mensaje para ignorar el eco fromMe del webhook
+                sent_id = None
+                if isinstance(resp_data, dict):
+                    sent_id = (
+                        resp_data.get("key", {}).get("id")
+                        or resp_data.get("id")
+                    )
+                if sent_id:
+                    register_bot_message_id(str(sent_id))
+                return resp_data
             except httpx.HTTPStatusError as e:
                 logger.error(f"[Evolution API] Error HTTP {e.response.status_code} al enviar mensaje: {e.response.text}")
                 return None
