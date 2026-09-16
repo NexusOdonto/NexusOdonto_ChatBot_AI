@@ -24,11 +24,45 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["WhatsApp Webhook"])
 
-# Dedupe inbound webhook deliveries (global + instance, or Evolution retries)
+# ─── Deduplicate inbound webhook deliveries ───────────────────────────────────
 _MESSAGE_DEDUPE_TTL_SECONDS = 90
 _SEEN_MESSAGE_IDS: OrderedDict[str, float] = OrderedDict()
 _CHAT_LOCKS: dict[str, asyncio.Lock] = {}
 _CHAT_LOCKS_GUARD = asyncio.Lock()
+
+# ─── Anti-spam / Rate Limit por usuario ──────────────────────────────────────
+# Si el usuario envía más de _SPAM_MAX_MSGS mensajes en _SPAM_WINDOW_SECONDS
+# segundos, los mensajes extra se descartan y se envía UNA advertencia.
+_SPAM_WINDOW_SECONDS = 10          # Ventana deslizante
+_SPAM_MAX_MSGS = 5                 # Mensajes permitidos por ventana
+# {numero_paciente: deque de timestamps}
+_SPAM_TIMESTAMPS: dict[str, list] = {}
+# {numero_paciente: timestamp de la última advertencia enviada}
+_SPAM_WARNED_AT: dict[str, float] = {}
+_SPAM_WARN_COOLDOWN = 30           # Segundos entre advertencias al mismo usuario
+
+
+def _is_spam(numero_paciente: str) -> bool:
+    """Retorna True si el usuario supera el rate-limit y debe ser silenciado.
+    Mantiene una ventana deslizante de timestamps por usuario.
+    """
+    now = time.monotonic()
+    timestamps = _SPAM_TIMESTAMPS.get(numero_paciente, [])
+    # Descartar timestamps fuera de la ventana
+    timestamps = [t for t in timestamps if now - t < _SPAM_WINDOW_SECONDS]
+    timestamps.append(now)
+    _SPAM_TIMESTAMPS[numero_paciente] = timestamps
+    return len(timestamps) > _SPAM_MAX_MSGS
+
+
+def _should_warn_spam(numero_paciente: str) -> bool:
+    """Retorna True si todavía no hemos enviado la advertencia anti-spam recientemente."""
+    now = time.monotonic()
+    last_warn = _SPAM_WARNED_AT.get(numero_paciente, 0.0)
+    if now - last_warn > _SPAM_WARN_COOLDOWN:
+        _SPAM_WARNED_AT[numero_paciente] = now
+        return True
+    return False
 
 
 def _prune_seen_message_ids(now: float) -> None:
@@ -392,6 +426,20 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str) ->
     El número de WhatsApp (numero_paciente) es el identificador de la conversación.
     """
     try:
+        # 0. Anti-spam: descartar si el usuario está enviando demasiados mensajes
+        if _is_spam(numero_paciente):
+            if _should_warn_spam(numero_paciente):
+                logger.warning(f"[Anti-spam] Demasiados mensajes de {numero_paciente}. Enviando advertencia.")
+                spam_msg = (
+                    "⚠️ Estás enviando muchos mensajes seguidos. "
+                    "Por favor espera un momento antes de continuar. "
+                    "Cuando estés listo, con gusto te atiendo. 😊"
+                )
+                asyncio.create_task(evolution_client.enviar_mensaje(numero_paciente, spam_msg))
+            else:
+                logger.info(f"[Anti-spam] Mensaje de {numero_paciente} descartado (spam silencioso).")
+            return
+
         # Registrar de inmediato el mensaje entrante del usuario en la base de datos Oracle
         asyncio.create_task(
             dotnet_client.registrar_mensaje(
