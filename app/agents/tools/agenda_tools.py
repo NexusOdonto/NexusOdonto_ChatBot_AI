@@ -976,7 +976,7 @@ async def _agendar_cita_impl(
                 f"• 👤 *Usuario:* `{cedula}`\n"
                 f"• 🔑 *Contraseña temporal:* `{cedula}`\n\n"
                 f"💡 *Nota de Seguridad:* Por tu seguridad, una vez ingreses a la plataforma web deberás cambiar esta contraseña inicial. Ten en cuenta que por políticas de seguridad el bot no puede modificar o cambiar contraseñas.\n\n"
-                f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
+                f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
                 f"📞 *Atención:* +57 324 6030217\n\n"
                 f"¡Será un placer cuidar de tu sonrisa! 😊✨"
             )
@@ -1130,7 +1130,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{cuerpo}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *Sede:* Nexus Odonto — Cr 24 #35-12, Santander\n"
+            f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
             f"📞 *Atención / Cambios:* +57 324 6030217\n\n"
             f"💡 _Si deseas reprogramar o cancelar alguna de tus citas próximas, dime el ID o la fecha y con gusto te ayudo._ 😊"
         )
@@ -1468,7 +1468,7 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
             f"• 🦷 *Tratamiento:* {servicio}\n"
             f"• 📅 *Fecha:* {fecha_display}\n"
             f"• ⏰ *Horario:* {hora_display}\n"
-            f"• 📍 *Sede:* Cr 24 #35-12, Santander\n\n"
+            f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n\n"
             f"💡 *Recomendación:* Por favor llega 10 a 15 minutos antes de tu turno para prepararte con calma.\n\n"
             f"¡El equipo de Nexus Odonto te espera con gusto! ¿Hay algo más en lo que te pueda colaborar hoy? 😊🦷"
         )

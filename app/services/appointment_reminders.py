@@ -49,7 +49,7 @@ def construir_mensaje_recordatorio(cita: Dict[str, Any]) -> str:
         f"• 👨‍⚕️ *Especialista:* {doctor}\n"
         f"• 📅 *Fecha:* {fecha_legible}\n"
         f"• ⏰ *Horario:* {hora}\n"
-        f"• 📍 *Sede:* Cr 24 #35-12, Santander\n"
+        f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n"
         f"• 📞 *Línea de atención:* +57 324 6030217\n\n"
         f"💡 *Recomendación:* Por favor llega 10 a 15 minutos antes de tu hora para tu comodidad.\n\n"
         f"👉 *Por favor responde a este mensaje para gestionar tu turno:*\n"
@@ -219,7 +219,7 @@ def construir_mensaje_recordatorio_30m(cita: Dict[str, Any]) -> str:
         f"• 🦷 *Tratamiento:* {servicio}\n"
         f"• 👨‍⚕️ *Especialista:* {doctor}\n"
         f"• ⏰ *Horario:* {hora}\n"
-        f"• 📍 *Sede:* Cr 24 #35-12, Santander\n"
+        f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n"
         f"• 📞 *Línea de atención:* +57 324 6030217\n\n"
         f"💡 *Recomendación:* Por favor sal con tiempo hacia la clínica para evitar demoras. ¡Estamos listos para atenderte! 😊👍"
     )

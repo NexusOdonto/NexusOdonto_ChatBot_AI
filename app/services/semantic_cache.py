@@ -39,15 +39,16 @@ _FAST_RESPONSES: Dict[str, str] = {
     ),
     "ubicacion": (
         "📍 *Ubicación de Nexus Odonto:*\n"
-        "Cr 24 #35-12, Santander 🏥\n\n"
+        "Calle 100 # 15-20, Centro Médico Odontológico 🏥\n\n"
         "🚗 Contamos con excelente ubicación y fácil acceso.\n\n"
         "¿Deseas conocer más sobre nuestros servicios o agendar una cita con nuestros especialistas? ✨"
     ),
     "contacto": (
         "📞 *Canales de Contacto - Nexus Odonto:*\n\n"
         "• 📱 *WhatsApp / Teléfono:* +57 324 6030217\n"
-        "• 📍 *Dirección:* Cr 24 #35-12, Santander\n"
-        "• ⏰ *Horario:* Lunes a Sábado de 8:00 AM a 6:00 PM\n\n"
+        "• 📍 *Dirección:* Calle 100 # 15-20, Centro Médico Odontológico\n"
+        "• ⏰ *Horario:* Lunes a Sábado de 8:00 AM a 6:00 PM\n"
+        "• 📧 *Correo:* soporte@nexusodonto.com\n\n"
         "¡Estamos listos para cuidar de tu sonrisa! ¿En qué más te puedo orientar? 😊"
     ),
     "agradecimiento": (
