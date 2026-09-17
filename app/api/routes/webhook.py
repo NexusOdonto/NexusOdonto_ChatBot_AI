@@ -3,6 +3,7 @@ import re
 import asyncio
 import time
 from collections import OrderedDict
+from typing import Any
 from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
