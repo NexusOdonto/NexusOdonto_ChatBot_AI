@@ -19,7 +19,7 @@ from app.services.audio_service import (
     MENSAJE_AUDIO_NO_ENTENDIDO,
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
-from app.services.semantic_cache import buscar_en_cache, guardar_en_cache
+from app.services.semantic_cache import buscar_en_cache, purgar_cache_semantico
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,10 @@ _SPAM_WARNED_AT: dict[str, float] = {}
 
 _USER_MESSAGE_BUFFERS: dict[str, list[str]] = {}
 _USER_DEBOUNCE_TASKS: dict[str, asyncio.Task] = {}
+_USER_LAST_ACTIVE: dict[str, float] = {}
+_USER_PUSH_NAMES: dict[str, str] = {}
+_PATIENT_CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_PATIENT_CONTEXT_CACHE_TTL = 300.0  # 5 minutos de caché en memoria por teléfono
 
 
 def _is_user_spam_blocked(numero_paciente: str) -> bool:
@@ -161,7 +165,63 @@ def _is_nonsense_or_gibberish(texto: str) -> bool:
     return False
 
 
-def _enqueue_user_message(numero_paciente: str, mensaje_texto: str) -> None:
+async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "") -> dict[str, Any]:
+    """Consulta en .NET si el número de teléfono corresponde a un paciente registrado.
+    Si no está registrado en la base de datos, aprovecha el push_name de WhatsApp.
+    """
+    now = time.monotonic()
+    cached = _PATIENT_CONTEXT_CACHE.get(numero_paciente)
+    if cached and (now - cached[0]) < _PATIENT_CONTEXT_CACHE_TTL:
+        ctx = dict(cached[1])
+        if push_name and not ctx.get("push_name"):
+            ctx["push_name"] = push_name
+        return ctx
+
+    # Intentar buscar en la base de datos de .NET por teléfono
+    try:
+        persona = await asyncio.wait_for(
+            dotnet_client.buscar_persona_por_telefono(numero_paciente),
+            timeout=3.0,
+        )
+        if persona and isinstance(persona, dict):
+            first_name = (persona.get("firstName") or "").strip()
+            last_name = (persona.get("lastName") or "").strip()
+            nombre_completo = f"{first_name} {last_name}".strip()
+            cedula = str(persona.get("documentNumber") or "").strip()
+
+            ctx = {
+                "nombre": nombre_completo or first_name or push_name,
+                "primer_nombre": first_name or (push_name.split()[0] if push_name else ""),
+                "cedula": cedula,
+                "is_registered": True,
+                "phone": numero_paciente,
+                "push_name": push_name,
+            }
+            _PATIENT_CONTEXT_CACHE[numero_paciente] = (now, ctx)
+            logger.info(f"[Patient ID] Paciente registrado reconocido por teléfono ({numero_paciente}): {nombre_completo} (CC: {cedula})")
+            return ctx
+    except asyncio.TimeoutError:
+        logger.warning(f"[Patient ID] Timeout al buscar persona por teléfono en .NET para {numero_paciente}")
+    except Exception as e:
+        logger.warning(f"[Patient ID] Error al consultar persona por teléfono en .NET para {numero_paciente}: {e}")
+
+    # Si no se encontró en .NET, usar push_name como paciente nuevo
+    primer_nombre = push_name.strip().split()[0] if push_name and push_name.strip() else ""
+    ctx = {
+        "nombre": push_name.strip() if push_name else "",
+        "primer_nombre": primer_nombre,
+        "cedula": None,
+        "is_registered": False,
+        "phone": numero_paciente,
+        "push_name": push_name.strip() if push_name else "",
+    }
+    _PATIENT_CONTEXT_CACHE[numero_paciente] = (now, ctx)
+    if push_name:
+        logger.info(f"[Patient ID] Paciente nuevo detectado por WhatsApp pushName ({numero_paciente}): {push_name}")
+    return ctx
+
+
+def _enqueue_user_message(numero_paciente: str, mensaje_texto: str, push_name: str = "") -> None:
     """Encola el mensaje para debouncing y valida spam en tiempo real al llegar el webhook."""
     # 1. Descartar si el usuario está en penalización activa por spam
     if _is_user_spam_blocked(numero_paciente):
@@ -171,6 +231,9 @@ def _enqueue_user_message(numero_paciente: str, mensaje_texto: str) -> None:
     # 2. Validar ráfaga de mensajes en tiempo real
     if _check_and_trigger_spam(numero_paciente):
         return
+
+    if push_name:
+        _USER_PUSH_NAMES[numero_paciente] = push_name.strip()
 
     # 3. Registrar el mensaje individual en base de datos para que el frontend lo visualice de inmediato
     asyncio.create_task(
@@ -207,6 +270,7 @@ async def _debounce_worker(numero_paciente: str) -> None:
 
     mensajes = _USER_MESSAGE_BUFFERS.pop(numero_paciente, [])
     _USER_DEBOUNCE_TASKS.pop(numero_paciente, None)
+    push_name = _USER_PUSH_NAMES.get(numero_paciente, "")
 
     if not mensajes:
         return
@@ -221,7 +285,7 @@ async def _debounce_worker(numero_paciente: str) -> None:
     asyncio.create_task(
         _with_chat_lock(
             numero_paciente,
-            _process_whatsapp_message(numero_paciente, texto_final, registrar_usuario_db=False),
+            _process_whatsapp_message(numero_paciente, texto_final, registrar_usuario_db=False, push_name=push_name),
         )
     )
 
@@ -560,7 +624,7 @@ async def _process_whatsapp_unsupported_media(numero_paciente: str, caption: str
         logger.error(f"[BG] Error al responder medio no soportado a {numero_paciente}: {e}", exc_info=True)
 
 
-async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, raw_message: dict) -> None:
+async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, raw_message: dict, push_name: str = "") -> None:
     """Descarga, transcribe con Whisper y procesa un mensaje de audio o nota de voz."""
     try:
         if await _is_escalated(numero_paciente):
@@ -592,7 +656,7 @@ async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, 
         logger.info(f"[BG] Audio de {numero_paciente} transcrito: '{texto_transcrito}'")
 
         # 3. Procesar el texto transcrito con el agente conversacional
-        await _process_whatsapp_message(numero_paciente, texto_transcrito)
+        await _process_whatsapp_message(numero_paciente, texto_transcrito, push_name=push_name)
 
     except Exception as e:
         logger.error(f"[BG] Error procesando audio de {numero_paciente}: {e}", exc_info=True)
@@ -602,7 +666,12 @@ async def _process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, 
         )
 
 
-async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, registrar_usuario_db: bool = False) -> None:
+async def _process_whatsapp_message(
+    numero_paciente: str,
+    mensaje_texto: str,
+    registrar_usuario_db: bool = False,
+    push_name: str = "",
+) -> None:
     """Procesa el mensaje del paciente en segundo plano.
 
     Esta corutina se ejecuta desacoplada del ciclo request/response para que
@@ -678,9 +747,53 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, re
 
         config = get_thread_config(numero_paciente)
 
-        # 4. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
+        # 4. Validar expiración de sesión (TTL) para evitar contaminación de contextos viejos
+        now_ts = time.time()
+        last_active = _USER_LAST_ACTIVE.get(numero_paciente)
+        session_expired = False
+
+        if last_active is not None and (now_ts - last_active) > settings.session_ttl_seconds:
+            session_expired = True
+        elif last_active is None:
+            # Si el servidor acaba de iniciar o es la primera interacción del proceso actual,
+            # verificar la antigüedad del checkpoint en PostgreSQL
+            try:
+                state_snapshot = await get_graph().aget_state(config)
+                if state_snapshot and state_snapshot.values and state_snapshot.values.get("messages"):
+                    created_at_val = getattr(state_snapshot, "created_at", None)
+                    if created_at_val:
+                        from datetime import datetime, timezone
+                        if isinstance(created_at_val, str):
+                            dt = datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
+                        elif isinstance(created_at_val, datetime):
+                            dt = created_at_val
+                        else:
+                            dt = None
+                        if dt and (datetime.now(timezone.utc) - dt).total_seconds() > settings.session_ttl_seconds:
+                            session_expired = True
+            except Exception as ttl_err:
+                logger.debug(f"[TTL Check] No se pudo verificar antigüedad del hilo en DB: {ttl_err}")
+
+        if session_expired:
+            logger.info(f"[TTL Check] Sesión expirada para {numero_paciente} (> {settings.session_ttl_seconds}s). Reiniciando hilo...")
+            checkpointer = get_checkpointer_instance()
+            if checkpointer:
+                await checkpointer.clear_thread(numero_paciente)
+            dotnet_client.limpiar_cache_conversacion(numero_paciente)
+
+        _USER_LAST_ACTIVE[numero_paciente] = now_ts
+
+        # 5. Resolver identidad del paciente en la base de datos de .NET o por WhatsApp pushName
+        user_context = await _resolver_contexto_paciente(numero_paciente, push_name)
+
+        # 6. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
         cached_response = await buscar_en_cache(mensaje_texto)
         if cached_response:
+            # Personalizar saludo rápido si se conoce el nombre del paciente
+            saludo_nombre = user_context.get("primer_nombre") or user_context.get("nombre")
+            if saludo_nombre and "¡Hola!" in cached_response:
+                cached_response = cached_response.replace("¡Hola!", f"¡Hola, {saludo_nombre}!")
+
             logger.info(f"[Semantic Cache] Respondiendo desde caché a {numero_paciente}")
             await evolution_client.enviar_mensaje(numero_paciente, cached_response)
             # Guardar respuesta del bot en base de datos Oracle
@@ -702,11 +815,12 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, re
                 logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
             return
 
-        # 5. Invocar el grafo LangGraph directamente (sin requerir sesión autenticada)
+        # 7. Invocar el grafo LangGraph directamente con el contexto del paciente
         invoke_input = {
             "messages": [HumanMessage(content=mensaje_texto)],
             "conversation_status": "ACTIVA",
             "rag_confidence": 1.0,
+            "user_context": user_context,
         }
 
         result = await get_graph().ainvoke(invoke_input, config)
@@ -793,8 +907,9 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, re
                             rag_confidence=confidence,
                         )
                     )
-                    # Guardar en Caché Semántico si la respuesta es informativa
-                    asyncio.create_task(guardar_en_cache(mensaje_texto, respuesta_texto))
+                    # NOTA DE SEGURIDAD Y PRIVACIDAD (Habeas Data / Ley 1581):
+                    # Las respuestas dinámicas del LLM en chats con pacientes NUNCA se guardan en el
+                    # caché semántico global para evitar cualquier filtración o reutilización de datos entre usuarios.
                 else:
                     logger.warning(
                         f"[BG] La última respuesta no es de tipo AIMessage o está vacía: {last_message}"
@@ -835,6 +950,21 @@ async def _process_whatsapp_message(numero_paciente: str, mensaje_texto: str, re
             )
         except Exception as e:
             logger.error(f"[Webhook] Error enviando mensaje de contingencia a {numero_paciente}: {e}")
+
+
+@router.post("/cache/purge")
+async def purge_cache_endpoint():
+    """Purga el caché semántico en memoria (L1) y la colección en Qdrant (L2)."""
+    exito = purgar_cache_semantico()
+    if exito:
+        return {
+            "status": "ok",
+            "message": "Caché semántico purgado y colección recreada exitosamente. Se eliminaron datos transaccionales residuales."
+        }
+    return {
+        "status": "error",
+        "message": "No se pudo purgar la colección en Qdrant (verificar si el servicio está activo)."
+    }
 
 
 @router.post("/whatsapp")
@@ -926,6 +1056,9 @@ async def receive_whatsapp_message(request: Request):
             if str(numero_paciente).strip() in LID_MAPPING:
                 numero_paciente = LID_MAPPING[str(numero_paciente).strip()]
 
+            # Extraer nombre público del perfil de WhatsApp si está disponible
+            push_name = str(getattr(data, "pushName", None) or "").strip()
+
             raw_message = data.message or {}
             unwrapped_message = unwrap_message_dict(raw_message)
             message_type = data.messageType or ""
@@ -962,7 +1095,7 @@ async def receive_whatsapp_message(request: Request):
                 asyncio.create_task(
                     _with_chat_lock(
                         numero_paciente,
-                        _process_whatsapp_audio(numero_paciente, raw_payload_data, unwrapped_message),
+                        _process_whatsapp_audio(numero_paciente, raw_payload_data, unwrapped_message, push_name=push_name),
                     )
                 )
             elif is_unsupported_media:
@@ -1000,7 +1133,7 @@ async def receive_whatsapp_message(request: Request):
 
                 if mensaje_texto:
                     logger.info(f"[Webhook] Mensaje recibido de {numero_paciente}: {mensaje_texto}")
-                    _enqueue_user_message(numero_paciente, mensaje_texto)
+                    _enqueue_user_message(numero_paciente, mensaje_texto, push_name=push_name)
                 else:
                     logger.warning(f"[Webhook] Mensaje no reconocido o vacío de {numero_paciente}: {unwrapped_message}")
 

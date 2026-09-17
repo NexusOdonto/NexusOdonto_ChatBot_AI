@@ -135,58 +135,76 @@ def ensure_cache_collection(client: Optional[QdrantClient] = None) -> None:
         logger.info(f"[Semantic Cache] Colección '{col_name}' creada exitosamente en Qdrant.")
 
 
-def _es_contenido_cacheable(pregunta: str, respuesta: str) -> bool:
+def purgar_cache_semantico(client: Optional[QdrantClient] = None) -> bool:
+    """Elimina todas las entradas del caché en RAM y purga la colección en Qdrant.
+    Garantiza que no queden rastros de respuestas transaccionales o datos de pacientes.
+    """
+    global _L1_MEMORY_CACHE
+    _L1_MEMORY_CACHE.clear()
+    logger.info("[Semantic Cache] Caché L1 en memoria limpiado.")
+
+    try:
+        if client is None:
+            client = get_qdrant_client()
+        col_name = settings.semantic_cache_collection
+        if client.collection_exists(col_name):
+            client.delete_collection(col_name)
+            logger.info(f"[Semantic Cache] Colección '{col_name}' eliminada de Qdrant.")
+
+        client.create_collection(
+            collection_name=col_name,
+            vectors_config=models.VectorParams(
+                size=settings.embedding_dimension,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        logger.info(f"[Semantic Cache] Colección '{col_name}' recreada vacía en Qdrant exitosamente.")
+        return True
+    except Exception as exc:
+        logger.error(f"[Semantic Cache] Error purgando colección en Qdrant: {exc}", exc_info=True)
+        return False
+
+
+def _es_contenido_cacheable(pregunta: str, respuesta: str, categoria: str = "general") -> bool:
     """Valida si un par pregunta-respuesta es apto para almacenarse en el caché semántico.
     
-    Excluye respuestas transaccionales (citas, disponibilidad en tiempo real, agendamientos,
-    emergencias médicas o mensajes de error/escalamiento).
+    POLÍTICA ESTRICTA DE SEGURIDAD Y PRIVACIDAD DE DATOS (HABEAS DATA / LEY 1581):
+    1. Las respuestas del chat con pacientes NUNCA se almacenan en el caché semántico global.
+       Solo se permite si la categoría es explícitamente 'faq_estatica'.
+    2. Se descarta absolutamente cualquier texto que contenga cédulas, teléfonos, UUIDs,
+       nombres propios, estados de citas o términos dinámicos de agenda.
     """
+    # Solo respuestas institucionales / FAQ curadas explícitamente pueden cachearse
+    if categoria != "faq_estatica":
+        return False
+
     p_lower = pregunta.lower().strip()
     r_lower = respuesta.lower().strip()
 
-    # Descartar preguntas vacías
-    if len(p_lower) < 3 or len(r_lower) < 10:
+    # Descartar preguntas vacías o demasiado cortas
+    if len(p_lower) < 4 or len(r_lower) < 15:
         return False
 
-    # Excluir comandos directos, confirmaciones o elecciones
-    if p_lower.startswith("/") or p_lower in ["si", "no", "1", "2", "3", "4", "cancelar", "ok", "vale"]:
+    # 1. Protección contra filtración de cédulas o números de identificación (7 a 12 dígitos)
+    if re.search(r"\b\d{7,12}\b", respuesta) or re.search(r"\b\d{7,12}\b", pregunta):
+        logger.warning("[Semantic Cache Guard] Rechazado: contiene números tipo documento/cédula.")
         return False
 
-    # Excluir si la pregunta contiene intenciones de agendamiento o reserva de citas dinámicas
-    keywords_pregunta_no_cacheables = [
-        "agendar", "agenda", "turno", "turnos", "reserva", "reservar",
-        "apartar", "para mañana", "para hoy", "mañana a las", "hoy a las",
-        "el lunes a las", "el martes a las", "el miercoles a las", "el jueves a las", "el viernes a las",
-        "consultar", "detalles", "mis citas", "ver mis citas", "mi cita", "cédula", "cedula",
-    ]
-    for kw in keywords_pregunta_no_cacheables:
-        if kw in p_lower:
-            return False
+    # 2. Protección contra filtración de IDs de citas (UUIDs)
+    if re.search(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}", respuesta):
+        logger.warning("[Semantic Cache Guard] Rechazado: contiene UUID de cita.")
+        return False
 
-    # Exclusiones por palabras clave transaccionales o dinámicas en la respuesta
-    palabras_no_cacheables = [
-        "cita agendada",
-        "confirmada para el",
-        "tu cita ha sido",
-        "asesor de la clínica revisará",
-        "escalada",
-        "código de cita",
-        "urgencia médica",
-        "acude de inmediato",
-        "servicio de urgencias",
-        "lo siento, ocurrió un error",
-        "no logré escuchar",
-        "inconveniente técnico",
-        "horarios disponibles",
-        "deseas agendar",
-        "te gustaría agendar",
-        "por favor confirma",
-        "detalles de tu cita",
-        "[consultando",
-        "consultando información",
+    # 3. Palabras transaccionales o dinámicas que jamás deben ser compartidas entre usuarios
+    PALABRAS_PROHIBIDAS_RESPUESTA = [
+        "cita", "citas", "agendad", "cancelad", "programad", "reprogramad",
+        "turno", "turnos", "cédula", "cedula", "identificación", "paciente",
+        "doctor", "doctora", "dr.", "dra.", "hoy", "mañana", "ayer",
+        "septiembre", "octubre", "noviembre", "diciembre", "enero", "febrero",
+        "marzo", "abril", "mayo", "junio", "julio", "agosto",
+        "asesor de la clínica", "escalada", "urgencia médica", "consultando información",
     ]
-
-    for palabra in palabras_no_cacheables:
+    for palabra in PALABRAS_PROHIBIDAS_RESPUESTA:
         if palabra in r_lower:
             return False
 
@@ -269,7 +287,7 @@ async def guardar_en_cache(pregunta: str, respuesta: str, categoria: str = "gene
     if not settings.semantic_cache_enabled:
         return False
 
-    if not _es_contenido_cacheable(pregunta, respuesta):
+    if not _es_contenido_cacheable(pregunta, respuesta, categoria=categoria):
         logger.debug(f"[Semantic Cache] Contenido no cacheable omitido: '{pregunta[:40]}...'")
         return False
 

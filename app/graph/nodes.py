@@ -426,7 +426,33 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 		"5. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
 		"6. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
 	)
-	
+
+	# Inyección dinámica de la identidad del paciente para este chat específico
+	user_context = state.get("user_context") or {}
+	user_info_lines = []
+	if user_context.get("is_registered"):
+		user_info_lines.append(f"• Nombre del paciente: {user_context.get('nombre')}")
+		user_info_lines.append(f"• Cédula registrada: {user_context.get('cedula')}")
+		user_info_lines.append("• Estado: Paciente REGISTRADO en la base de datos de Nexus Odonto.")
+		saludo_nombre = user_context.get('primer_nombre') or user_context.get('nombre')
+		user_info_lines.append(
+			f"• INSTRUCCIÓN OBLIGATORIA: Salúdalo con calidez por su nombre ('¡Hola, {saludo_nombre}! 👋✨'). "
+			f"Ya conoces su cédula ({user_context.get('cedula')}). Cuando el paciente pregunte por sus citas "
+			f"('¿qué citas tengo?', 'mis citas', '¿y para mañana?', 'cancelar cita', etc.), INVOCA DIRECTAMENTE "
+			f"consultar_cita_por_cedula_tool(cedula='{user_context.get('cedula')}') sin pedírsela nuevamente."
+		)
+	elif user_context.get("push_name"):
+		user_info_lines.append(f"• Nombre en perfil de WhatsApp: {user_context.get('push_name')}")
+		user_info_lines.append("• Estado: Paciente NUEVO o teléfono NO registrado previamente en base de datos.")
+		saludo_nombre = user_context.get('primer_nombre') or user_context.get('push_name')
+		user_info_lines.append(
+			f"• INSTRUCCIÓN: Puedes saludarlo cordialmente usando su nombre ('{saludo_nombre}'). "
+			"Para agendar, modificar o consultar citas, solicítale amablemente su número de cédula para verificarlo en el sistema."
+		)
+
+	if user_info_lines:
+		context_str += "\n\n[IDENTIFICACIÓN DINÁMICA DEL PACIENTE EN ESTE CHAT]\n" + "\n".join(user_info_lines)
+
 	combined_system_message = SystemMessage(
 		content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO TEMPORAL Y CLÍNICO]\n{context_str}"
 	)
