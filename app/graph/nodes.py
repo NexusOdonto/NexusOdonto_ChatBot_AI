@@ -427,31 +427,27 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 		"6. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
 	)
 
-	# Inyección dinámica de la identidad del paciente para este chat específico
+	# Inyección dinámica de saludo y reglas de seguridad para este chat específico
 	user_context = state.get("user_context") or {}
 	user_info_lines = []
-	if user_context.get("is_registered"):
-		user_info_lines.append(f"• Nombre del paciente: {user_context.get('nombre')}")
-		user_info_lines.append(f"• Cédula registrada: {user_context.get('cedula')}")
-		user_info_lines.append("• Estado: Paciente REGISTRADO en la base de datos de Nexus Odonto.")
-		saludo_nombre = user_context.get('primer_nombre') or user_context.get('nombre')
+	saludo_nombre = user_context.get("primer_nombre") or user_context.get("push_name") or user_context.get("nombre")
+
+	if saludo_nombre:
+		user_info_lines.append(f"• Nombre del interlocutor: {saludo_nombre}")
 		user_info_lines.append(
-			f"• INSTRUCCIÓN OBLIGATORIA: Salúdalo con calidez por su nombre ('¡Hola, {saludo_nombre}! 👋✨'). "
-			f"Ya conoces su cédula ({user_context.get('cedula')}). Cuando el paciente pregunte por sus citas "
-			f"('¿qué citas tengo?', 'mis citas', '¿y para mañana?', 'cancelar cita', etc.), INVOCA DIRECTAMENTE "
-			f"consultar_cita_por_cedula_tool(cedula='{user_context.get('cedula')}') sin pedírsela nuevamente."
-		)
-	elif user_context.get("push_name"):
-		user_info_lines.append(f"• Nombre en perfil de WhatsApp: {user_context.get('push_name')}")
-		user_info_lines.append("• Estado: Paciente NUEVO o teléfono NO registrado previamente en base de datos.")
-		saludo_nombre = user_context.get('primer_nombre') or user_context.get('push_name')
-		user_info_lines.append(
-			f"• INSTRUCCIÓN: Puedes saludarlo cordialmente usando su nombre ('{saludo_nombre}'). "
-			"Para agendar, modificar o consultar citas, solicítale amablemente su número de cédula para verificarlo en el sistema."
+			f"• Saludo cordial: Puedes saludarlo amablemente por su nombre ('¡Hola, {saludo_nombre}! 👋✨')."
 		)
 
+	user_info_lines.append(
+		"• POLÍTICA DE SEGURIDAD Y PRIVACIDAD DE DATOS (HABEAS DATA / LEY 1581):\n"
+		"  1. NUNCA adivines, anticipes ni reveles números de cédula ('Ya tengo tu cédula...', 'Tu cédula es...'). "
+		"ESTÁ TOTALMENTE PROHIBIDO divulgar documentos o citas sin que el usuario haya escrito su propia cédula en este chat.\n"
+		"  2. Para agendar, consultar citas, reprogramar o cancelar, SOLICITA SIEMPRE que el paciente te proporcione su número de cédula 🆔 para validar su identidad en el sistema de manera segura.\n"
+		"  3. Si el paciente dice 'esa no es mi cédula' o disputa cualquier dato, discúlpate amablemente y pídele que te indique su número de cédula correcto. NUNCA inventes, busques por nombre ni adivines otra cédula de terceros."
+	)
+
 	if user_info_lines:
-		context_str += "\n\n[IDENTIFICACIÓN DINÁMICA DEL PACIENTE EN ESTE CHAT]\n" + "\n".join(user_info_lines)
+		context_str += "\n\n[SEGURIDAD DE DATOS Y CONTEXTO DEL PACIENTE]\n" + "\n".join(user_info_lines)
 
 	combined_system_message = SystemMessage(
 		content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO TEMPORAL Y CLÍNICO]\n{context_str}"

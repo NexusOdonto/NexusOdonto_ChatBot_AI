@@ -3,6 +3,7 @@ import json as json_lib
 import logging
 import asyncio
 from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta, timezone
 import httpx
 from dotenv import load_dotenv
 from app.core.config import settings
@@ -377,13 +378,22 @@ class DotNetClient:
     async def actualizar_estado_conversacion(
         self, conversacion_id: str, status_id: str, patient_id: Optional[str] = None
     ) -> bool:
-        """Actualiza el estado de una conversación en el backend .NET / Oracle."""
+        """Actualiza el estado de una conversación en el backend .NET / Oracle.
+        
+        Si el estado es STATUS_ACTIVA, desasigna cualquier asesor humano y reabre la conversación.
+        """
         try:
             url = f"{self.base_url}/ChatbotConversations/{conversacion_id}"
-            payload = {
+            payload: Dict[str, Any] = {
                 "conversationStatusId": status_id,
                 "patientId": patient_id,
             }
+            if status_id.lower() == self.STATUS_ACTIVA.lower():
+                payload["assignedEmployeeId"] = None
+                payload["employeeId"] = None
+                payload["assignedUserId"] = None
+                payload["closedAt"] = None
+
             resp = await self._request_with_retry("PUT", url, json=payload)
             if resp and resp.status_code in (200, 204):
                 logger.info(f"[.NET Client] Estado de conversación {conversacion_id} actualizado a {status_id}")
@@ -392,6 +402,40 @@ class DotNetClient:
         except Exception as e:
             logger.error(f"[.NET Client] Error actualizando estado de conversación {conversacion_id}: {e}")
             return False
+
+    async def resolver_tickets_conversacion(self, conversacion_id: str) -> int:
+        """Cierra o resuelve cualquier ticket de soporte abierto para una conversación específica en .NET."""
+        if not conversacion_id:
+            return 0
+        try:
+            tickets = await self.obtener_catalogo("SupportTickets") or []
+            STATUS_RESUELTO = "c0000000-0000-0000-0000-000000000004"
+            STATUS_CERRADO = "c0000000-0000-0000-0000-000000000005"
+            conv_id_clean = str(conversacion_id).strip().lower()
+
+            cerrados = 0
+            for t in tickets:
+                if not isinstance(t, dict):
+                    continue
+                t_conv = str(t.get("chatbotConversationId", "")).strip().lower()
+                t_status = str(t.get("ticketStatusId", "")).strip().lower()
+                if t_conv == conv_id_clean and t_status not in (STATUS_RESUELTO, STATUS_CERRADO):
+                    ticket_id = t.get("id")
+                    if ticket_id:
+                        url = f"{self.base_url}/SupportTickets/{ticket_id}"
+                        payload = dict(t)
+                        payload["ticketStatusId"] = STATUS_RESUELTO
+                        payload["resolvedAt"] = datetime.now(timezone.utc).isoformat()
+                        payload["resolutionNotes"] = "Atención finalizada por asesor. Conversación reactivada con NexusBot."
+                        resp = await self._request_with_retry("PUT", url, json=payload)
+                        if resp and resp.status_code in (200, 204):
+                            cerrados += 1
+                            logger.info(f"[.NET Client] Ticket {ticket_id} resuelto para conversación {conversacion_id}")
+            return cerrados
+        except Exception as e:
+            logger.warning(f"[.NET Client] Error resolviendo tickets para conversación {conversacion_id}: {e}")
+            return 0
+
 
     async def crear_ticket_soporte(
         self, telefono: str, motivo: str, prioridad: str = "MEDIA"
@@ -832,26 +876,48 @@ class DotNetClient:
     async def buscar_persona_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
         """Busca si existe una persona registrada con el teléfono dado.
 
-        Compara los últimos 10 dígitos del teléfono para manejar variaciones de formato
-        (con/sin código de país, con/sin sufijo de WhatsApp).
+        Reglas estrictas de privacidad y validación:
+        - Descarta identificadores de WhatsApp tipo LID (@lid o > 11 dígitos no estándar).
+        - Descarta teléfonos dummy/placeholder (+573000000000, 3000000000, 0000000000).
+        - Requiere coincidencia exacta de los 10 dígitos móviles colombianos (3XXXXXXXXX).
         """
+        raw_str = str(telefono or "").strip()
+        if not raw_str or "@lid" in raw_str.lower():
+            return None
+
+        # Normalizar: quedarse solo con dígitos
+        tel_digits = "".join(c for c in raw_str if c.isdigit())
+        if not tel_digits or len(tel_digits) > 12:
+            return None
+
+        # Quitar prefijo de país colombiano 57 si aplica
+        if tel_digits.startswith("57") and len(tel_digits) == 12:
+            tel_digits = tel_digits[2:]
+
+        # Solo números móviles colombianos válidos (10 dígitos que empiezan por 3)
+        if len(tel_digits) != 10 or not tel_digits.startswith("3"):
+            return None
+
+        DUMMY_PHONES = {"3000000000", "0000000000", "1111111111", "1234567890"}
+        if tel_digits in DUMMY_PHONES:
+            return None
+
         personas = await self.obtener_personas()
         if not personas:
             return None
 
-        # Normalizar: quedarse solo con dígitos
-        tel_digits = "".join(c for c in str(telefono) if c.isdigit())
-        # Usar últimos 10 dígitos para comparación (sin código de país)
-        tel_suffix = tel_digits[-10:] if len(tel_digits) >= 10 else tel_digits
-
         for persona in personas:
             if not isinstance(persona, dict):
                 continue
-            phone = persona.get("phone") or ""
-            phone_digits = "".join(c for c in str(phone) if c.isdigit())
-            phone_suffix = phone_digits[-10:] if len(phone_digits) >= 10 else phone_digits
+            phone = str(persona.get("phone") or "")
+            phone_digits = "".join(c for c in phone if c.isdigit())
+            if phone_digits.startswith("57") and len(phone_digits) == 12:
+                phone_digits = phone_digits[2:]
 
-            if tel_suffix and phone_suffix and tel_suffix == phone_suffix:
+            if phone_digits in DUMMY_PHONES or len(phone_digits) != 10 or not phone_digits.startswith("3"):
+                continue
+
+            if tel_digits == phone_digits:
                 return persona
 
         return None

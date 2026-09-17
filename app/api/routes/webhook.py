@@ -166,8 +166,16 @@ def _is_nonsense_or_gibberish(texto: str) -> bool:
 
 
 async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "") -> dict[str, Any]:
-    """Consulta en .NET si el número de teléfono corresponde a un paciente registrado.
-    Si no está registrado en la base de datos, aprovecha el push_name de WhatsApp.
+    """Consulta en .NET o en el perfil de WhatsApp para personalizar el saludo cordial al usuario.
+
+    POLÍTICA ESTRICTA DE SEGURIDAD Y PRIVACIDAD DE DATOS (HABEAS DATA / LEY 1581):
+    1. Solo se usa el nombre para saludar cordialmente al usuario ('¡Hola, Jeison! 👋✨').
+    2. La CÉDULA NUNCA se pre-asume ni se autoriza automáticamente por teléfono.
+       El paciente SIEMPRE debe proporcionar su documento en el chat para consultar,
+       agendar o modificar citas, garantizando que un número falso o compartido jamás
+       filtre información médica ni citas de terceros.
+    3. Si el número es un identificador LID de WhatsApp (@lid) o contiene más de 11 dígitos,
+       se omite la consulta por teléfono y se usa push_name.
     """
     now = time.monotonic()
     cached = _PATIENT_CONTEXT_CACHE.get(numero_paciente)
@@ -177,47 +185,47 @@ async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "")
             ctx["push_name"] = push_name
         return ctx
 
-    # Intentar buscar en la base de datos de .NET por teléfono
-    try:
-        persona = await asyncio.wait_for(
-            dotnet_client.buscar_persona_por_telefono(numero_paciente),
-            timeout=3.0,
-        )
-        if persona and isinstance(persona, dict):
-            first_name = (persona.get("firstName") or "").strip()
-            last_name = (persona.get("lastName") or "").strip()
-            nombre_completo = f"{first_name} {last_name}".strip()
-            cedula = str(persona.get("documentNumber") or "").strip()
+    raw_phone = str(numero_paciente or "").strip()
+    clean_digits = "".join(c for c in raw_phone if c.isdigit())
+    es_lid = "@lid" in raw_phone.lower() or len(clean_digits) > 12
 
-            ctx = {
-                "nombre": nombre_completo or first_name or push_name,
-                "primer_nombre": first_name or (push_name.split()[0] if push_name else ""),
-                "cedula": cedula,
-                "is_registered": True,
-                "phone": numero_paciente,
-                "push_name": push_name,
-            }
-            _PATIENT_CONTEXT_CACHE[numero_paciente] = (now, ctx)
-            logger.info(f"[Patient ID] Paciente registrado reconocido por teléfono ({numero_paciente}): {nombre_completo} (CC: {cedula})")
-            return ctx
-    except asyncio.TimeoutError:
-        logger.warning(f"[Patient ID] Timeout al buscar persona por teléfono en .NET para {numero_paciente}")
-    except Exception as e:
-        logger.warning(f"[Patient ID] Error al consultar persona por teléfono en .NET para {numero_paciente}: {e}")
+    nombre_detectado = ""
+    primer_nombre = ""
 
-    # Si no se encontró en .NET, usar push_name como paciente nuevo
-    primer_nombre = push_name.strip().split()[0] if push_name and push_name.strip() else ""
+    # Solo buscar persona en .NET si es un número telefónico móvil real (no LID)
+    if not es_lid:
+        try:
+            persona = await asyncio.wait_for(
+                dotnet_client.buscar_persona_por_telefono(numero_paciente),
+                timeout=3.0,
+            )
+            if persona and isinstance(persona, dict):
+                first_name = (persona.get("firstName") or "").strip()
+                last_name = (persona.get("lastName") or "").strip()
+                nombre_detectado = f"{first_name} {last_name}".strip()
+                primer_nombre = first_name
+        except asyncio.TimeoutError:
+            logger.warning(f"[Patient ID] Timeout al buscar persona por teléfono en .NET para {numero_paciente}")
+        except Exception as e:
+            logger.warning(f"[Patient ID] Error al consultar persona por teléfono en .NET para {numero_paciente}: {e}")
+
+    # Si no se detectó por teléfono o vino de WhatsApp pushName, usar push_name
+    if not primer_nombre and push_name:
+        primer_nombre = push_name.strip().split()[0]
+    if not nombre_detectado and push_name:
+        nombre_detectado = push_name.strip()
+
     ctx = {
-        "nombre": push_name.strip() if push_name else "",
+        "nombre": nombre_detectado,
         "primer_nombre": primer_nombre,
-        "cedula": None,
+        "cedula": None,  # NUNCA pre-cargar cédula; requerir validación explícita del paciente
         "is_registered": False,
         "phone": numero_paciente,
         "push_name": push_name.strip() if push_name else "",
     }
     _PATIENT_CONTEXT_CACHE[numero_paciente] = (now, ctx)
-    if push_name:
-        logger.info(f"[Patient ID] Paciente nuevo detectado por WhatsApp pushName ({numero_paciente}): {push_name}")
+    if primer_nombre:
+        logger.info(f"[Patient ID] Interlocutor identificado para saludo ({numero_paciente}): {primer_nombre}")
     return ctx
 
 
@@ -440,6 +448,12 @@ async def _is_escalated(thread_id: str) -> bool:
     Consulta tanto el estado local de LangGraph como la API de .NET (ChatbotConversations y SupportTickets)
     para asegurar que si un asesor le da 'Tomar caso' en el frontend o se crea un ticket, el bot no responda más.
     """
+    # 0. Si el asesor devolvió recientemente la conversación al bot, permitir atención inmediata
+    from app.api.routes.agent_handoff import esta_recien_reactivada
+    if esta_recien_reactivada(thread_id):
+        logger.info(f"[Webhook] Conversación {thread_id} fue reactivada recientemente por asesor. Bot activo.")
+        return False
+
     LID_MAPPING = {
         "233783743803574@lid": "573001112233@s.whatsapp.net",
         "573001112233": "233783743803574@lid",
@@ -504,7 +518,7 @@ async def _is_escalated(thread_id: str) -> bool:
                 ):
                     dotnet_is_escalated = True
 
-        if matching_conv_ids:
+        if matching_conv_ids and dotnet_is_escalated:
             tickets = await dotnet_client.obtener_catalogo("SupportTickets") or []
             STATUS_RESUELTO = "c0000000-0000-0000-0000-000000000004"
             STATUS_CERRADO = "c0000000-0000-0000-0000-000000000005"
@@ -517,9 +531,9 @@ async def _is_escalated(thread_id: str) -> bool:
     except Exception as e:
         logger.warning(f"[Webhook] No se pudo verificar estado de conversación en .NET para {thread_id}: {e}")
 
-    # Si está escalada localmente, en .NET o tiene un ticket activo:
-    if is_graph_escalated or dotnet_is_escalated or has_active_ticket:
-        if not is_graph_escalated:
+    # Si está escalada localmente, o en .NET con asesor o ticket activo:
+    if is_graph_escalated or dotnet_is_escalated:
+        if not is_graph_escalated and dotnet_is_escalated:
             logger.info(f"[Webhook] Conversación detectada como ESCALADA/ATENDIDA en .NET para {thread_id}. Sincronizando LangGraph.")
             try:
                 config = get_thread_config(thread_id)
@@ -528,8 +542,8 @@ async def _is_escalated(thread_id: str) -> bool:
                 pass
         return True
 
-    # Si en .NET TODAS las conversaciones para este paciente están en ACTIVA y ya no hay tickets ni atención de humano:
-    if is_graph_escalated and not dotnet_is_escalated and not has_active_ticket:
+    # Si en .NET la conversación está en ACTIVA y ya no hay atención humana:
+    if is_graph_escalated and not dotnet_is_escalated:
         try:
             logger.info(f"[Webhook] Conversación fue restablecida a ACTIVA en .NET para {thread_id}. Sincronizando bot.")
             config = get_thread_config(thread_id)
@@ -542,6 +556,10 @@ async def _is_escalated(thread_id: str) -> bool:
 
 
 async def _escalate_conversation(thread_id: str, phone_number: str, message: str) -> bool:
+    from app.api.routes.agent_handoff import desmarcar_reactivada
+    desmarcar_reactivada(thread_id)
+    desmarcar_reactivada(phone_number)
+
     # 1. Asegurar que en .NET DB la conversación exista y su estado cambie a STATUS_ESCALADA
     conv_id = await dotnet_client.obtener_o_crear_conversacion(phone_number)
     if conv_id:

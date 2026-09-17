@@ -1,9 +1,11 @@
 import logging
 import asyncio
+import time
+import re
 from fastapi import APIRouter, HTTPException, Security, Depends, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict
 
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
@@ -15,6 +17,41 @@ from app.session.postgres_checkpointer import get_checkpointer_instance
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["Agent Handoff & Messaging"])
+
+# Registro en memoria de conversaciones explícitamente reactivadas por el asesor
+RESUMED_RECENTLY: Dict[str, float] = {}
+RESUMED_WINDOW_SECONDS = 7200  # 2 horas de gracia tras la devolución al bot
+
+
+def marcar_conversacion_reactivada(ident: str) -> None:
+    now = time.time()
+    raw = str(ident).strip()
+    RESUMED_RECENTLY[raw] = now
+    clean = re.sub(r"\D", "", raw)
+    if len(clean) >= 10:
+        RESUMED_RECENTLY[clean[-10:]] = now
+
+
+def esta_recien_reactivada(ident: str) -> bool:
+    now = time.time()
+    raw = str(ident).strip()
+    if raw in RESUMED_RECENTLY and (now - RESUMED_RECENTLY[raw]) < RESUMED_WINDOW_SECONDS:
+        return True
+    clean = re.sub(r"\D", "", raw)
+    if len(clean) >= 10:
+        suf = clean[-10:]
+        if suf in RESUMED_RECENTLY and (now - RESUMED_RECENTLY[suf]) < RESUMED_WINDOW_SECONDS:
+            return True
+    return False
+
+
+def desmarcar_reactivada(ident: str) -> None:
+    raw = str(ident).strip()
+    RESUMED_RECENTLY.pop(raw, None)
+    clean = re.sub(r"\D", "", raw)
+    if len(clean) >= 10:
+        RESUMED_RECENTLY.pop(clean[-10:], None)
+
 
 # Seguridad básica mediante API Key o Secret Key interno
 api_key_header = APIKeyHeader(name="X-Internal-Secret", auto_error=False)
@@ -48,6 +85,7 @@ async def resume_conversation(request: ResumeConversationRequest):
 
     Llamado por el Backend .NET o el Frontend cuando un asesor humano finaliza
     la atención o devuelve la conversación al Chatbot AI.
+    Sincroniza tanto LangGraph / PostgreSQL como la base de datos de .NET y resuelve tickets abiertos.
     """
     phone_number = request.phone_number.strip()
     if not phone_number:
@@ -77,8 +115,10 @@ async def resume_conversation(request: ResumeConversationRequest):
         if phone_number in ALIAS_MAP and ALIAS_MAP[phone_number] not in targets:
             targets.append(ALIAS_MAP[phone_number])
 
+        # 1. Limpieza y reactivación en PostgreSQL y LangGraph
         for t in targets:
             try:
+                marcar_conversacion_reactivada(t)
                 config = get_thread_config(t)
                 checkpointer = get_checkpointer_instance()
                 if checkpointer:
@@ -88,10 +128,30 @@ async def resume_conversation(request: ResumeConversationRequest):
                 except Exception:
                     pass
                 dotnet_client.limpiar_cache_conversacion(t)
-                asyncio.create_task(dotnet_client.obtener_o_crear_conversacion(t))
                 logger.info(f"[Handoff] Estado reactivado y limpiado para {t}")
             except Exception as t_err:
                 logger.warning(f"[Handoff] Error reactivando hilo {t}: {t_err}")
+
+        # 2. Sincronización en Backend .NET: Cambiar estado a ACTIVA y cerrar tickets abiertos
+        try:
+            convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
+            clean_digits_set = {
+                re.sub(r"\D", "", t)[-10:] for t in targets if len(re.sub(r"\D", "", t)) >= 10
+            }
+            for c in convs:
+                c_chat = str(c.get("chatIdentifier", "")).strip()
+                c_digits = re.sub(r"\D", "", c_chat)
+                if len(c_digits) >= 10:
+                    c_digits = c_digits[-10:]
+                c_id = str(c.get("id", "")).strip()
+
+                if c_chat in targets or (c_digits and c_digits in clean_digits_set):
+                    if c_id:
+                        logger.info(f"[Handoff] Sincronizando conversación .NET {c_id} a STATUS_ACTIVA...")
+                        await dotnet_client.actualizar_estado_conversacion(c_id, dotnet_client.STATUS_ACTIVA)
+                        await dotnet_client.resolver_tickets_conversacion(c_id)
+        except Exception as net_err:
+            logger.warning(f"[Handoff] Error sincronizando estado ACTIVA y tickets en .NET: {net_err}")
 
         # Mensaje de notificación amigable al paciente
         mensaje_retorno = (
