@@ -53,6 +53,12 @@ _qr_unlinking = False
 # Tras purgar Baileys, connectionState puede seguir diciendo "open" por la
 # caché local de Evolution. En esa ventana no se acepta "open" sin revalidar.
 _qr_fresh_until = 0.0
+# Evolution suele devolver close/connecting un instante aunque la sesión siga
+# viva. Llamar /instance/connect en ese parpadeo genera un QR y tumba el login.
+_qr_last_open_at = 0.0
+_qr_non_open_streak = 0
+_QR_OPEN_HOLD_SECONDS = 90.0
+_QR_CONNECT_AFTER_MISSES = 3
 
 _QR_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -346,9 +352,19 @@ async def _purge_baileys_session(client: httpx.AsyncClient, instance_name: str) 
     await _restore_webhook(client, instance_name, webhook)
 
 
+def _hold_connected(instance_name: str) -> dict:
+    return {
+        "connected": True,
+        "state": "open",
+        "base64": "",
+        "instanceName": instance_name,
+    }
+
+
 @app.get("/qr/data", tags=["WhatsApp QR"])
 async def get_qr_data():
     """Retorna los datos del QR y estado de conexión en formato JSON."""
+    global _qr_last_open_at, _qr_non_open_streak
     instance_name = _qr_instance_name()
     headers = _evolution_headers()
 
@@ -358,28 +374,51 @@ async def get_qr_data():
         if _qr_unlinking:
             return _qr_json(_disconnected_payload(instance_name))
 
-        state = "disconnected"
+        state = "unknown"
         try:
             async with httpx.AsyncClient(timeout=12.0) as client:
                 state = await _connection_state(client, instance_name)
-                if state == "missing":
+                if state == "missing" and _qr_non_open_streak >= _QR_CONNECT_AFTER_MISSES:
                     await _ensure_instance(client, instance_name)
                     state = await _connection_state(client, instance_name)
         except Exception:
-            pass
+            logger.warning("[QR] No se pudo leer connectionState de %s", instance_name)
+            state = "unknown"
 
-        stale_open = state == "open" and time.monotonic() < _qr_fresh_until
+        now = time.monotonic()
+        stale_open = state == "open" and now < _qr_fresh_until
         if state == "open" and not stale_open:
-            return _qr_json(
-                {"connected": True, "state": state, "base64": "", "instanceName": instance_name}
-            )
+            _qr_last_open_at = now
+            _qr_non_open_streak = 0
+            return _qr_json(_hold_connected(instance_name))
+
+        recently_open = bool(_qr_last_open_at) and (now - _qr_last_open_at) < _QR_OPEN_HOLD_SECONDS
+        # Un parpadeo close/connecting justo después de open no debe pedir QR
+        # (eso regenera credenciales y tumba la sesión). Si nunca hubo open en
+        # este proceso, sí hay que pedir QR para poder vincular.
+        if recently_open and (state in ("unknown", "connecting", "close", "disconnected") or stale_open):
+            _qr_non_open_streak += 1
+            if _qr_non_open_streak < _QR_CONNECT_AFTER_MISSES or state in ("unknown", "connecting") or stale_open:
+                logger.info(
+                    "[QR] Estado %s ignorado (%s/%s); la sesión estuvo open hace %.0fs",
+                    state,
+                    _qr_non_open_streak,
+                    _QR_CONNECT_AFTER_MISSES,
+                    now - _qr_last_open_at,
+                )
+                return _qr_json(_hold_connected(instance_name))
+
+        if not recently_open:
+            _qr_non_open_streak += 1
 
         qr_base64 = ""
         try:
             url_connect = f"{settings.evolution_api_url}/instance/connect/{instance_name}"
-            async with httpx.AsyncClient(timeout=12.0) as client:
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 if _qr_unlinking:
                     return _qr_json(_disconnected_payload(instance_name))
+                if state == "missing":
+                    await _ensure_instance(client, instance_name)
                 resp_qr = await client.get(url_connect, headers=headers)
                 if resp_qr.status_code == 404:
                     await _ensure_instance(client, instance_name)
@@ -388,13 +427,31 @@ async def get_qr_data():
                     qr_base64 = _extract_qr_base64(resp_qr.json())
                     # connect puede reabrir la sesión si el logout no borró creds.
                     state = await _connection_state(client, instance_name)
+                else:
+                    logger.warning(
+                        "[QR] /instance/connect %s HTTP %s: %s",
+                        instance_name,
+                        resp_qr.status_code,
+                        resp_qr.text[:200],
+                    )
         except Exception:
-            pass
+            logger.warning("[QR] No se pudo pedir QR de %s", instance_name)
+            if recently_open:
+                return _qr_json(_hold_connected(instance_name))
+            return _qr_json(
+                {
+                    "connected": False,
+                    "state": "error",
+                    "base64": "",
+                    "instanceName": instance_name,
+                    "message": "Evolution API no disponible. Reintenta en unos segundos.",
+                }
+            )
 
         if state == "open":
-            return _qr_json(
-                {"connected": True, "state": state, "base64": "", "instanceName": instance_name}
-            )
+            _qr_last_open_at = time.monotonic()
+            _qr_non_open_streak = 0
+            return _qr_json(_hold_connected(instance_name))
 
         return _qr_json(
             {
@@ -422,7 +479,7 @@ async def restart_qr_instance():
 @app.post("/qr/logout", tags=["WhatsApp QR"])
 async def logout_qr_instance():
     """Desvincula WhatsApp en Evolution y borra la sesión Baileys si queda viva."""
-    global _qr_unlinking, _qr_fresh_until
+    global _qr_unlinking, _qr_fresh_until, _qr_last_open_at, _qr_non_open_streak
     instance_name = _qr_instance_name()
     async with _qr_session_lock:
         _qr_unlinking = True
@@ -445,6 +502,8 @@ async def logout_qr_instance():
                 # /instance/connect, que reabre esa sesión en este host.
                 await _purge_baileys_session(client, instance_name)
                 _qr_fresh_until = time.monotonic() + 20.0
+                _qr_last_open_at = 0.0
+                _qr_non_open_streak = _QR_CONNECT_AFTER_MISSES
                 state = await _connection_state(client, instance_name)
                 # "connecting" aquí es el QR nuevo, no la sesión anterior.
                 if state == "open":
