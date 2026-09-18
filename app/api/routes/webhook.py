@@ -178,6 +178,7 @@ async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "")
     3. Si el número es un identificador LID de WhatsApp (@lid) o contiene más de 11 dígitos,
        se omite la consulta por teléfono y se usa push_name.
     """
+    now = time.monotonic()
     from app.services.whatsapp_identity import obtener_telefono_canonico, es_identificador_lid, limpiar_digitos
     numero_canonico = obtener_telefono_canonico(numero_paciente)
     cached = _PATIENT_CONTEXT_CACHE.get(numero_canonico) or _PATIENT_CONTEXT_CACHE.get(numero_paciente)

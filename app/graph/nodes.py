@@ -175,7 +175,7 @@ def get_llm_with_tools():
 
 	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
 	if is_gemini:
-		valid_gemini_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+		valid_gemini_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b"]
 		fallback_model_names = [m for m in valid_gemini_models if m != settings.gemini_model]
 		fallback_bounds = []
 		for m_name in fallback_model_names:

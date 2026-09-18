@@ -24,7 +24,7 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
-    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_model: str = "gemini-1.5-flash"
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),
