@@ -213,9 +213,9 @@ async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "")
 
     # Si no se detectó por teléfono o vino de WhatsApp pushName, usar push_name
     if not primer_nombre and push_name:
-        primer_nombre = push_name.strip().split()[0]
+        primer_nombre = push_name.strip().split()[0].capitalize()
     if not nombre_detectado and push_name:
-        nombre_detectado = push_name.strip()
+        nombre_detectado = push_name.strip().title()
 
     ctx = {
         "nombre": nombre_detectado,

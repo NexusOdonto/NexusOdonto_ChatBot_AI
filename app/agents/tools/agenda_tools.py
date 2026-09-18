@@ -107,19 +107,33 @@ ETIQUETAS_SERVICIO_ES = {
     "dental assessment": "Valoración dental",
     "dental prophylaxis": "Profilaxis dental",
     "dental cleaning": "Limpieza dental",
+    "deep cleaning": "Limpieza profunda",
     "prophylaxis": "Profilaxis",
-    "composite resin": "Resina",
-    "composite filling": "Resina / obturación",
+    "composite resin": "Resina / Calza estética",
+    "composite resin filling": "Resina / Calza dental estética",
+    "composite filling": "Resina / Calza estética",
+    "resin filling": "Resina dental",
+    "teeth whitening": "Blanqueamiento dental",
+    "tooth whitening": "Blanqueamiento dental",
+    "whitening": "Blanqueamiento dental",
     "tooth extraction": "Extracción dental",
     "oral surgery": "Cirugía oral",
     "orthodontics": "Ortodoncia",
     "orthodontic consultation": "Consulta de ortodoncia",
     "endodontics": "Endodoncia",
-    "root canal": "Endodoncia / conducto",
+    "root canal": "Endodoncia / tratamiento de conducto",
     "periodontics": "Periodoncia",
     "gum graft": "Injerto de encía",
     "pediatric dentistry": "Odontopediatría",
     "general dentistry": "Odontología general",
+}
+
+# Traducciones al español para descripciones comunes que vienen en inglés desde seeds de BD
+DESCRIPCIONES_SERVICIO_ES = {
+    "professional dental cleaning and plaque removal.": "Limpieza profunda para remover placa bacteriana y sarro.",
+    "restoration of a tooth using composite resin material.": "Restauración estética con resina de alta estética del color del diente.",
+    "professional treatment to improve tooth shade.": "Tratamiento profesional para aclarar y embellecer el tono de los dientes.",
+    "surgical procedure to cover exposed tooth roots.": "Procedimiento para cubrir encías retraídas y proteger la raíz dental.",
 }
 
 
@@ -1564,16 +1578,16 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
             tarjetas_prof = []
             for p in profesionales:
                 nombre = _obtener_valor(p, "name", "nombre", "nombreCompleto") or "Especialista Odontológico"
-                licencia = _obtener_valor(p, "professionalLicense", "licencia", "tarjetaProfesional")
-                licencia_str = f"\n   • 🎓 *Reg. Profesional:* `{licencia}`" if licencia else ""
-                tarjetas_prof.append(f"👨‍⚕️ *{nombre}*{licencia_str}\n   • 🦷 Especialista en Odontología Integral")
+                nombre_clean = str(nombre).strip()
+                if not nombre_clean.lower().startswith(("dr", "dra")):
+                    nombre_clean = f"Dr(a). {nombre_clean}"
+                tarjetas_prof.append(f"• *{nombre_clean}* — Odontología Integral y Especializada")
             
-            titulo = f"✨ *Especialistas en {esp_nombre} en Nexus Odonto* 🦷" if esp_nombre else "✨ *Equipo Médico de Nexus Odonto* 🦷"
+            titulo = f"En *Nexus Odonto* contamos con especialistas en {esp_nombre}:" if esp_nombre else "En *Nexus Odonto* contamos con odontólogos especialistas:"
             return (
                 f"{titulo}\n\n"
-                f"Contamos con profesionales de primer nivel para cuidar de tu sonrisa:\n\n"
-                + "\n\n".join(tarjetas_prof)
-                + "\n\n💡 _¿Te gustaría consultar los horarios disponibles de alguno de nuestros doctores para agendar tu cita?_ 😊"
+                + "\n".join(tarjetas_prof)
+                + "\n\n¿Te gustaría consultar los horarios de alguno de ellos para agendar tu cita? 😊"
             )
         else:
             servicios = await dotnet_client.obtener_servicios() or []
@@ -1615,37 +1629,37 @@ async def _consultar_servicios_impl() -> str:
                 "o no podemos acceder a la lista. Por favor intenta de nuevo más tarde."
             )
 
-        tarjetas = []
+        items_servicios = []
         for s in activos:
             nombre = _etiqueta_servicio(s)
             desc = _obtener_valor(s, "description", "descripcion")
-            # No inventar descripciones: solo mostrar si el API trae texto real
             desc_str = str(desc).strip() if desc and str(desc).strip() else ""
+            desc_es = DESCRIPCIONES_SERVICIO_ES.get(desc_str.lower(), desc_str)
             precio = _obtener_valor(s, "price", "precio")
             duracion = _obtener_valor(s, "durationMinutes", "duracionMinutos")
 
-            detalles = []
-            if duracion:
-                detalles.append(f"⏱️ *Duración:* {duracion} min")
+            partes = []
             if precio is not None and str(precio).strip() != "":
                 try:
                     precio_num = float(precio)
-                    precio_str = f"${precio_num:,.0f} COP"
+                    partes.append(f"${precio_num:,.0f} COP")
                 except (TypeError, ValueError):
-                    precio_str = f"${precio} COP"
-                detalles.append(f"💰 *Inversión:* {precio_str}")
+                    partes.append(f"${precio} COP")
+            if duracion:
+                partes.append(f"{duracion} min")
 
-            meta_str = " | ".join(detalles) if detalles else ""
-            meta_line = f"\n   • {meta_str}" if meta_str else ""
-            desc_line = f"\n   • 📝 {desc_str}" if desc_str else ""
-            tarjetas.append(f"✨ *{nombre}*{meta_line}{desc_line}")
+            detalles = f" ({', '.join(partes)})" if partes else ""
+            items_servicios.append(f"• *{nombre}*{detalles}")
 
         return (
-            "🦷 *Tratamientos y Servicios en Nexus Odonto* ✨\n\n"
-            "Estos son los *servicios activos* disponibles para agendar:\n\n"
-            + "\n\n".join(tarjetas)
-            + "\n\n💬 *¿Cuál de estos tratamientos te gustaría realizarte? "
-            "Con gusto verifico la disponibilidad para ti.* 😊"
+            "Catálogo de Servicios y Tratamientos Activos en Nexus Odonto:\n"
+            + "\n".join(items_servicios)
+            + "\n\n[INSTRUCCIÓN CRÍTICA DE COMUNICACIÓN HUMANA: "
+            "Responde al paciente como una asesora empática y conversacional por WhatsApp. "
+            "NUNCA hagas un volcado copiado de toda la lista de servicios con todas las duraciones y precios a la vez (evita a toda costa que el mensaje sea tan largo que WhatsApp lo corte con 'Leer más'). "
+            "Si preguntó de forma general qué servicios tienen, salúdalo con calidez por su nombre, resume en 3 o 4 viñetas limpias las categorías principales (limpieza/profilaxis, resinas/calzas estéticas, blanqueamiento, valoración general) "
+            "y pregúntale amablemente si presenta alguna molestia o qué procedimiento en particular le interesa para orientarlo con gusto y darle el valor exacto. "
+            "Si el paciente preguntó por un servicio puntual, dale directamente su valor y detalles amables.]"
         )
     except Exception as exc:
         logger.error(f"Error al consultar servicios: {exc}", exc_info=True)
@@ -1756,9 +1770,9 @@ def consultar_doctores_tool(especialidad: Optional[str] = None) -> str:
 @tool
 def consultar_servicios_y_precios_tool() -> str:
     """
-    Consulta la lista OFICIAL y ACTUAL de servicios activos (nombre, duración, precios) desde GET /Services.
-    Usa esta herramienta ANTES de mencionar, sugerir o ejemplificar cualquier tratamiento.
-    NUNCA inventes nombres de servicios; solo ofrece los que devuelve esta herramienta.
+    Consulta la lista oficial y actual de servicios activos de Nexus Odonto (nombres, precios y duraciones).
+    Usa esta herramienta como fuente de verdad para responder de forma cálida, conversacional y humana al paciente.
+    NUNCA inventes precios ni servicios que no existan en este catálogo.
     """
     return _run_sync(_consultar_servicios_impl())
 
