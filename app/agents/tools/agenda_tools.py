@@ -1,10 +1,11 @@
 import os
+import re
 import unicodedata
 import logging
 import asyncio
 import threading
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 from app.clients.dotnet_client import dotnet_client
@@ -987,6 +988,122 @@ async def _agendar_cita_impl(
         return "Lo siento, ocurrió un problema de conexión al registrar la cita. Por favor intenta de nuevo en unos minutos."
 
 
+def _resolver_cita_por_selector(
+    citas_activas: List[Dict[str, Any]],
+    selector: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Resuelve cuál cita de una lista activa corresponde al selector proporcionado.
+
+    Soporta:
+    - Número ordinal numérico: '1', '2', 'cita 1', 'cita #2', 'la 1', '#1'
+    - Palabra ordinal en español: 'primera', 'segunda', 'tercera', 'cuarta', 'quinta', 'ultima'
+    - Coincidencia de fecha: '2026-09-20', '20/09'
+    - Coincidencia de UUID técnico (para interoperabilidad interna)
+    - Selección automática si el paciente solo tiene 1 cita activa
+    """
+    if not citas_activas:
+        return None, None
+
+    def _key_dt(c):
+        s = c.get("startsAt") or c.get("fechaHoraInicio") or ""
+        try:
+            return datetime.fromisoformat(str(s).replace("Z", "").split(".")[0])
+        except Exception:
+            return datetime.max
+
+    citas_ordenadas = sorted(citas_activas, key=_key_dt)
+    raw_sel = str(selector or "").strip()
+    norm = _normalizar_texto(raw_sel)
+
+    # 1. Si solo hay 1 cita activa
+    if len(citas_ordenadas) == 1:
+        if norm in ("2", "segunda", "segundo", "3", "tercera", "tercero"):
+            return None, "Solo tienes una cita activa programada (Cita #1). ¿Deseas gestionar esa cita? 😊"
+        return citas_ordenadas[0], None
+
+    # 2. Si no hay selector (o es genérico) pero hay varias citas, generar lista numerada amigable
+    if not norm or norm in ("none", "null", "n/a", "cita", "mi cita", "la cita", "cancelar", "reprogramar", "modificar"):
+        opciones = []
+        for i, c in enumerate(citas_ordenadas, 1):
+            prof = c.get("professionalName", "Especialista")
+            serv = c.get("serviceName", "Consulta Odontológica")
+            s_raw = c.get("startsAt") or ""
+            f_display = str(s_raw)[:10]
+            try:
+                dt = datetime.fromisoformat(str(s_raw).replace("Z", "").split(".")[0])
+                f_display = dt.strftime("%d/%m/%Y a las %I:%M %p")
+            except Exception:
+                pass
+            opciones.append(f"{i}️⃣ *Cita #{i}:* {serv} con {prof} — 📅 {f_display}")
+
+        msg_ambiguo = (
+            "Tienes varias citas activas programadas:\n\n"
+            + "\n".join(opciones)
+            + "\n\n¿Cuál de estas citas deseas gestionar? Indícame el número (ej: *1* o *2*) o la fecha. 😊"
+        )
+        return None, msg_ambiguo
+
+    # 3. Mapeo de ordinales comunes
+    ORDINALES = {
+        "primera": 1, "primero": 1, "primer": 1, "1": 1, "1ra": 1, "1ro": 1, "#1": 1,
+        "segunda": 2, "segundo": 2, "2": 2, "2da": 2, "2do": 2, "#2": 2,
+        "tercera": 3, "tercero": 3, "tercer": 3, "3": 3, "3ra": 3, "3ro": 3, "#3": 3,
+        "cuarta": 4, "cuarto": 4, "4": 4, "4ta": 4, "4to": 4, "#4": 4,
+        "quinta": 5, "quinto": 5, "5": 5, "5ta": 5, "5to": 5, "#5": 5,
+        "ultima": len(citas_ordenadas), "ultimo": len(citas_ordenadas),
+    }
+
+    num_match = re.search(r"\b(?:cita\s*#?|numero\s*#?|opcion\s*#?|#)?([1-9])\b", norm)
+    if num_match:
+        idx = int(num_match.group(1))
+        if 1 <= idx <= len(citas_ordenadas):
+            return citas_ordenadas[idx - 1], None
+
+    for palabra, idx in ORDINALES.items():
+        if re.search(rf"\b{palabra}\b", norm):
+            if 1 <= idx <= len(citas_ordenadas):
+                return citas_ordenadas[idx - 1], None
+
+    # 4. Búsqueda por UUID técnico o prefijo
+    for c in citas_ordenadas:
+        cid = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower().strip()
+        if cid and (cid == norm.lower() or cid.startswith(norm.lower())):
+            return c, None
+
+    # 5. Búsqueda por fecha
+    for c in citas_ordenadas:
+        s_raw = str(c.get("startsAt") or "")
+        if s_raw and norm in s_raw:
+            return c, None
+        try:
+            dt = datetime.fromisoformat(s_raw.replace("Z", "").split(".")[0])
+            if dt.strftime("%Y-%m-%d") in norm or dt.strftime("%d/%m/%Y") in norm or dt.strftime("%d/%m") in norm:
+                return c, None
+        except Exception:
+            pass
+
+    # Si no coincide, presentar las citas ordenadas
+    opciones = []
+    for i, c in enumerate(citas_ordenadas, 1):
+        prof = c.get("professionalName", "Especialista")
+        serv = c.get("serviceName", "Consulta Odontológica")
+        s_raw = c.get("startsAt") or ""
+        f_display = str(s_raw)[:10]
+        try:
+            dt = datetime.fromisoformat(str(s_raw).replace("Z", "").split(".")[0])
+            f_display = dt.strftime("%d/%m/%Y a las %I:%M %p")
+        except Exception:
+            pass
+        opciones.append(f"{i}️⃣ *Cita #{i}:* {serv} con {prof} — 📅 {f_display}")
+
+    msg_no_encontrado = (
+        f"No pude identificar la cita que indicaste (*{raw_sel}*). Estas son tus citas activas:\n\n"
+        + "\n".join(opciones)
+        + "\n\n¿Cuál de ellas deseas gestionar? Indícame el número (ej: *1* o *2*). 😊"
+    )
+    return None, msg_no_encontrado
+
+
 async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
     """Busca y formatea las citas de un paciente discriminando próximas vs historial."""
     try:
@@ -1111,8 +1228,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
                     f"   • 👨‍⚕️ *Especialista:* {c['profesional']}\n"
                     f"   • 📅 *Fecha:* {c['fecha']}\n"
                     f"   • ⏰ *Horario:* {c['hora']}\n"
-                    f"   • 📌 *Estado:* {c['estado']}{motivo_line}\n"
-                    f"   • 🔑 *ID de Cita:* `{c['id']}`"
+                    f"   • 📌 *Estado:* {c['estado']}{motivo_line}"
                 )
         else:
             bloques.append("✨ *No tienes citas pendientes o próximas por asistir.*")
@@ -1132,7 +1248,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
             f"📞 *Atención / Cambios:* +57 324 6030217\n\n"
-            f"💡 _Si deseas reprogramar o cancelar alguna de tus citas próximas, dime el ID o la fecha y con gusto te ayudo._ 😊"
+            f"💡 _Si deseas reprogramar o cancelar alguna de tus citas próximas, indícame el número de la cita (ej: Cita 1) o la fecha y con gusto te ayudo._ 😊"
         )
     except Exception as exc:
         logger.error(f"Error consultando citas por cédula {cedula}: {exc}", exc_info=True)
@@ -1165,30 +1281,9 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
         if not citas_activas:
             return f"Todas las citas registradas para la cédula *{cedula}* ya se encuentran canceladas o atendidas. 😊"
 
-        cita_encontrada = None
-        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
-            for c in citas_activas:
-                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
-                if c_id == cita_id.lower():
-                    cita_encontrada = c
-                    break
-
-        # Si no se especificó ID o no coincidió pero solo hay 1 cita activa, seleccionarla automáticamente
+        cita_encontrada, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
         if not cita_encontrada:
-            if len(citas_activas) == 1:
-                cita_encontrada = citas_activas[0]
-            else:
-                # Mostrar lista para que el paciente elija
-                opciones = []
-                for i, c in enumerate(citas_activas, 1):
-                    cid = c.get("id") or c.get("citaId")
-                    s_raw = c.get("startsAt") or ""
-                    opciones.append(f"{i}️⃣ Cita del `{str(s_raw)[:10]}` — ID: `{cid}`")
-                return (
-                    f"Tienes varias citas activas registradas con la cédula *{cedula}*:\n\n"
-                    + "\n".join(opciones)
-                    + "\n\n¿Cuál de estas citas deseas cancelar? Indícame el ID o la fecha. 😊"
-                )
+            return msg_opciones or "No se pudo identificar la cita a cancelar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
 
         target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
         prof_nom = cita_encontrada.get("professionalName", "Especialista Odontológico")
@@ -1215,7 +1310,6 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
                 f"• 👨‍⚕️ *Especialista:* {prof_nom}\n"
                 f"• 🦷 *Tratamiento:* {serv_nom}\n"
                 f"• 📅 *Fecha y Hora:* {fecha_display}\n"
-                f"• 🔑 *ID de Cita:* `{target_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Tu cita ha sido cancelada. Si deseas reagendar en otro horario, con gusto te ayudo. 😊\n"
                 f"📞 *Atención:* +57 324 6030217"
@@ -1223,7 +1317,7 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
         else:
             err = resultado.get("error", "")
             return (
-                f"⚠️ No fue posible cancelar la cita `{target_id}` en este momento.\n\n"
+                f"⚠️ No fue posible cancelar la cita en este momento.\n\n"
                 f"Detalle: {err}\n"
                 "Por favor intenta de nuevo o comunícate con recepción al *+57 324 6030217*. 😊"
             )
@@ -1267,28 +1361,9 @@ async def _modificar_cita_impl(
         if not citas_activas:
             return f"No tienes citas activas para reprogramar con la cédula *{cedula}*. ¿Deseas agendar una nueva cita? 😊"
 
-        cita_encontrada = None
-        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
-            for c in citas_activas:
-                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
-                if c_id == cita_id.lower():
-                    cita_encontrada = c
-                    break
-
+        cita_encontrada, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
         if not cita_encontrada:
-            if len(citas_activas) == 1:
-                cita_encontrada = citas_activas[0]
-            else:
-                opciones = []
-                for i, c in enumerate(citas_activas, 1):
-                    cid = c.get("id") or c.get("citaId")
-                    s_raw = c.get("startsAt") or ""
-                    opciones.append(f"{i}️⃣ Cita del `{str(s_raw)[:10]}` — ID: `{cid}`")
-                return (
-                    f"Tienes varias citas activas con la cédula *{cedula}*:\n\n"
-                    + "\n".join(opciones)
-                    + "\n\n¿Cuál de estas citas deseas reprogramar? Indícame el ID o la fecha. 😊"
-                )
+            return msg_opciones or "No se pudo identificar la cita a reprogramar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
 
         target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
 
@@ -1357,7 +1432,6 @@ async def _modificar_cita_impl(
                 f"• 👨‍⚕️ *Especialista:* {prof_nombre_display}\n"
                 f"• 📅 *Nueva Fecha:* {fecha_display}\n"
                 f"• ⏰ *Nuevo Horario:* {hora_display}\n"
-                f"• 🔑 *ID de Cita:* `{target_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"Por favor llega 10 minutos antes de tu hora programada. ¡Hasta pronto! 😊\n"
                 f"📞 *Atención:* +57 324 6030217"
@@ -1380,7 +1454,7 @@ async def _modificar_cita_impl(
                 )
             else:
                 return (
-                    f"⚠️ No fue posible reprogramar la cita `{target_id}` en este momento.\n\n"
+                    f"⚠️ No fue posible reprogramar tu cita en este momento.\n\n"
                     f"Detalle: {resultado.get('error')}\n"
                     "Por favor intenta de nuevo o comunícate con recepción: *+57 324 6030217* 😊"
                 )
@@ -1418,19 +1492,11 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         if not citas_activas:
             return f"No tienes citas pendientes por confirmar para la cédula *{cedula}*. Todas se encuentran completadas o canceladas. 😊"
 
-        cita_a_confirmar = None
-        if cita_id and cita_id.lower() not in ("none", "null", "n/a", ""):
-            for c in citas_activas:
-                c_id = str(c.get("id") or c.get("citaId") or c.get("appointmentId") or "").lower()
-                if c_id == cita_id.lower():
-                    cita_a_confirmar = c
-                    break
-
+        cita_a_confirmar, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
         if not cita_a_confirmar:
-            if len(citas_activas) == 1:
-                cita_a_confirmar = citas_activas[0]
-            else:
-                cita_a_confirmar = citas_activas[0]
+            if msg_opciones:
+                return msg_opciones
+            cita_a_confirmar = citas_activas[0]
 
         target_id = str(cita_a_confirmar.get("id") or cita_a_confirmar.get("citaId"))
         res = await dotnet_client.confirmar_estado_cita(target_id)
@@ -1649,7 +1715,7 @@ def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     
     Parámetros:
     - cedula: Número de cédula o documento de identidad del paciente (OBLIGATORIO).
-    - cita_id: (Opcional) ID de la cita a cancelar. Si el paciente tiene solo una cita activa, el sistema la identificará automáticamente.
+    - cita_id: (Opcional) Número de la cita que el paciente desea cancelar (ej: '1', '2', 'primera', 'cita 1') o ID de la cita. Si el paciente tiene solo una cita activa, el sistema la identificará automáticamente sin necesidad de especificar este parámetro.
     
     Usa esta herramienta SOLAMENTE tras haber confirmado con el usuario que realmente desea cancelar su cita.
     """
@@ -1669,7 +1735,7 @@ def modificar_cita_tool(
     Parámetros:
     - cedula: Número de cédula del paciente (OBLIGATORIO).
     - nueva_fecha_hora: Nueva fecha y hora en formato ISO 8601 o 'YYYY-MM-DD HH:MM' (ej: '2026-09-04 14:00').
-    - cita_id: (Opcional) ID de la cita a modificar. Si el paciente solo tiene una cita activa, el sistema la detectará automáticamente.
+    - cita_id: (Opcional) Número de cita a modificar (ej: '1', '2', 'primera', 'cita 1') o ID de la cita. Si el paciente solo tiene una cita activa, el sistema la detectará automáticamente.
     - nuevo_profesional_id: (Opcional) ID o nombre del nuevo profesional si desea cambiarlo.
     
     IMPORTANTE: Antes de proponer o confirmar un nuevo horario, consulta SIEMPRE la disponibilidad con consultar_disponibilidad_tool para asegurar que el especialista no esté en horario de almuerzo (ej. 12:00 PM a 1:00 PM) ni fuera de turno.
@@ -1705,7 +1771,7 @@ def confirmar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     
     Parámetros:
     - cedula: Número de cédula o documento de identidad del paciente (OBLIGATORIO).
-    - cita_id: (Opcional) ID de la cita a confirmar si se conoce. Si se omite, el sistema confirmará automáticamente su cita más próxima activa.
+    - cita_id: (Opcional) Número de la cita (ej: '1', '2', 'primera') o ID de la cita a confirmar. Si se omite, el sistema confirmará automáticamente su cita más próxima activa.
     
     Usa esta herramienta cuando el paciente responda a un recordatorio diciendo 'Confirmo', 'Sí confirmo', 'Confirmo mi cita',
     'Confirmo mi asistencia', 'Allá estaré', o cuando solicite explícitamente confirmar su cita.

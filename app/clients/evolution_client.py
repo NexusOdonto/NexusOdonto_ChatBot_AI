@@ -53,30 +53,8 @@ class EvolutionClient:
         }
 
     def _normalize_destination(self, numero: str) -> str:
-        dest = str(numero).strip()
-        if dest.startswith("+"):
-            dest = dest[1:].strip()
-
-        # Aliases de LIDs que fueron mapeados o provienen de chats con LIDs de WhatsApp
-        LID_ALIASES = {
-            "573001112233": "233783743803574@lid",
-            "573001112233@s.whatsapp.net": "233783743803574@lid",
-            "573226688304": "189515549421795@lid",
-            "573226688304@s.whatsapp.net": "189515549421795@lid",
-            "57213628510462": "57213628510462@lid",
-            "57213628510462@s.whatsapp.net": "57213628510462@lid",
-            "573238891073": "57213628510462@lid",
-            "573238891073@s.whatsapp.net": "57213628510462@lid",
-        }
-        if dest in LID_ALIASES:
-            return LID_ALIASES[dest]
-
-        # Si son más de 13 dígitos numéricos puros (característica de LID de WhatsApp)
-        digits = "".join(ch for ch in dest if ch.isdigit())
-        if len(digits) >= 14 and not dest.endswith("@lid"):
-            return f"{digits}@lid"
-
-        return dest
+        from app.services.whatsapp_identity import obtener_destino_envio
+        return obtener_destino_envio(numero)
 
     async def enviar_mensaje(self, numero: str, texto: str, delay: int | None = None) -> Optional[Dict[str, Any]]:
         """

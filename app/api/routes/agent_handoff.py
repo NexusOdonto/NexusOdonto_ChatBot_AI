@@ -92,18 +92,13 @@ async def resume_conversation(request: ResumeConversationRequest):
         raise HTTPException(status_code=400, detail="El número de teléfono es requerido.")
 
     try:
+        from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
+        canonical_phone = obtener_telefono_canonico(phone_number)
+        transport_dest = obtener_destino_envio(phone_number)
         targets = [phone_number]
-        ALIAS_MAP = {
-            "233783743803574@lid": "573001112233@s.whatsapp.net",
-            "573001112233": "233783743803574@lid",
-            "573001112233@s.whatsapp.net": "233783743803574@lid",
-            "189515549421795@lid": "573226688304@s.whatsapp.net",
-            "573226688304": "189515549421795@lid",
-            "573226688304@s.whatsapp.net": "189515549421795@lid",
-            "57213628510462@lid": "573238891073@s.whatsapp.net",
-            "573238891073": "57213628510462@lid",
-            "573238891073@s.whatsapp.net": "57213628510462@lid",
-        }
+        for candidate in [canonical_phone, transport_dest]:
+            if candidate and candidate not in targets:
+                targets.append(candidate)
         clean_num = phone_number.replace("@s.whatsapp.net", "").replace("+", "").strip()
         if clean_num:
             if clean_num not in targets:
@@ -111,9 +106,6 @@ async def resume_conversation(request: ResumeConversationRequest):
             full_jid = f"{clean_num}@s.whatsapp.net"
             if full_jid not in targets:
                 targets.append(full_jid)
-
-        if phone_number in ALIAS_MAP and ALIAS_MAP[phone_number] not in targets:
-            targets.append(ALIAS_MAP[phone_number])
 
         # 1. Limpieza y reactivación en PostgreSQL y LangGraph
         for t in targets:

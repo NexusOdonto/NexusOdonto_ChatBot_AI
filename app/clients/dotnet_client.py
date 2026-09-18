@@ -816,8 +816,10 @@ class DotNetClient:
         # Sexo Masculino por defecto
         sex_id = "f0000000-0000-0000-0000-000000000002"
 
-        # Si el teléfono de whatsapp es un LID (>13 dígitos), no usarlo como número telefónico móvil
-        clean_phone = "".join(ch for ch in str(telefono_whatsapp or "") if ch.isdigit())
+        # Si el teléfono de whatsapp es un LID, intentar resolver su teléfono canónico
+        from app.services.whatsapp_identity import obtener_telefono_canonico
+        resolved_phone = obtener_telefono_canonico(str(telefono_whatsapp or ""))
+        clean_phone = "".join(ch for ch in resolved_phone if ch.isdigit())
         if len(clean_phone) > 12:
             clean_phone = ""
         if not clean_phone:
@@ -881,7 +883,8 @@ class DotNetClient:
         - Descarta teléfonos dummy/placeholder (+573000000000, 3000000000, 0000000000).
         - Requiere coincidencia exacta de los 10 dígitos móviles colombianos (3XXXXXXXXX).
         """
-        raw_str = str(telefono or "").strip()
+        from app.services.whatsapp_identity import obtener_telefono_canonico
+        raw_str = obtener_telefono_canonico(str(telefono or "")).strip()
         if not raw_str or "@lid" in raw_str.lower():
             return None
 
@@ -1112,17 +1115,10 @@ class DotNetClient:
         
         Mantiene una caché en memoria para evitar llamadas redundantes de búsqueda.
         """
-        ident = str(chat_identifier).strip()
+        from app.services.whatsapp_identity import obtener_telefono_canonico
+        ident = obtener_telefono_canonico(str(chat_identifier or "")).strip()
         if not ident:
             return None
-
-        LID_MAPPING = {
-            "233783743803574@lid": "573001112233@s.whatsapp.net",
-            "189515549421795@lid": "573226688304@s.whatsapp.net",
-            "57213628510462@lid": "573238891073@s.whatsapp.net",
-        }
-        if ident in LID_MAPPING:
-            ident = LID_MAPPING[ident]
 
         # 1. Verificar caché en memoria rápido
         if ident in self._conversations_cache:

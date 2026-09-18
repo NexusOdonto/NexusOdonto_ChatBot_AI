@@ -178,17 +178,17 @@ async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "")
     3. Si el número es un identificador LID de WhatsApp (@lid) o contiene más de 11 dígitos,
        se omite la consulta por teléfono y se usa push_name.
     """
-    now = time.monotonic()
-    cached = _PATIENT_CONTEXT_CACHE.get(numero_paciente)
+    from app.services.whatsapp_identity import obtener_telefono_canonico, es_identificador_lid, limpiar_digitos
+    numero_canonico = obtener_telefono_canonico(numero_paciente)
+    cached = _PATIENT_CONTEXT_CACHE.get(numero_canonico) or _PATIENT_CONTEXT_CACHE.get(numero_paciente)
     if cached and (now - cached[0]) < _PATIENT_CONTEXT_CACHE_TTL:
         ctx = dict(cached[1])
         if push_name and not ctx.get("push_name"):
             ctx["push_name"] = push_name
         return ctx
 
-    raw_phone = str(numero_paciente or "").strip()
-    clean_digits = "".join(c for c in raw_phone if c.isdigit())
-    es_lid = "@lid" in raw_phone.lower() or len(clean_digits) > 12
+    clean_digits = limpiar_digitos(numero_canonico)
+    es_lid = es_identificador_lid(numero_canonico)
 
     nombre_detectado = ""
     primer_nombre = ""
@@ -197,7 +197,7 @@ async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "")
     if not es_lid:
         try:
             persona = await asyncio.wait_for(
-                dotnet_client.buscar_persona_por_telefono(numero_paciente),
+                dotnet_client.buscar_persona_por_telefono(numero_canonico),
                 timeout=3.0,
             )
             if persona and isinstance(persona, dict):
@@ -455,19 +455,9 @@ async def _is_escalated(thread_id: str) -> bool:
         logger.info(f"[Webhook] Conversación {thread_id} fue reactivada recientemente por asesor. Bot activo.")
         return False
 
-    LID_MAPPING = {
-        "233783743803574@lid": "573001112233@s.whatsapp.net",
-        "573001112233": "233783743803574@lid",
-        "573001112233@s.whatsapp.net": "233783743803574@lid",
-        "189515549421795@lid": "573226688304@s.whatsapp.net",
-        "573226688304": "189515549421795@lid",
-        "573226688304@s.whatsapp.net": "189515549421795@lid",
-        "57213628510462@lid": "573238891073@s.whatsapp.net",
-        "573238891073": "57213628510462@lid",
-        "573238891073@s.whatsapp.net": "57213628510462@lid",
-    }
+    from app.services.whatsapp_identity import obtener_telefono_canonico
     raw_tid = str(thread_id).strip()
-    canonical_tid = LID_MAPPING.get(raw_tid, raw_tid)
+    canonical_tid = obtener_telefono_canonico(raw_tid)
     clean_tid = re.sub(r"\D", "", canonical_tid)
     if len(clean_tid) > 10:
         clean_tid = clean_tid[-10:]
@@ -489,7 +479,7 @@ async def _is_escalated(thread_id: str) -> bool:
         convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
         for c in convs:
             c_chat = str(c.get("chatIdentifier", "")).strip()
-            c_canon = LID_MAPPING.get(c_chat, c_chat)
+            c_canon = obtener_telefono_canonico(c_chat)
             c_digits = re.sub(r"\D", "", c_canon)
             if len(c_digits) > 10:
                 c_digits = c_digits[-10:]
@@ -600,7 +590,13 @@ async def _process_whatsapp_unsupported_media(numero_paciente: str, caption: str
             if caption and _is_resume_request(caption):
                 logger.info(f"[BG] Paciente solicita volver con el bot: {numero_paciente}")
                 checkpointer = get_checkpointer_instance()
-                for t in [numero_paciente, "573001112233@s.whatsapp.net", "233783743803574@lid"]:
+                from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
+                canon = obtener_telefono_canonico(numero_paciente)
+                targets_clear = {numero_paciente, canon}
+                dest_envio = obtener_destino_envio(numero_paciente)
+                if dest_envio:
+                    targets_clear.add(dest_envio)
+                for t in targets_clear:
                     try:
                         if checkpointer:
                             await checkpointer.clear_thread(t)
@@ -738,7 +734,13 @@ async def _process_whatsapp_message(
             if _is_resume_request(mensaje_texto):
                 logger.info(f"[BG] Paciente solicita volver con el bot: {numero_paciente}")
                 checkpointer = get_checkpointer_instance()
-                for t in [numero_paciente, "573001112233@s.whatsapp.net", "233783743803574@lid"]:
+                from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
+                canon = obtener_telefono_canonico(numero_paciente)
+                targets_clear = {numero_paciente, canon}
+                dest_envio = obtener_destino_envio(numero_paciente)
+                if dest_envio:
+                    targets_clear.add(dest_envio)
+                for t in targets_clear:
                     try:
                         if checkpointer:
                             await checkpointer.clear_thread(t)
@@ -1019,13 +1021,8 @@ async def receive_whatsapp_message(request: Request):
                 else:
                     destinatario = remote_jid_me
 
-                LID_MAPPING = {
-                    "233783743803574@lid": "573001112233@s.whatsapp.net",
-                    "189515549421795@lid": "573226688304@s.whatsapp.net",
-                    "57213628510462@lid": "573238891073@s.whatsapp.net",
-                }
-                if str(destinatario).strip() in LID_MAPPING:
-                    destinatario = LID_MAPPING[str(destinatario).strip()]
+                from app.services.whatsapp_identity import obtener_telefono_canonico
+                destinatario = obtener_telefono_canonico(destinatario)
 
                 raw_msg_me = data.message or {}
                 unwrapped_me = unwrap_message_dict(raw_msg_me)
@@ -1059,21 +1056,8 @@ async def receive_whatsapp_message(request: Request):
             if not remote_jid:
                 return {"status": "ignored", "reason": "no_remote_jid"}
 
-            # Si remoteJid trae un LID interno de WhatsApp (@lid), buscar si participant o sender trae el teléfono real
-            participant = getattr(data.key, "participant", None) or getattr(data, "sender", None)
-            if "@lid" in str(remote_jid) and participant and "@s.whatsapp.net" in str(participant):
-                numero_paciente = str(participant)
-            else:
-                numero_paciente = remote_jid
-
-            # Mapeo canónico de LIDs conocidos para evitar duplicidad de conversaciones
-            LID_MAPPING = {
-                "233783743803574@lid": "573001112233@s.whatsapp.net",
-                "189515549421795@lid": "573226688304@s.whatsapp.net",
-                "57213628510462@lid": "573238891073@s.whatsapp.net",
-            }
-            if str(numero_paciente).strip() in LID_MAPPING:
-                numero_paciente = LID_MAPPING[str(numero_paciente).strip()]
+            from app.services.whatsapp_identity import extraer_identidad_webhook
+            numero_paciente, _ = extraer_identidad_webhook(raw_json, data)
 
             # Extraer nombre público del perfil de WhatsApp si está disponible
             push_name = str(getattr(data, "pushName", None) or "").strip()
