@@ -21,6 +21,7 @@ from app.services.audio_service import (
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
 from app.services.semantic_cache import buscar_en_cache, purgar_cache_semantico
+from app.services.inactivity_service import inactivity_service
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,9 @@ def _enqueue_user_message(numero_paciente: str, mensaje_texto: str, push_name: s
 
     if push_name:
         _USER_PUSH_NAMES[numero_paciente] = push_name.strip()
+
+    # Cancelar el temporizador de inactividad porque el usuario está activo
+    inactivity_service.cancel(numero_paciente)
 
     # 3. Registrar el mensaje individual en base de datos para que el frontend lo visualice de inmediato
     asyncio.create_task(
@@ -575,9 +579,12 @@ async def _escalate_conversation(thread_id: str, phone_number: str, message: str
         await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
     except Exception as state_err:
         logger.warning(f"[BG] No se pudo actualizar estado local en checkpointer: {state_err}")
-    # 4. Enviar mensaje de escalamiento al paciente
+    # 4. Cancelar el temporizador de inactividad (ya no es el bot quien atiende)
+    inactivity_service.cancel(thread_id)
+    inactivity_service.cancel(phone_number)
+    # 5. Enviar mensaje de escalamiento al paciente
     await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
-    # 5. Persistir mensaje de escalamiento en Oracle DB
+    # 6. Persistir mensaje de escalamiento en Oracle DB
     asyncio.create_task(
         dotnet_client.registrar_mensaje(phone_number, "CHATBOT", MENSAJE_ESCALAMIENTO)
     )
@@ -835,6 +842,8 @@ async def _process_whatsapp_message(
                 )
             except Exception as hist_err:
                 logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
+            # Activar el temporizador de inactividad también en respuestas cacheadas
+            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
             return
 
         # 7. Invocar el grafo LangGraph directamente con el contexto del paciente
@@ -929,6 +938,9 @@ async def _process_whatsapp_message(
                             rag_confidence=confidence,
                         )
                     )
+                    # Activar (o renovar) el temporizador de inactividad tras responder al usuario.
+                    # Cada usuario tiene su propio temporizador independiente.
+                    inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
                     # NOTA DE SEGURIDAD Y PRIVACIDAD (Habeas Data / Ley 1581):
                     # Las respuestas dinámicas del LLM en chats con pacientes NUNCA se guardan en el
                     # caché semántico global para evitar cualquier filtración o reutilización de datos entre usuarios.

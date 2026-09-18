@@ -19,6 +19,7 @@ from app.services.appointment_reminders import (
 )
 from app.graph.builder import create_graph
 from app.session.postgres_checkpointer import PostgresCheckpointer
+from app.services.inactivity_service import inactivity_service
 
 # Cargar variables de entorno desde el archivo .env
 load_dotenv()
@@ -168,6 +169,8 @@ async def shutdown() -> None:
     # Cerrar el scheduler evita tareas huérfanas al detener el servidor.
     if scheduler.running:
         scheduler.shutdown(wait=False)
+    # Cancelar todos los temporizadores de inactividad activos antes de salir.
+    await inactivity_service.stop_all()
     if checkpoint_store is not None:
         await checkpoint_store.stop()
 

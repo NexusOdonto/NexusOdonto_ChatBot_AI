@@ -10,14 +10,6 @@ logger = logging.getLogger(__name__)
 _LID_TO_PHONE: dict[str, str] = {}
 _PHONE_TO_LID: dict[str, str] = {}
 
-# Seed inicial con alias conocidos para retrocompatibilidad
-_SEED_MAPPINGS = [
-    ("233783743803574@lid", "573001112233@s.whatsapp.net"),
-    ("189515549421795@lid", "573226688304@s.whatsapp.net"),
-    ("57213628510462@lid", "573238891073@s.whatsapp.net"),
-]
-
-
 def limpiar_digitos(texto: str) -> str:
     """Extrae únicamente los dígitos de una cadena."""
     if not texto:
@@ -57,16 +49,12 @@ def registrar_asociacion_lid(telefono: str, lid: str) -> None:
     _PHONE_TO_LID[tel_jid] = lid_jid
     _PHONE_TO_LID[clean_tel] = lid_jid
     if tel_digits:
+        # Registro estricto 1:1 por dígitos completos únicamente.
+        # NO se registra por los últimos 10 dígitos para evitar colisiones entre
+        # números de distintos usuarios que compartan el mismo sufijo.
         _PHONE_TO_LID[tel_digits] = lid_jid
-        if len(tel_digits) >= 10:
-            _PHONE_TO_LID[tel_digits[-10:]] = lid_jid
 
     logger.debug(f"[WhatsApp Identity] Asociación registrada: LID {lid_jid} <-> Tel {tel_jid}")
-
-
-# Cargar seed inicial
-for _l, _p in _SEED_MAPPINGS:
-    registrar_asociacion_lid(_p, _l)
 
 
 def obtener_telefono_canonico(identificador: str) -> str:
@@ -182,11 +170,10 @@ def extraer_identidad_webhook(raw_payload: dict, data_obj: Any = None) -> Tuple[
     if isinstance(data, dict):
         if data.get("participant"):
             candidate_sources.append(str(data["participant"]))
-        if data.get("sender"):
-            candidate_sources.append(str(data["sender"]))
-    if isinstance(raw_payload, dict):
-        if raw_payload.get("sender"):
-            candidate_sources.append(str(raw_payload["sender"]))
+        # NOTA DE SEGURIDAD: data.get("sender") es el número del bot/instancia,
+        # NO del paciente remitente. Se excluye intencionalmente para evitar que
+        # todos los usuarios queden mapeados al mismo número canónico del bot.
+        # raw_payload.get("sender") tiene el mismo problema y también se excluye.
 
     # Encontrar si alguno de los candidatos es un teléfono real (@s.whatsapp.net o móvil)
     phone_candidato = ""
