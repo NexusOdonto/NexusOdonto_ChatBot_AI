@@ -440,18 +440,23 @@ def _generar_slots_desde_regla(
     try:
         sh, sm = map(int, str(start_time_str).split(":")[:2])
         eh, em = map(int, str(end_time_str).split(":")[:2])
+        
+        # En Nexus Odonto el receso de almuerzo/cambio de jornada médica comprende de 12:00 PM a 2:00 PM (12:00 a 14:00)
+        # Respetamos lunch_start y lunch_end de la BD garantizando que cubra al menos la franja de almuerzo institucional
         lsh, lsm = (map(int, str(lunch_start_str).split(":")[:2])) if lunch_start_str else (12, 0)
-        leh, lem = (map(int, str(lunch_end_str).split(":")[:2])) if lunch_end_str else (13, 0)
+        leh, lem = (map(int, str(lunch_end_str).split(":")[:2])) if lunch_end_str else (14, 0)
 
         cur = sh * 60 + sm
         end = eh * 60 + em
-        lstart = lsh * 60 + lsm
-        lend = leh * 60 + lem
+        # Asegurar que ningún turno se genere durante el receso de almuerzo (12:00 a 14:00 o regla del doctor)
+        lstart = min(720, lsh * 60 + lsm)  # 12:00 PM = 720 min
+        lend = max(840, leh * 60 + lem)    # 2:00 PM (14:00) = 840 min
 
         slots = []
         step_min = 30
         dur_min = max(30, min(duracion_min, 60))
         while cur + dur_min <= end:
+            # Un turno es válido si termina antes del almuerzo o inicia después del almuerzo
             if not (cur < lend and (cur + dur_min) > lstart):
                 h = cur // 60
                 m = cur % 60
@@ -460,6 +465,75 @@ def _generar_slots_desde_regla(
         return slots
     except Exception:
         return [str(start_time_str)[:5]]
+
+
+def _validar_horario_cita(
+    dt: datetime,
+    duracion_min: int = 30,
+    prof_nombre: str = "el especialista",
+) -> Tuple[bool, Optional[str]]:
+    """Valida que la fecha y hora solicitada cumpla con las políticas de atención y almuerzo de Nexus Odonto.
+    
+    Retorna (True, None) si el horario es válido, o (False, mensaje_explicativo) si no lo es.
+    """
+    # 1. Domingo: cerrado
+    if dt.weekday() == 6:
+        return (
+            False,
+            "⚠️ El consultorio *Nexus Odonto* permanece cerrado los domingos 🏥.\n\n"
+            "Nuestra jornada de atención es de Lunes a Sábado. ¿Te gustaría agendar para el próximo día hábil o consultar horarios disponibles? 😊",
+        )
+
+    # 2. Sábados: solo de 8:00 AM a 12:00 PM
+    if dt.weekday() == 5:
+        if dt.hour < 8 or dt.hour >= 12 or (dt.hour == 11 and dt.minute > 30 and duracion_min > 30):
+            return (
+                False,
+                "⚠️ Los sábados nuestro consultorio atiende únicamente en jornada continua de *8:00 AM a 12:00 PM* ⏰.\n\n"
+                "¿Te gustaría agendar el sábado en la mañana o para el lunes en la tarde? 😊",
+            )
+
+    # 3. Franja de Almuerzo y Descanso Médico (12:00 PM a 2:00 PM)
+    if 12 <= dt.hour < 14:
+        hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
+        return (
+            False,
+            f"⚠️ El horario solicitado (*{hora_sol}*) coincide con el receso de almuerzo de nuestros especialistas (12:00 PM a 2:00 PM) 🍽️.\n\n"
+            f"En la jornada de la tarde disponemos de turnos con {prof_nombre} a partir de las *2:00 PM* o *2:30 PM*.\n\n"
+            "¿Te gustaría que te reserve a las *2:00 PM*? 😊",
+        )
+
+    # 4. Fuera de jornada laboral (antes de 8:00 AM o después de 5:00 PM / 17:00)
+    if dt.hour < 8 or dt.hour >= 17 or (dt.hour == 16 and dt.minute > 30 and duracion_min > 30):
+        hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
+        return (
+            False,
+            f"⚠️ El horario solicitado (*{hora_sol}*) se encuentra fuera de nuestra jornada de atención ⏰.\n\n"
+            "Nuestros horarios de consulta son:\n"
+            "• ☀️ *Mañana:* 8:00 AM a 12:00 PM\n"
+            "• 🌤️ *Tarde:* 2:00 PM a 5:00 PM\n"
+            "• 📅 *Sábados:* 8:00 AM a 12:00 PM\n\n"
+            "¿Deseas consultar los turnos disponibles dentro de este horario? 😊",
+        )
+
+    # 5. Margen mínimo de anticipación para citas de hoy (mínimo 20-30 min)
+    try:
+        from zoneinfo import ZoneInfo
+        now_bogota = datetime.now(ZoneInfo("America/Bogota"))
+    except Exception:
+        now_bogota = datetime.now()
+
+    if dt.date() == now_bogota.date():
+        dt_check = dt.replace(tzinfo=now_bogota.tzinfo) if dt.tzinfo is None and now_bogota.tzinfo else dt
+        if dt_check < now_bogota + timedelta(minutes=20):
+            hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
+            return (
+                False,
+                f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos).\n"
+                "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊",
+            )
+
+    return (True, None)
 
 
 def _formatear_hora_ampm(hora_str: str) -> str:
@@ -933,31 +1007,14 @@ async def _agendar_cita_impl(
                 "Por favor indícame la fecha y hora deseada (ej: *2026-09-20 10:00 AM* o *mañana a las 2:00 PM*). 😊"
             )
 
+        # ── 4b. Validar políticas de horario de atención y almuerzo de Nexus Odonto ─
+        horario_valido, msg_horario = _validar_horario_cita(starts_dt, duracion_min, prof_nombre_display)
+        if not horario_valido and msg_horario:
+            return msg_horario
+
         ends_dt = starts_dt + timedelta(minutes=duracion_min)
-
-        # Ajustar ends_dt si cruza el horario de almuerzo (12:00 a 13:00) o fin de jornada (17:00)
-        if starts_dt.hour < 12 and ends_dt.hour >= 12 and (ends_dt.hour > 12 or ends_dt.minute > 0):
-            ends_dt = starts_dt.replace(hour=12, minute=0, second=0)
-        elif starts_dt.hour < 17 and ends_dt.hour >= 17 and (ends_dt.hour > 17 or ends_dt.minute > 0):
-            ends_dt = starts_dt.replace(hour=17, minute=0, second=0)
-
         starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # Validar que si la cita es para hoy, tenga al menos 20 minutos de margen de anticipación
-        try:
-            from zoneinfo import ZoneInfo
-            now_bogota = datetime.now(ZoneInfo("America/Bogota"))
-            if starts_dt.date() == now_bogota.date():
-                dt_check = starts_dt.replace(tzinfo=ZoneInfo("America/Bogota"))
-                if dt_check < now_bogota + timedelta(minutes=20):
-                    hora_sol = starts_dt.strftime("%I:%M %p")
-                    return (
-                        f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos). "
-                        "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊"
-                    )
-        except Exception:
-            pass
 
         # ── 5. Obtener IDs de estado y origen ────────────────────────────────────
         status_id = await dotnet_client.obtener_appointment_status_id("AGENDADA")
@@ -977,10 +1034,10 @@ async def _agendar_cita_impl(
         }
         
         respuesta = await dotnet_client.agendar_cita(payload)
-        if respuesta:
+        if respuesta and respuesta.get("success"):
             cita_id = _obtener_valor(respuesta, "id", "citaId", "appointmentId")
-            hora_inicio_str = starts_dt.strftime("%H:%M")
-            hora_fin_str = ends_dt.strftime("%H:%M")
+            hora_inicio_str = _formatear_hora_ampm(starts_dt.strftime("%H:%M"))
+            hora_fin_str = _formatear_hora_ampm(ends_dt.strftime("%H:%M"))
             fecha_str = starts_dt.strftime("%d/%m/%Y")
 
             web_url = os.getenv("WEB_PORTAL_URL", "https://nexusodonto.chatcampuslands.com/login")
@@ -1006,7 +1063,29 @@ async def _agendar_cita_impl(
                 f"¡Será un placer cuidar de tu sonrisa! 😊✨"
             )
         else:
-            return "Lo siento, ocurrió un inconveniente al registrar la cita en el sistema. Es posible que el horario seleccionado ya esté ocupado. ¿Te gustaría intentar con otro horario disponible? 😊"
+            err_msg = str((respuesta.get("error") if isinstance(respuesta, dict) else "") or "").lower()
+            hora_sol = _formatear_hora_ampm(starts_dt.strftime("%H:%M"))
+            
+            if any(w in err_msg for w in ["almuerzo", "lunch", "receso", "descanso"]):
+                return (
+                    f"⚠️ El turno de las *{hora_sol}* coincide con la franja de almuerzo del especialista (12:00 PM a 2:00 PM) 🍽️.\n\n"
+                    f"Con gusto podemos agendarte en la jornada de la mañana (8:00 AM a 12:00 PM) o en la tarde a partir de las *2:00 PM* con {prof_nombre_display}. ¿Cuál te queda mejor? 😊"
+                )
+            elif any(w in err_msg for w in ["horario", "schedule", "disponib", "fuera", "outside"]):
+                return (
+                    f"⚠️ {prof_nombre_display} no tiene disponibilidad registrada a las *{hora_sol}* para esa fecha.\n\n"
+                    f"¿Te gustaría que te muestre los horarios disponibles para que elijas otro turno cómodo? 😊"
+                )
+            elif any(w in err_msg for w in ["overlap", "ocupad", "conflict", "traslap", "already has"]):
+                return (
+                    f"⚠️ El turno de las *{hora_sol}* ya se encuentra reservado.\n\n"
+                    f"¿Deseas consultar los horarios libres más cercanos para hoy o para otra fecha? 😊"
+                )
+            else:
+                return (
+                    f"⚠️ En este momento no fue posible confirmar la cita a las *{hora_sol}* en el sistema de agenda.\n\n"
+                    f"Por favor consulta los horarios disponibles con {prof_nombre_display} o comunícate con recepción al *+57 324 6030217*. 😊"
+                )
     except Exception as exc:
         logger.error(f"Error al agendar cita: {exc}", exc_info=True)
         return "Lo siento, ocurrió un problema de conexión al registrar la cita. Por favor intenta de nuevo en unos minutos."
@@ -1413,10 +1492,6 @@ async def _modificar_cita_impl(
                     duracion_min = int(s.get("durationMinutes") or 45)
                     break
 
-        ends_dt = starts_dt + timedelta(minutes=duracion_min)
-        starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
         # Determinar profesional
         prof_nombre_display = cita_encontrada.get("professionalName", "Especialista")
         resolved_prof_id = cita_encontrada.get("professionalId")
@@ -1429,6 +1504,15 @@ async def _modificar_cita_impl(
                     resolved_prof_id = str(p.get("id"))
                     prof_nombre_display = p.get("name", prof_nombre_display)
                     break
+
+        # Validar políticas de horario de atención y almuerzo de Nexus Odonto
+        horario_valido, msg_horario = _validar_horario_cita(starts_dt, duracion_min, prof_nombre_display)
+        if not horario_valido and msg_horario:
+            return msg_horario
+
+        ends_dt = starts_dt + timedelta(minutes=duracion_min)
+        starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Resolver patientId de la cita encontrada o resolverlo por la cédula
         patient_id = cita_encontrada.get("patientId") or cita_encontrada.get("pacienteId")
@@ -1481,8 +1565,8 @@ async def _modificar_cita_impl(
             if "availability" in err_msg or "outside" in err_msg or resultado.get("status_code") == 409:
                 return (
                     f"⚠️ El horario solicitado (*{hora_req}* del `{fecha_req}`) no está disponible para {prof_nombre_display}.\n\n"
-                    "💡 Puede deberse al receso de almuerzo (12:00 PM a 1:00 PM) o a que está fuera de su turno de atención.\n"
-                    "Por favor consulta los horarios disponibles o elige otra hora (ej. 8:00 AM - 11:30 AM o 1:00 PM - 4:30 PM). 😊"
+                    "💡 Puede deberse al receso de almuerzo (12:00 PM a 2:00 PM) o a que está fuera de su jornada de atención.\n"
+                    "Por favor consulta los horarios disponibles (mañana de 8:00 AM a 12:00 PM o tarde a partir de las 2:00 PM). 😊"
                 )
             elif "overlap" in err_msg or "already has" in err_msg:
                 return (

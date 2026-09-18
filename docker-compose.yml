@@ -83,14 +83,14 @@ services:
       - LLM_PROVIDER=${LLM_PROVIDER:-gemini}
       - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-gemini}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.6-flash}
       - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-models/gemini-embedding-001}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-3.5-turbo}
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-CLAVE_SECRETA_ODONTO_2026}
-      - DOTNET_API_URL=http://odontologia_api:8080/api/v1
+      - DOTNET_API_URL=${DOTNET_DOCKER_API_URL:-http://host.docker.internal:5170/api/v1}
       - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN:-}
       - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD:-}
       - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory

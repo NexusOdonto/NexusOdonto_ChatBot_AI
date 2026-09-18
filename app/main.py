@@ -155,12 +155,21 @@ async def startup() -> None:
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        # Barrendero periódico de inactividad: purga sesiones vencidas (> 15 min) en PostgreSQL
+        # y notifica el cierre por WhatsApp incluso si el servidor se reinició.
+        inactivity_service.procesar_expiraciones_pendientes,
+        IntervalTrigger(seconds=60, timezone=settings.reminder_timezone),
+        id="inactivity-sweeper",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.start()
+    # Ejecutar un barrido inicial inmediato al encender el servidor
+    asyncio.create_task(inactivity_service.procesar_expiraciones_pendientes(settings.session_ttl_seconds))
     logger.info(
-        "Recordatorios programados: Diario a las %02d:%02d (%s) y en tiempo real cada 2 min (30 min antes de la cita)",
-        settings.reminder_schedule_hour,
-        settings.reminder_schedule_minute,
-        settings.reminder_timezone,
+        "Scheduler activo: Recordatorios (diario 08:00 y cada 2 min) + Barrendero de inactividad (cada 60 s).",
     )
 
 

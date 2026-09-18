@@ -230,17 +230,37 @@ class DotNetClient:
                 return payload.get("items", [])
         return None
 
-    async def agendar_cita(self, datos_cita: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def agendar_cita(self, datos_cita: Dict[str, Any]) -> Dict[str, Any]:
         """Registra una cita en el backend .NET."""
         url = f"{self.base_url}/Appointments"
         response = await self._request_with_retry("POST", url, json=datos_cita)
         if response and response.status_code in (200, 201):
-            return response.json()
+            res_json = response.json() if isinstance(response.json(), dict) else {"id": str(response.json())}
+            res_json["success"] = True
+            return res_json
+        
+        error_msg = ""
+        status_code = response.status_code if response else 500
         if response:
+            try:
+                res_err = response.json()
+                if isinstance(res_err, dict):
+                    error_msg = (
+                        res_err.get("message")
+                        or res_err.get("detail")
+                        or res_err.get("title")
+                        or str(res_err.get("errors") or "")
+                    )
+            except Exception:
+                error_msg = response.text[:300]
             logger.warning(
-                f"[.NET Client] Error creando cita (HTTP {response.status_code}): {response.text[:500]}"
+                f"[.NET Client] Error creando cita (HTTP {status_code}): {error_msg or response.text[:300]}"
             )
-        return None
+        return {
+            "success": False,
+            "error": error_msg or "No fue posible registrar la cita en el sistema.",
+            "status_code": status_code,
+        }
 
     async def consultar_citas(self, fecha: str = "") -> Optional[Any]:
         """Consulta las citas de una fecha en el backend .NET. Si fecha está vacía o el filtro falla, consulta todas sin query params."""

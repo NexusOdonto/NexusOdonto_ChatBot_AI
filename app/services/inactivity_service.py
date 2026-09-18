@@ -46,8 +46,6 @@ _MARCADORES_CITA_PENDIENTE = [
     "📋 *propuesta de cambio de cita:",
     "¿confirmas estos datos para agendar",
     "¿confirmas estos datos para reprogramar",
-    "por favor indícame tu *número de cédula*",
-    "por favor indícame tu número de cédula",
     "para gestionar tu cita, por favor indícame tu",
     "¡con el mayor gusto! para registrar tu cita",
     "indica la fecha y hora de tu preferencia",
@@ -56,7 +54,6 @@ _MARCADORES_CITA_PENDIENTE = [
     "¿con cuál de nuestros especialistas",
     "indícame qué servicio o tratamiento necesitas",
     "para agendar tu cita, por favor indícame tu",
-    "indícame tu *número de cédula*",
     "¿cuándo te gustaría la cita",
     "¿qué horario prefieres",
 ]
@@ -120,6 +117,47 @@ class InactivityService:
         if tasks:
             await asyncio.gather(*[t for _, t in tasks], return_exceptions=True)
         self._tasks.clear()
+
+    async def procesar_expiraciones_pendientes(self, ttl_seconds: int = 900) -> None:
+        """
+        Job periódico del Sweeper: consulta en PostgreSQL todas las sesiones
+        cuya inactividad supere ttl_seconds (900s = 15 min), y ejecuta
+        el cierre ordenado (notificación a WhatsApp, registro en auditoría y purga).
+        Garantiza que incluso tras un reinicio del contenedor o fallo de red,
+        no queden sesiones huérfanas en la base de datos.
+        """
+        from app.session.postgres_checkpointer import get_checkpointer_instance
+        checkpointer = get_checkpointer_instance()
+        if not checkpointer:
+            return
+
+        try:
+            expiradas = await checkpointer.obtener_sesiones_expiradas(ttl_seconds)
+            if not expiradas:
+                return
+
+            logger.info(
+                "[Inactivity Sweeper] Detectadas %d sesiones expiradas en PostgreSQL: %s",
+                len(expiradas),
+                expiradas,
+            )
+            for thread_id in expiradas:
+                self._cancel(thread_id)
+                try:
+                    await self._handle_expiry(thread_id)
+                except Exception as exc:
+                    logger.error(
+                        "[Inactivity Sweeper] Error procesando cierre para %s: %s",
+                        thread_id,
+                        exc,
+                        exc_info=True,
+                    )
+        except Exception as e:
+            logger.error(
+                "[Inactivity Sweeper] Error al consultar sesiones expiradas: %s",
+                e,
+                exc_info=True,
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # Lógica interna

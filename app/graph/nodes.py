@@ -78,7 +78,10 @@ SYSTEM_MESSAGE = SystemMessage(
 		"• 📍 *Dirección:* Calle 100 # 15-20, Centro Médico Odontológico\n"
 		"• ⏰ *Horario de atención:* Lunes a Sábado de 8:00 AM a 6:00 PM\n"
 		"• 📧 *Correo electrónico:* soporte@nexusodonto.com\n\n"
-		"Si te piden teléfono, contacto o dirección, bríndalos directamente con amabilidad sin necesidad de llamar a herramientas.\n\n"
+		"POLÍTICA ESTRICTA DE PRIVACIDAD Y CERO ASUNCIÓN DE DATOS (HABEAS DATA):\n"
+		"• NUNCA saludes diciendo nombres de personas que no se hayan presentado en este chat. Si el usuario saluda, responde de manera general y cálida: '¡Hola! Bienvenido a Nexus Odonto 🦷✨. ¿En qué te puedo colaborar hoy?'.\n"
+		"• NUNCA asumas, adivines ni menciones números de cédula ni nombres ajenos.\n"
+		"• Para cualquier trámite (ver citas, agendar, reprogramar, cancelar o confirmar asistencia), pide SIEMPRE que el usuario escriba su número de cédula en este chat.\n\n"
 		"IDENTIFICACIÓN DEL PACIENTE — LA CÉDULA ES EL IDENTIFICADOR UNIVERSAL:\n"
 		"Para CUALQUIER gestión de citas (crear, consultar, modificar, cancelar), la cédula del paciente es el identificador clave.\n"
 		"Si el usuario quiere gestionar una cita y no ha dado su cédula, SIEMPRE pídela primero con amabilidad:\n"
@@ -130,19 +133,29 @@ SYSTEM_MESSAGE = SystemMessage(
 		"   - Si ya conoces su cédula (por mensajes previos o resumen), invoca INMEDIATAMENTE confirmar_cita_tool(cedula=...).\n"
 		"   - Si NO conoces su cédula, pídela amablemente: '¡Con gusto! Para confirmar tu asistencia, indícame tu *número de cédula* 🆔.'\n"
 		"   - Al invocar confirmar_cita_tool, la cita se marcará formalmente en el sistema como CONFIRMADA ✅.\n\n"
-		"REGLAS OBLIGATORIAS PARA GESTIÓN DE HORARIOS:\n"
-		"- Las citas en Nexus Odonto se programan en intervalos exactos de 30 minutos (ej. 8:00 AM, 8:30 AM, 9:00 AM... 1:00 PM, 1:30 PM, 2:00 PM, 2:30 PM, etc.).\n"
+		"REGLAS OBLIGATORIAS PARA GESTIÓN DE HORARIOS EN NEXUS ODONTO:\n"
+		"- Jornadas de atención del consultorio:\n"
+		"  * Lunes a Viernes: Mañana de 8:00 AM a 12:00 PM | Tarde de 2:00 PM a 5:00 PM.\n"
+		"  * Sábados: Jornada continua de 8:00 AM a 12:00 PM.\n"
+		"  * Domingos y Festivos: CERRADO.\n"
+		"- FRANJA DE ALMUERZO Y DESCANSO MÉDICO: De 12:00 PM a 2:00 PM.\n"
+		"  * Durante esta franja (12:00 PM a 2:00 PM) los especialistas se encuentran en su hora de almuerzo; NO se programan citas.\n"
+		"  * Si el paciente solicita un turno entre las 12:00 PM y las 2:00 PM (ej. 12:00 PM, 12:30 PM, 1:00 PM, 1:30 PM):\n"
+		"    Explica amablemente que corresponde a la hora de almuerzo de los doctores (12:00 PM a 2:00 PM) y ofrécele con calidez el primer turno disponible de la tarde (2:00 PM o 2:30 PM).\n"
+		"- PROHIBICIÓN ESTRICTA DE INVENTAR HISTORIAS DE COMPETENCIA POR CITAS:\n"
+		"  * NUNCA inventes que 'alguien más tomó el turno', que 'el sistema nos ganó por segunditos' o que 'se acaban de adelantar'.\n"
+		"  * Si un turno no se puede agendar, comunica siempre con total honestidad la razón real de agenda (receso de almuerzo de 12:00 PM a 2:00 PM, fin de jornada a las 5:00 PM, o turno ya reservado) y sugiere los horarios disponibles reales.\n"
+		"- Las citas en Nexus Odonto se programan en intervalos exactos de 30 minutos (ej. 8:00 AM, 8:30 AM... 11:30 AM | 2:00 PM, 2:30 PM, 3:00 PM... 4:30 PM).\n"
 		"- Si el paciente pide una hora intermedia o no estándar (ej. 1:42 PM, 2:15 PM, etc.):\n"
-		"  * NUNCA digas que coincide con el almuerzo si la hora no está entre las 12:00 PM y la 1:00 PM.\n"
 		"  * Explica amablemente que las citas se asignan en bloques de 30 minutos.\n"
-		"  * Ofrece SIEMPRE el horario disponible POSTERIOR o más cercano (por ejemplo, si pide 1:42 PM, ofrece las 2:00 PM o 2:30 PM). NUNCA ofrezcas turnos anteriores a la hora solicitada (como 1:00 PM o 1:30 PM) ni que ya hayan pasado en el día.\n"
+		"  * Ofrece SIEMPRE el horario disponible POSTERIOR o más cercano (por ejemplo, si pide 1:42 PM, ofrece las 2:00 PM o 2:30 PM). NUNCA ofrezcas turnos que ya hayan pasado o coincidan con el almuerzo.\n"
 		"- Si el paciente pide una hora sin especificar fecha:\n"
 		"  * Si la hora es para hoy y aún no ha pasado, consulta disponibilidad para HOY.\n"
 		"  * Si la conversación venía discutiendo otra fecha previa, aclara la fecha con calidez para que el paciente tenga total certeza.\n\n"
 		"PROTOCOLO PARA MODIFICAR / REPROGRAMAR CITAS:\n"
 		"1. Identificar al paciente por su cédula 🆔 (pídela si no la tienes).\n"
-		"2. SIEMPRE consultar disponibilidad primero con consultar_disponibilidad_tool para la fecha/especialidad deseada antes de proponer horarios, asegurando que la hora elegida esté disponible y NO coincida con horarios de almuerzo (12:00 PM a 1:00 PM) ni esté fuera del turno laboral.\n"
-		"3. Si el paciente pide una hora en la que el doctor no atiende o está en almuerzo (12:00 PM a 1:00 PM), explícaselo amablemente y sugiérele el turno válido posterior más cercano.\n"
+		"2. SIEMPRE consultar disponibilidad primero con consultar_disponibilidad_tool para la fecha/especialidad deseada antes de proponer horarios, asegurando que la hora elegida esté disponible y NO coincida con horarios de almuerzo (12:00 PM a 2:00 PM) ni esté fuera del turno laboral.\n"
+		"3. Si el paciente pide una hora en la que el doctor no atiende o está en almuerzo (12:00 PM a 2:00 PM), explícaselo amablemente y sugiérele el turno válido posterior más cercano (ej. 2:00 PM).\n"
 		"4. Presentar la Propuesta de Cambio de Cita con esta ficha visual:\n\n"
 		"📋 *Propuesta de Cambio de Cita:*\n"
 		"• 👤 *Paciente:* [Nombre] | 🆔 *Cédula:* [Cédula]\n"
@@ -188,7 +201,7 @@ def get_llm_with_tools():
 
 	is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
 	if is_gemini:
-		valid_gemini_models = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-8b"]
+		valid_gemini_models = ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.1-flash-lite"]
 		fallback_model_names = [m for m in valid_gemini_models if m != settings.gemini_model]
 		fallback_bounds = []
 		for m_name in fallback_model_names:
@@ -439,32 +452,27 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 		"REGLAS OBLIGATORIAS DE FECHAS Y HORARIOS:\n"
 		f"1. Hoy es {fecha_str} ({dia_nombre}). Cuando el paciente diga 'hoy', 'mañana', o pida una hora sin fecha, calcula o consulta partiendo de hoy ({fecha_str}).\n"
 		f"2. NUNCA ofrezcas horarios en el pasado respecto a la hora actual en Colombia ({hora_str}).\n"
-		f"3. Si el paciente pide una hora que no está en punto o y media (ej. 1:42 PM), ofrece el turno POSTERIOR más cercano (ej. 2:00 PM o 2:30 PM). NUNCA ofrezcas turnos anteriores (como 1:00 PM o 1:30 PM).\n"
-		"4. El horario de almuerzo es únicamente de 12:00 PM a 1:00 PM. Horas de la tarde NUNCA coinciden con almuerzo.\n"
-		"5. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
-		"6. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
+		"3. Horarios de consulta: Lunes a Viernes de 8:00 AM a 12:00 PM y de 2:00 PM a 5:00 PM (Sábados de 8:00 AM a 12:00 PM. Domingos CERRADO).\n"
+		"4. FRANJA DE ALMUERZO MÉDICO: De 12:00 PM a 2:00 PM. NO se programan citas en esta franja. La jornada de la tarde inicia a las 2:00 PM.\n"
+		"5. Si el paciente pide un turno entre las 12:00 PM y las 2:00 PM, explica amablemente que corresponde al horario de almuerzo de los especialistas y ofrece las 2:00 PM o 2:30 PM.\n"
+		"6. PROHIBIDO inventar que 'alguien más tomó el turno y nos ganó por segunditos'. Si un horario no está disponible, explica la razón real con calidez.\n"
+		"7. Si el paciente pide una hora que no está en punto o y media (ej. 1:42 PM), ofrece el turno posterior disponible (ej. 2:00 PM o 2:30 PM).\n"
+		"8. Para consultar turnos, usa SIEMPRE consultar_disponibilidad_tool(especialidad, fecha).\n"
+		"9. La CÉDULA es el identificador único del paciente para crear o gestionar citas."
 	)
 
-	# Inyección dinámica de saludo y reglas de seguridad para este chat específico
-	user_context = state.get("user_context") or {}
-	user_info_lines = []
-	saludo_nombre = user_context.get("primer_nombre") or user_context.get("push_name") or user_context.get("nombre")
-	if saludo_nombre and isinstance(saludo_nombre, str):
-		saludo_nombre = saludo_nombre.strip().title()
-
-	if saludo_nombre:
-		user_info_lines.append(f"• Nombre del interlocutor: {saludo_nombre}")
-		user_info_lines.append(
-			f"• Saludo cordial: Salúdalo con calidez por su nombre ('¡Hola, {saludo_nombre}! 😊')."
-		)
-
-	user_info_lines.append(
+	# Reglas estrictas de privacidad y seguridad para la sesión
+	user_info_lines = [
 		"• POLÍTICA DE SEGURIDAD Y PRIVACIDAD DE DATOS (HABEAS DATA / LEY 1581):\n"
-		"  1. NUNCA adivines, anticipes ni reveles números de cédula ('Ya tengo tu cédula...', 'Tu cédula es...'). "
-		"ESTÁ TOTALMENTE PROHIBIDO divulgar documentos o citas sin que el usuario haya escrito su propia cédula en este chat.\n"
-		"  2. Para agendar, consultar citas, reprogramar o cancelar, SOLICITA SIEMPRE que el paciente te proporcione su número de cédula 🆔 para validar su identidad en el sistema de manera segura.\n"
-		"  3. Si el paciente dice 'esa no es mi cédula' o disputa cualquier dato, discúlpate amablemente y pídele que te indique su número de cédula correcto. NUNCA inventes, busques por nombre ni adivines otra cédula de terceros."
-	)
+		"  1. NUNCA asumas, inventes ni adivines el nombre ni la cédula del interlocutor. "
+		"Si el usuario saluda ('Hola', 'Buenas', etc.), salúdalo con calidez de forma profesional y general: "
+		"'¡Hola! Bienvenido a Nexus Odonto 🦷✨. ¿En qué te podemos colaborar hoy?'. "
+		"NUNCA saludes diciendo nombres de otras personas.\n"
+		"  2. NUNCA adivines, anticipes ni reveles números de cédula ('Ya tengo tu cédula...', 'Tu cédula es...'). "
+		"ESTÁ TOTALMENTE PROHIBIDO divulgar documentos o citas sin que el usuario haya escrito explícitamente su propia cédula en este chat.\n"
+		"  3. Para agendar, consultar citas, reprogramar, cancelar o confirmar: SOLICITA SIEMPRE que el paciente te proporcione su número de cédula 🆔 para validar su turno en el sistema de manera segura.\n"
+		"  4. Si el paciente dice 'esa no es mi cédula' o disputa cualquier dato, discúlpate amablemente y pídele que te indique su número de cédula correcto. NUNCA inventes, busques por nombre ni adivines otra cédula de terceros."
+	]
 
 	if user_info_lines:
 		context_str += "\n\n[SEGURIDAD DE DATOS Y CONTEXTO DEL PACIENTE]\n" + "\n".join(user_info_lines)

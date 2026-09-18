@@ -168,68 +168,23 @@ def _is_nonsense_or_gibberish(texto: str) -> bool:
 
 
 async def _resolver_contexto_paciente(numero_paciente: str, push_name: str = "") -> dict[str, Any]:
-    """Consulta en .NET o en el perfil de WhatsApp para personalizar el saludo cordial al usuario.
+    """Genera el contexto seguro del paciente para el hilo actual.
 
     POLÍTICA ESTRICTA DE SEGURIDAD Y PRIVACIDAD DE DATOS (HABEAS DATA / LEY 1581):
-    1. Solo se usa el nombre para saludar cordialmente al usuario ('¡Hola, Jeison! 👋✨').
-    2. La CÉDULA NUNCA se pre-asume ni se autoriza automáticamente por teléfono.
-       El paciente SIEMPRE debe proporcionar su documento en el chat para consultar,
-       agendar o modificar citas, garantizando que un número falso o compartido jamás
-       filtre información médica ni citas de terceros.
-    3. Si el número es un identificador LID de WhatsApp (@lid) o contiene más de 11 dígitos,
-       se omite la consulta por teléfono y se usa push_name.
+    1. NUNCA se asume ni se consulta la identidad o nombre del paciente en .NET/Oracle a partir del número de teléfono.
+       Esto previene que si el número fue reasignado, compartido por un familiar, o cambiado de titular,
+       el bot salude o exponga datos de otra persona ('¡Hola, Jerson!').
+    2. La CÉDULA y el NOMBRE se descubren ÚNICAMENTE si el paciente los proporciona en la conversación actual.
+    3. Para consultar, agendar o modificar citas, el paciente SIEMPRE debe proporcionar su documento en el chat.
     """
-    now = time.monotonic()
-    from app.services.whatsapp_identity import obtener_telefono_canonico, es_identificador_lid, limpiar_digitos
-    numero_canonico = obtener_telefono_canonico(numero_paciente)
-    cached = _PATIENT_CONTEXT_CACHE.get(numero_canonico) or _PATIENT_CONTEXT_CACHE.get(numero_paciente)
-    if cached and (now - cached[0]) < _PATIENT_CONTEXT_CACHE_TTL:
-        ctx = dict(cached[1])
-        if push_name and not ctx.get("push_name"):
-            ctx["push_name"] = push_name
-        return ctx
-
-    clean_digits = limpiar_digitos(numero_canonico)
-    es_lid = es_identificador_lid(numero_canonico)
-
-    nombre_detectado = ""
-    primer_nombre = ""
-
-    # Solo buscar persona en .NET si es un número telefónico móvil real (no LID)
-    if not es_lid:
-        try:
-            persona = await asyncio.wait_for(
-                dotnet_client.buscar_persona_por_telefono(numero_canonico),
-                timeout=3.0,
-            )
-            if persona and isinstance(persona, dict):
-                first_name = (persona.get("firstName") or "").strip()
-                last_name = (persona.get("lastName") or "").strip()
-                nombre_detectado = f"{first_name} {last_name}".strip()
-                primer_nombre = first_name
-        except asyncio.TimeoutError:
-            logger.warning(f"[Patient ID] Timeout al buscar persona por teléfono en .NET para {numero_paciente}")
-        except Exception as e:
-            logger.warning(f"[Patient ID] Error al consultar persona por teléfono en .NET para {numero_paciente}: {e}")
-
-    # Si no se detectó por teléfono o vino de WhatsApp pushName, usar push_name
-    if not primer_nombre and push_name:
-        primer_nombre = push_name.strip().split()[0].capitalize()
-    if not nombre_detectado and push_name:
-        nombre_detectado = push_name.strip().title()
-
-    ctx = {
-        "nombre": nombre_detectado,
-        "primer_nombre": primer_nombre,
+    return {
+        "nombre": "",
+        "primer_nombre": "",
         "cedula": None,  # NUNCA pre-cargar cédula; requerir validación explícita del paciente
         "is_registered": False,
         "phone": numero_paciente,
         "push_name": push_name.strip() if push_name else "",
     }
-    _PATIENT_CONTEXT_CACHE[numero_paciente] = (now, ctx)
-    if primer_nombre:
-        logger.info(f"[Patient ID] Interlocutor identificado para saludo ({numero_paciente}): {primer_nombre}")
-    return ctx
 
 
 def _enqueue_user_message(numero_paciente: str, mensaje_texto: str, push_name: str = "") -> None:
@@ -780,49 +735,44 @@ async def _process_whatsapp_message(
         now_ts = time.time()
         last_active = _USER_LAST_ACTIVE.get(numero_paciente)
         session_expired = False
+        checkpointer = get_checkpointer_instance()
 
         if last_active is not None and (now_ts - last_active) > settings.session_ttl_seconds:
             session_expired = True
-        elif last_active is None:
-            # Si el servidor acaba de iniciar o es la primera interacción del proceso actual,
-            # verificar la antigüedad del checkpoint en PostgreSQL
+        elif checkpointer:
+            # Consultar inactividad persistente en PostgreSQL (tabla conversation_sessions)
             try:
-                state_snapshot = await get_graph().aget_state(config)
-                if state_snapshot and state_snapshot.values and state_snapshot.values.get("messages"):
-                    created_at_val = getattr(state_snapshot, "created_at", None)
-                    if created_at_val:
-                        from datetime import datetime, timezone
-                        if isinstance(created_at_val, str):
-                            dt = datetime.fromisoformat(created_at_val.replace("Z", "+00:00"))
-                        elif isinstance(created_at_val, datetime):
-                            dt = created_at_val
-                        else:
-                            dt = None
-                        if dt and (datetime.now(timezone.utc) - dt).total_seconds() > settings.session_ttl_seconds:
-                            session_expired = True
+                segundos_inactivo = await checkpointer.obtener_segundos_inactividad(numero_paciente)
+                if segundos_inactivo is not None and segundos_inactivo > settings.session_ttl_seconds:
+                    session_expired = True
+                elif segundos_inactivo is None and last_active is None:
+                    # Sin registro previo de actividad: asegurar que no haya datos residuales viejos
+                    session_expired = True
             except Exception as ttl_err:
-                logger.debug(f"[TTL Check] No se pudo verificar antigüedad del hilo en DB: {ttl_err}")
+                logger.debug(f"[TTL Check] No se pudo verificar antigüedad en PostgreSQL: {ttl_err}")
 
         if session_expired:
-            logger.info(f"[TTL Check] Sesión expirada para {numero_paciente} (> {settings.session_ttl_seconds}s). Reiniciando hilo...")
-            checkpointer = get_checkpointer_instance()
+            logger.info(f"[TTL Check] Sesión expirada para {numero_paciente} (> {settings.session_ttl_seconds}s). Purgando hilo...")
             if checkpointer:
                 await checkpointer.clear_thread(numero_paciente)
             dotnet_client.limpiar_cache_conversacion(numero_paciente)
+            _PATIENT_CONTEXT_CACHE.pop(numero_paciente, None)
+            _USER_LAST_ACTIVE.pop(numero_paciente, None)
+            inactivity_service.cancel(numero_paciente)
 
         _USER_LAST_ACTIVE[numero_paciente] = now_ts
+        if checkpointer:
+            try:
+                await checkpointer.actualizar_actividad(numero_paciente)
+            except Exception as act_err:
+                logger.debug(f"[Activity] Error al actualizar actividad en PostgreSQL: {act_err}")
 
-        # 5. Resolver identidad del paciente en la base de datos de .NET o por WhatsApp pushName
+        # 5. Resolver identidad del paciente de forma segura (sin pre-asumir nombres ajenos)
         user_context = await _resolver_contexto_paciente(numero_paciente, push_name)
 
         # 6. Consultar si existe respuesta en el Caché Semántico (⚡ 0 tokens, < 50ms)
         cached_response = await buscar_en_cache(mensaje_texto)
         if cached_response:
-            # Personalizar saludo rápido si se conoce el nombre del paciente
-            saludo_nombre = user_context.get("primer_nombre") or user_context.get("nombre")
-            if saludo_nombre and "¡Hola!" in cached_response:
-                cached_response = cached_response.replace("¡Hola!", f"¡Hola, {saludo_nombre}!")
-
             logger.info(f"[Semantic Cache] Respondiendo desde caché a {numero_paciente}")
             await evolution_client.enviar_mensaje(numero_paciente, cached_response)
             # Guardar respuesta del bot en base de datos Oracle
@@ -844,6 +794,11 @@ async def _process_whatsapp_message(
                 logger.debug(f"[Semantic Cache] No se pudo persistir mensaje cacheado en historial: {hist_err}")
             # Activar el temporizador de inactividad también en respuestas cacheadas
             inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+            if checkpointer:
+                try:
+                    await checkpointer.actualizar_actividad(numero_paciente)
+                except Exception:
+                    pass
             return
 
         # 7. Invocar el grafo LangGraph directamente con el contexto del paciente
@@ -941,6 +896,12 @@ async def _process_whatsapp_message(
                     # Activar (o renovar) el temporizador de inactividad tras responder al usuario.
                     # Cada usuario tiene su propio temporizador independiente.
                     inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+                    _USER_LAST_ACTIVE[numero_paciente] = time.time()
+                    if checkpointer:
+                        try:
+                            await checkpointer.actualizar_actividad(numero_paciente)
+                        except Exception:
+                            pass
                     # NOTA DE SEGURIDAD Y PRIVACIDAD (Habeas Data / Ley 1581):
                     # Las respuestas dinámicas del LLM en chats con pacientes NUNCA se guardan en el
                     # caché semántico global para evitar cualquier filtración o reutilización de datos entre usuarios.
