@@ -24,6 +24,9 @@ services:
       - SERVER_URL=http://evolution-whatsapp:8080
       - QRCODE_LIMIT=30
       - NODE_OPTIONS=--dns-result-order=ipv4first
+      # Fuerza a Baileys a preferir JIDs estándar @s.whatsapp.net sobre LIDs cuando sea posible.
+      # Esto reduce la frecuencia de llegada de remoteJid con @lid, minimizando colisiones de identidad.
+      - WPP_LID_MODE=false
       # Versión de WhatsApp Web que emula Baileys (sin sufijo -alpha)
       - CONFIG_SESSION_PHONE_VERSION=2.3000.1047303469
       - CONFIG_SESSION_PHONE_CLIENT=Chrome

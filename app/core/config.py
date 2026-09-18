@@ -73,7 +73,7 @@ class Settings(BaseSettings):
 
     # Configuración de memoria, tiempo de sesión y flujo conversacional.
     session_store: str = "memory"
-    session_ttl_seconds: int = 3600
+    session_ttl_seconds: int = 900  # 15 minutos de inactividad antes de expirar la sesión
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
