@@ -813,8 +813,27 @@ class DotNetClient:
 
         # Tipo de documento CC por defecto (Citizenship Card)
         doc_type_id = "e0000000-0000-0000-0000-000000000001"
-        # Sexo Masculino por defecto
+        try:
+            doc_types = await self.obtener_tipos_documento()
+            if doc_types:
+                for dt in doc_types:
+                    c = (dt.get("code") or dt.get("name") or "").upper()
+                    if "CC" in c or "CEDULA" in c or "CITIZEN" in c:
+                        doc_type_id = str(dt.get("id"))
+                        break
+                if not doc_type_id and doc_types:
+                    doc_type_id = str(doc_types[0].get("id"))
+        except Exception:
+            pass
+
+        # Sexo por defecto
         sex_id = "f0000000-0000-0000-0000-000000000002"
+        try:
+            sexes = await self.obtener_sexos()
+            if sexes:
+                sex_id = str(sexes[0].get("id"))
+        except Exception:
+            pass
 
         # Si el teléfono de whatsapp es un LID, intentar resolver su teléfono canónico
         from app.services.whatsapp_identity import obtener_telefono_canonico
@@ -1021,6 +1040,7 @@ class DotNetClient:
         ends_at = datos_cita.get("endsAt") or datos_cita.get("fechaHoraFin") or (datetime.utcnow() + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         payload: Dict[str, Any] = {
+            "patientId": str(datos_cita.get("patientId") or datos_cita.get("pacienteId") or "00000000-0000-0000-0000-000000000000"),
             "professionalId": str(datos_cita.get("professionalId") or "00000000-0000-0000-0000-000000000000"),
             "serviceId": str(datos_cita.get("serviceId") or "00000000-0000-0000-0000-000000000000"),
             "startsAt": starts_at,

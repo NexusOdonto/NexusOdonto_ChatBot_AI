@@ -6,7 +6,8 @@ import asyncio
 import threading
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
-from langchain_core.tools import tool
+from typing_extensions import Annotated
+from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.runnables import RunnableConfig
 from app.clients.dotnet_client import dotnet_client
 
@@ -782,7 +783,7 @@ async def _agendar_cita_impl(
     servicio_id: Any,
     fecha_hora_inicio: str,
     motivo_consulta: str,
-    config: RunnableConfig,
+    config: Optional[RunnableConfig] = None,
 ) -> str:
     """Agenda una cita buscando o creando el paciente por su cédula.
     
@@ -793,8 +794,16 @@ async def _agendar_cita_impl(
     4. Crear la cita y retornar el resumen.
     """
     try:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
+        thread_id = ""
+        if config and isinstance(config, dict):
+            thread_id = config.get("configurable", {}).get("thread_id", "")
+
         cedula = (cedula or "").strip()
+        if not cedula:
+            return (
+                "Para poder registrar tu cita en el sistema necesito tu *número de cédula* 🆔 para vincular tu historial. "
+                "¿Me la podrías indicar por favor? 😊"
+            )
 
         # ── Validar cédula antes de cualquier llamada a la API ───────────────────
         error_cedula = _validar_cedula(cedula)
@@ -910,44 +919,45 @@ async def _agendar_cita_impl(
         )
 
         # ── 4. Calcular startsAt y endsAt en formato ISO 8601 ───────────────────
+        raw = str(fecha_hora_inicio or "").strip()
+        if not raw or raw.lower() in ("none", "null", "n/a", ""):
+            return (
+                f"Con gusto te ayudo a agendar tu cita de *{serv_nombre_display}* con *{prof_nombre_display}* 😊.\n\n"
+                "¿Qué día y horario te quedaría mejor? O si prefieres, dime la fecha y con gusto te muestro los turnos disponibles."
+            )
+
+        starts_dt = _parsear_fecha_hora_flexible(raw)
+        if not starts_dt:
+            return (
+                f"No pude interpretar la fecha y hora *'{raw}'* para agendar tu cita.\n\n"
+                "Por favor indícame la fecha y hora deseada (ej: *2026-09-20 10:00 AM* o *mañana a las 2:00 PM*). 😊"
+            )
+
+        ends_dt = starts_dt + timedelta(minutes=duracion_min)
+
+        # Ajustar ends_dt si cruza el horario de almuerzo (12:00 a 13:00) o fin de jornada (17:00)
+        if starts_dt.hour < 12 and ends_dt.hour >= 12 and (ends_dt.hour > 12 or ends_dt.minute > 0):
+            ends_dt = starts_dt.replace(hour=12, minute=0, second=0)
+        elif starts_dt.hour < 17 and ends_dt.hour >= 17 and (ends_dt.hour > 17 or ends_dt.minute > 0):
+            ends_dt = starts_dt.replace(hour=17, minute=0, second=0)
+
+        starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Validar que si la cita es para hoy, tenga al menos 20 minutos de margen de anticipación
         try:
-            raw = str(fecha_hora_inicio).strip()
-            starts_dt = _parsear_fecha_hora_flexible(raw)
-            if not starts_dt:
-                starts_dt = datetime.now()
-
-            ends_dt = starts_dt + timedelta(minutes=duracion_min)
-
-            # Ajustar ends_dt si cruza el horario de almuerzo (12:00 a 13:00) o fin de jornada (17:00)
-            if starts_dt.hour < 12 and ends_dt.hour >= 12 and (ends_dt.hour > 12 or ends_dt.minute > 0):
-                ends_dt = starts_dt.replace(hour=12, minute=0, second=0)
-            elif starts_dt.hour < 17 and ends_dt.hour >= 17 and (ends_dt.hour > 17 or ends_dt.minute > 0):
-                ends_dt = starts_dt.replace(hour=17, minute=0, second=0)
-
-            starts_at_iso = starts_dt.strftime("%Y-%m-%dT%H:%M:%S")
-            ends_at_iso = ends_dt.strftime("%Y-%m-%dT%H:%M:%S")
-
-            # Validar que si la cita es para hoy, tenga al menos 20 minutos de margen de anticipación
-            try:
-                from zoneinfo import ZoneInfo
-                now_bogota = datetime.now(ZoneInfo("America/Bogota"))
-                if starts_dt.date() == now_bogota.date():
-                    dt_check = starts_dt.replace(tzinfo=ZoneInfo("America/Bogota"))
-                    if dt_check < now_bogota + timedelta(minutes=20):
-                        hora_sol = starts_dt.strftime("%I:%M %p")
-                        return (
-                            f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos). "
-                            "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊"
-                        )
-            except Exception:
-                pass
-        except Exception as dt_err:
-            logger.warning(f"[Agenda Tools] Error formateando fechas ({fecha_hora_inicio}): {dt_err}")
-            now = datetime.now()
-            starts_at_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
-            ends_at_iso = (now + timedelta(minutes=duracion_min)).strftime("%Y-%m-%dT%H:%M:%S")
-            starts_dt = now
-            ends_dt = now + timedelta(minutes=duracion_min)
+            from zoneinfo import ZoneInfo
+            now_bogota = datetime.now(ZoneInfo("America/Bogota"))
+            if starts_dt.date() == now_bogota.date():
+                dt_check = starts_dt.replace(tzinfo=ZoneInfo("America/Bogota"))
+                if dt_check < now_bogota + timedelta(minutes=20):
+                    hora_sol = starts_dt.strftime("%I:%M %p")
+                    return (
+                        f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos). "
+                        "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊"
+                    )
+        except Exception:
+            pass
 
         # ── 5. Obtener IDs de estado y origen ────────────────────────────────────
         status_id = await dotnet_client.obtener_appointment_status_id("AGENDADA")
@@ -1420,8 +1430,21 @@ async def _modificar_cita_impl(
                     prof_nombre_display = p.get("name", prof_nombre_display)
                     break
 
+        # Resolver patientId de la cita encontrada o resolverlo por la cédula
+        patient_id = cita_encontrada.get("patientId") or cita_encontrada.get("pacienteId")
+        if not patient_id:
+            try:
+                per = await dotnet_client.buscar_persona_por_documento(cedula)
+                if per and per.get("id"):
+                    pac = await dotnet_client.buscar_paciente_por_person_id(str(per["id"]))
+                    if pac and pac.get("id"):
+                        patient_id = pac.get("id")
+            except Exception as e_pac:
+                logger.warning(f"[Modificar Cita] No se pudo resolver patientId para {cedula}: {e_pac}")
+
         # Construir payload completo de actualización
         datos_actualizacion: Dict[str, Any] = {
+            "patientId": str(patient_id or "00000000-0000-0000-0000-000000000000"),
             "professionalId": str(resolved_prof_id or "00000000-0000-0000-0000-000000000000"),
             "serviceId": str(serv_id or "00000000-0000-0000-0000-000000000000"),
             "startsAt": starts_at_iso,
@@ -1689,7 +1712,7 @@ def agendar_cita_tool(
     servicio_id: str,
     fecha_hora_inicio: str,
     motivo_consulta: str,
-    config: RunnableConfig,
+    config: Annotated[Optional[RunnableConfig], InjectedToolArg] = None,
 ) -> str:
     """
     Registra una cita en el sistema para un paciente identificado por su cédula.
