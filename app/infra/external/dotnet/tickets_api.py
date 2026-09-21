@@ -4,7 +4,13 @@ import logging
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-from app.infra.external.dotnet.http_transport import dotnet_transport, DotNetHttpTransport
+import threading
+
+from app.infra.external.dotnet.http_transport import (
+    dotnet_transport,
+    DotNetHttpTransport,
+    loop_safe_asyncio_lock,
+)
 from app.infra.external.dotnet.catalog_api import catalog_api
 from app.infra.external.dotnet.patients_api import patients_api
 
@@ -29,9 +35,13 @@ class DotNetTicketsApi:
     def __init__(self, transport: Optional[DotNetHttpTransport] = None):
         self.transport = transport or dotnet_transport
         self._conversations_cache: Dict[str, str] = {}
-        self._conversations_lock = asyncio.Lock()
+        self._conversations_locks: Dict[int, asyncio.Lock] = {}
+        self._conversations_locks_guard = threading.Lock()
         self._reasons_cache: Optional[List[Dict[str, Any]]] = None
         self._priorities_cache: Optional[List[Dict[str, Any]]] = None
+
+    def _conversations_lock(self) -> asyncio.Lock:
+        return loop_safe_asyncio_lock(self._conversations_locks, self._conversations_locks_guard)
 
     async def _obtener_ticket_reasons(self) -> List[Dict[str, Any]]:
         """Obtiene y cachea los motivos de ticket de soporte disponibles en .NET."""
@@ -243,7 +253,7 @@ class DotNetTicketsApi:
         if ident in self._conversations_cache:
             return self._conversations_cache[ident]
 
-        async with self._conversations_lock:
+        async with self._conversations_lock():
             if ident in self._conversations_cache:
                 return self._conversations_cache[ident]
 

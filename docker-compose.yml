@@ -90,7 +90,7 @@ services:
       - QDRANT_URL=http://qdrant-db:6333
       - EVOLUTION_API_URL=http://evolution-whatsapp:8080
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY:-CLAVE_SECRETA_ODONTO_2026}
-      - DOTNET_API_URL=${DOTNET_DOCKER_API_URL:-http://host.docker.internal:5170/api/v1}
+      - DOTNET_API_URL=${DOTNET_DOCKER_API_URL:-http://odontologia_api:8080/api/v1}
       - DOTNET_AUTH_LOGIN=${DOTNET_AUTH_LOGIN:-}
       - DOTNET_AUTH_PASSWORD=${DOTNET_AUTH_PASSWORD:-}
       - POSTGRES_CHECKPOINT_URL=postgresql://bot_user:bot_password@bot-memory-db:5432/bot_memory
