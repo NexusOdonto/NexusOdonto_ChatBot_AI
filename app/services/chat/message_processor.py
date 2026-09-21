@@ -408,8 +408,6 @@ async def process_whatsapp_message(
                 segundos_inactivo = await checkpointer.obtener_segundos_inactividad(numero_paciente)
                 if segundos_inactivo is not None and segundos_inactivo > settings.session_ttl_seconds:
                     session_expired = True
-                elif segundos_inactivo is None and last_active is None:
-                    session_expired = True
             except Exception:
                 pass
 

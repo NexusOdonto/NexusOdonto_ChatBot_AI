@@ -556,12 +556,13 @@ def _validar_horario_cita(
 
     if dt.date() == now_bogota.date():
         dt_check = dt.replace(tzinfo=now_bogota.tzinfo) if dt.tzinfo is None and now_bogota.tzinfo else dt
-        if dt_check < now_bogota + timedelta(minutes=20):
+        if dt_check < now_bogota + timedelta(minutes=15):
             hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
             return (
                 False,
-                f"⚠️ No es posible agendar una cita para hoy a las *{hora_sol}* con tan poco margen de tiempo (menos de 20-30 minutos).\n"
-                "Por favor selecciona un turno más adelante para que tengas tiempo suficiente de llegar al consultorio. 😊",
+                f"⚠️ Para poder prepararte adecuadamente y garantizar que alcances a llegar al consultorio, "
+                f"las citas para hoy requieren un margen mínimo de 15 minutos de anticipación.\n\n"
+                f"Para hoy a las *{hora_sol}* ya no alcanzamos a prepararte, pero con gusto podemos agendarte en los turnos más cercanos de esta tarde o para mañana. ¿Te gustaría consultar los horarios disponibles? 😊",
             )
 
     return (True, None)

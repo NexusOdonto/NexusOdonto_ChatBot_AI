@@ -24,8 +24,11 @@ def _normalize_msg_snippet(text: str) -> str:
     if not text:
         return ""
     import re
-    cleaned = re.sub(r"[*_~`\"']", "", text.strip().lower())
-    return re.sub(r"\s+", " ", cleaned)
+    import unicodedata
+    norm = unicodedata.normalize("NFKD", text)
+    norm = "".join(c for c in norm if not unicodedata.combining(c)).lower()
+    norm = re.sub(r"[^a-z0-9\s]", " ", norm)
+    return re.sub(r"\s+", " ", norm).strip()
 
 
 def register_outgoing_bot_message(destinatario: str, texto: str) -> None:
@@ -37,7 +40,7 @@ def register_outgoing_bot_message(destinatario: str, texto: str) -> None:
     clean_dest = limpiar_digitos(destinatario)
     if len(clean_dest) > 10:
         clean_dest = clean_dest[-10:]
-    norm_text = _normalize_msg_snippet(texto)[:80]
+    norm_text = _normalize_msg_snippet(texto)[:100]
 
     global _BOT_RECENT_OUTGOING
     _BOT_RECENT_OUTGOING = [item for item in _BOT_RECENT_OUTGOING if now - item[2] <= _BOT_SENT_TTL]
@@ -53,13 +56,23 @@ def is_recent_bot_text(destinatario: str, texto: str) -> bool:
     clean_dest = limpiar_digitos(destinatario)
     if len(clean_dest) > 10:
         clean_dest = clean_dest[-10:]
-    norm_text = _normalize_msg_snippet(texto)[:80]
+    norm_text = _normalize_msg_snippet(texto)[:100]
 
     for item_dest, item_text, ts in _BOT_RECENT_OUTGOING:
         if now - ts <= _BOT_SENT_TTL:
-            if item_text and (norm_text.startswith(item_text[:35]) or item_text.startswith(norm_text[:35])):
-                if not clean_dest or not item_dest or clean_dest == item_dest:
-                    return True
+            if not clean_dest or not item_dest or clean_dest == item_dest:
+                if item_text and norm_text:
+                    prefix_match = (
+                        norm_text.startswith(item_text[:25])
+                        or item_text.startswith(norm_text[:25])
+                    )
+                    substring_match = (
+                        len(norm_text) >= 20 and norm_text[:30] in item_text
+                    ) or (
+                        len(item_text) >= 20 and item_text[:30] in norm_text
+                    )
+                    if prefix_match or substring_match:
+                        return True
     return False
 
 

@@ -4,7 +4,7 @@ import time
 import re
 import asyncio
 import logging
-from typing import Dict, List, Optional, Callable, Awaitable
+from typing import Dict, List, Optional, Callable, Awaitable, Any
 
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
@@ -26,6 +26,8 @@ _SPAM_WARNED_AT: Dict[str, float] = {}
 _USER_MESSAGE_BUFFERS: Dict[str, List[str]] = {}
 _USER_DEBOUNCE_TASKS: Dict[str, asyncio.Task] = {}
 _USER_PUSH_NAMES: Dict[str, str] = {}
+_USER_PROCESSING: Dict[str, bool] = {}
+_USER_CALLBACKS: Dict[str, Any] = {}
 
 KEYWORDS_CLINICA = {
     "cita", "citas", "agendar", "agenda", "apartar", "programar", "horario", "horarios",
@@ -116,14 +118,17 @@ class ChatOrchestrator:
         push_name: str,
         process_callback: Callable[[str, str, str], Awaitable[None]],
     ) -> bool:
-        """Encola el mensaje aplicando debounce de 2 segundos para agrupar mensajes fragmentados.
-        Retorna True si fue encolado con éxito, o False si fue descartado por spam.
+        """Encola el mensaje aplicando un worker serializado por usuario con debounce.
+        Evita tareas en paralelo compitiendo en el lock y consolida todas las ráfagas
+        en una sola respuesta coherente sin duplicados.
         """
         if cls.is_user_spam_blocked(phone) or cls.check_and_trigger_spam(phone):
             return False
 
         if push_name:
             _USER_PUSH_NAMES[phone] = push_name.strip()
+
+        _USER_CALLBACKS[phone] = process_callback
 
         # Cancelar temporizador de inactividad mientras el usuario escribe
         inactivity_service.cancel(phone)
@@ -137,32 +142,60 @@ class ChatOrchestrator:
             dotnet_client.registrar_mensaje(chat_identifier=phone, rol="USUARIO", contenido=message)
         )
 
-        # Acumular en buffer
+        # Acumular en el buffer del usuario
         if phone not in _USER_MESSAGE_BUFFERS:
             _USER_MESSAGE_BUFFERS[phone] = []
         _USER_MESSAGE_BUFFERS[phone].append(message.strip())
 
-        # Cancelar tarea de debounce anterior si existía para renovar la ventana de 2s
+        # Si ya hay un worker procesando activamente para este usuario, el mensaje
+        # queda en el buffer y el worker lo tomará automáticamente al terminar su turno.
+        if _USER_PROCESSING.get(phone, False):
+            logger.debug(f"[Orchestrator] Usuario {phone} ya tiene worker activo. Mensaje acumulado en buffer.")
+            return True
+
+        # Cancelar tarea de debounce anterior si existía para reiniciar la ventana
         existing_task = _USER_DEBOUNCE_TASKS.get(phone)
         if existing_task and not existing_task.done():
             existing_task.cancel()
 
-        async def _flush_after_wait():
+        async def _run_user_worker():
             try:
                 await asyncio.sleep(DEBOUNCE_WAIT_SECONDS)
             except asyncio.CancelledError:
                 return
 
-            mensajes = _USER_MESSAGE_BUFFERS.pop(phone, [])
-            name = _USER_PUSH_NAMES.pop(phone, "")
             _USER_DEBOUNCE_TASKS.pop(phone, None)
+            _USER_PROCESSING[phone] = True
 
-            if mensajes:
-                texto_consolidado = " ".join(mensajes).strip()
-                logger.info(f"[Debounce Flush] Mensajes agrupados ({len(mensajes)}) para {phone}: '{texto_consolidado}'")
-                await process_callback(phone, texto_consolidado, name)
+            try:
+                while True:
+                    mensajes = _USER_MESSAGE_BUFFERS.pop(phone, [])
+                    if not mensajes:
+                        break
 
-        _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_flush_after_wait())
+                    name = _USER_PUSH_NAMES.get(phone, "")
+                    cb = _USER_CALLBACKS.get(phone)
+                    texto_consolidado = " ".join(mensajes).strip()
+
+                    if texto_consolidado and cb:
+                        logger.info(
+                            f"[Debounce Flush] Mensajes agrupados ({len(mensajes)}) para {phone}: '{texto_consolidado}'"
+                        )
+                        await cb(phone, texto_consolidado, name)
+
+                    # Si llegaron nuevos mensajes mientras el bot procesaba la respuesta,
+                    # esperamos un breve margen (1.0s) para consolidar ráfagas adicionales
+                    if _USER_MESSAGE_BUFFERS.get(phone):
+                        await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.error(f"[Orchestrator] Error en loop de procesamiento de {phone}: {e}", exc_info=True)
+            finally:
+                _USER_PROCESSING[phone] = False
+                # Si entraron mensajes justo al salir, relanzar worker
+                if _USER_MESSAGE_BUFFERS.get(phone):
+                    _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_run_user_worker())
+
+        _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_run_user_worker())
         return True
 
 

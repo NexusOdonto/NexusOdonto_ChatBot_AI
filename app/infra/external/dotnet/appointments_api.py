@@ -97,11 +97,12 @@ class DotNetAppointmentsApi:
             return []
         return await self.obtener_citas_paciente(str(patient_id))
 
-    async def cancelar_cita(self, cita_id: str, datos_cita: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def cancelar_cita(self, cita_id: str, datos_cita: Optional[Any] = None) -> Dict[str, Any]:
         """Cancela una cita por su ID usando PUT con el estado CANCELADA."""
         status_id = await catalog_api.obtener_appointment_status_id("CANCELADA")
 
-        if not datos_cita or not datos_cita.get("startsAt"):
+        motivo_extra = datos_cita if isinstance(datos_cita, str) else ""
+        if not isinstance(datos_cita, dict) or not datos_cita.get("startsAt"):
             try:
                 resp = await self.transport.request("GET", f"Appointments/{cita_id}")
                 if resp and resp.status_code == 200:
@@ -109,7 +110,7 @@ class DotNetAppointmentsApi:
             except Exception as e:
                 logger.debug(f"[AppointmentsApi] No se pudo obtener la cita {cita_id}: {e}")
 
-        datos_cita = datos_cita or {}
+        datos_cita = datos_cita if isinstance(datos_cita, dict) else {}
         starts_at = (
             datos_cita.get("startsAt")
             or datos_cita.get("fechaHoraInicio")
@@ -119,6 +120,12 @@ class DotNetAppointmentsApi:
             datos_cita.get("endsAt")
             or datos_cita.get("fechaHoraFin")
             or (datetime.utcnow() + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+        cancellation_reason = (
+            motivo_extra
+            or datos_cita.get("cancellationReason")
+            or "Cancelada por el paciente vía chatbot"
         )
 
         payload: Dict[str, Any] = {
@@ -131,7 +138,7 @@ class DotNetAppointmentsApi:
             "appointmentOriginId": str(datos_cita.get("appointmentOriginId") or "20000000-0000-0000-0000-000000000002"),
             "reasonForVisit": datos_cita.get("reasonForVisit") or "Cancelada vía Chatbot",
             "notes": datos_cita.get("notes"),
-            "cancellationReason": "Cancelada por el paciente vía chatbot",
+            "cancellationReason": cancellation_reason,
         }
 
         response = await self.transport.request("PUT", f"Appointments/{cita_id}", json=payload)
