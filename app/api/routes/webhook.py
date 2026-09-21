@@ -82,6 +82,16 @@ async def receive_whatsapp_message(request: Request):
         raw_json = await request.json()
         payload = EvolutionWebhookPayload(**raw_json)
 
+        # Solo mensajes nuevos. MESSAGES_UPDATE genera ecos/status que re-disparan fromMe
+        # y pueden clasificar respuestas del bot como "asesor humano".
+        event_name = (payload.event or raw_json.get("event") or "").strip().lower()
+        if event_name and event_name not in (
+            "messages.upsert",
+            "messages_upsert",
+            "message.upsert",
+        ):
+            return {"status": "ignored", "reason": f"event_{event_name}"}
+
         if not payload.data:
             return {"status": "ignored", "reason": "empty_data"}
 
@@ -118,8 +128,14 @@ async def receive_whatsapp_message(request: Request):
                             texto_asesor = cap
                             break
 
-            # Si el texto coincide con un mensaje saliente reciente del bot a ese destinatario, es un eco del bot
-            if is_recent_bot_text(destinatario, texto_asesor):
+            # Eco del bot: match por texto (± destino LID/teléfono). fromMe ya prueba origen local.
+            if texto_asesor and (
+                is_recent_bot_text(destinatario, texto_asesor)
+                or is_recent_bot_text(str(remote_jid_me or ""), texto_asesor)
+            ):
+                if msg_id_from_me:
+                    from app.clients.evolution_client import register_bot_message_id
+                    register_bot_message_id(str(msg_id_from_me))
                 logger.info(f"[fromMe-BotEcho] Eco de mensaje enviado por el bot hacia {destinatario} descartado.")
                 return {"status": "ignored", "reason": "self_message_bot_echo"}
 

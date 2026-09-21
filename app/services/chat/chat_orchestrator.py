@@ -147,24 +147,29 @@ class ChatOrchestrator:
             _USER_MESSAGE_BUFFERS[phone] = []
         _USER_MESSAGE_BUFFERS[phone].append(message.strip())
 
-        # Si ya hay un worker procesando activamente para este usuario, el mensaje
-        # queda en el buffer y el worker lo tomará automáticamente al terminar su turno.
-        if _USER_PROCESSING.get(phone, False):
-            logger.debug(f"[Orchestrator] Usuario {phone} ya tiene worker activo. Mensaje acumulado en buffer.")
-            return True
-
-        # Cancelar tarea de debounce anterior si existía para reiniciar la ventana
+        # Si ya hay un worker (debounce o procesando), solo acumular en buffer.
+        # Evita dos workers en paralelo que producen respuestas duplicadas (flood).
         existing_task = _USER_DEBOUNCE_TASKS.get(phone)
-        if existing_task and not existing_task.done():
-            existing_task.cancel()
+        if _USER_PROCESSING.get(phone, False) or (existing_task and not existing_task.done()):
+            if existing_task and not existing_task.done() and not _USER_PROCESSING.get(phone, False):
+                # Reiniciar solo la ventana de debounce cancelando el sleep pendiente
+                existing_task.cancel()
+            else:
+                logger.debug(
+                    f"[Orchestrator] Usuario {phone} ya tiene worker activo. Mensaje acumulado en buffer."
+                )
+                return True
 
         async def _run_user_worker():
             try:
                 await asyncio.sleep(DEBOUNCE_WAIT_SECONDS)
             except asyncio.CancelledError:
+                # Si se canceló para reiniciar debounce, otro worker será creado por enqueue.
                 return
 
             _USER_DEBOUNCE_TASKS.pop(phone, None)
+            if _USER_PROCESSING.get(phone, False):
+                return
             _USER_PROCESSING[phone] = True
 
             try:
@@ -183,17 +188,17 @@ class ChatOrchestrator:
                         )
                         await cb(phone, texto_consolidado, name)
 
-                    # Si llegaron nuevos mensajes mientras el bot procesaba la respuesta,
-                    # esperamos un breve margen (1.0s) para consolidar ráfagas adicionales
                     if _USER_MESSAGE_BUFFERS.get(phone):
                         await asyncio.sleep(1.0)
             except Exception as e:
                 logger.error(f"[Orchestrator] Error en loop de procesamiento de {phone}: {e}", exc_info=True)
             finally:
                 _USER_PROCESSING[phone] = False
-                # Si entraron mensajes justo al salir, relanzar worker
+                # Relanzar solo si hay buffer y nadie más ya encoló un worker
                 if _USER_MESSAGE_BUFFERS.get(phone):
-                    _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_run_user_worker())
+                    pending = _USER_DEBOUNCE_TASKS.get(phone)
+                    if not pending or pending.done():
+                        _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_run_user_worker())
 
         _USER_DEBOUNCE_TASKS[phone] = asyncio.create_task(_run_user_worker())
         return True

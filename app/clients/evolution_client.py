@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 # Esto previene que si Baileys emite el webhook fromMe antes de que termine el POST HTTP,
 # el webhook lo clasifique erróneamente como mensaje manual de asesor humano.
 _BOT_SENT_IDS: OrderedDict[str, float] = OrderedDict()
+# (dest_digits_or_empty, norm_text, monotonic_ts)
 _BOT_RECENT_OUTGOING: list[tuple[str, str, float]] = []
-_BOT_SENT_TTL = 120  # segundos hasta descartar
+_BOT_SENT_TTL = 180  # segundos hasta descartar
 
 
 def _normalize_msg_snippet(text: str) -> str:
@@ -31,49 +32,127 @@ def _normalize_msg_snippet(text: str) -> str:
     return re.sub(r"\s+", " ", norm).strip()
 
 
+def _dest_fingerprints(destinatario: str) -> list[str]:
+    """Huellas de destino tolerantes a LID vs @s.whatsapp.net (últimos 10 dígitos + full)."""
+    from app.services.whatsapp_identity import limpiar_digitos
+
+    digits = limpiar_digitos(destinatario or "")
+    if not digits:
+        return []
+    fps = {digits}
+    if len(digits) > 10:
+        fps.add(digits[-10:])
+    if len(digits) > 12:
+        fps.add(digits[-12:])
+    return list(fps)
+
+
+def _texts_match(norm_a: str, norm_b: str) -> bool:
+    """Coincide prefijo/subcadena con umbral mínimo para no marcar ecos cortos ambiguos."""
+    if not norm_a or not norm_b:
+        return False
+    if norm_a == norm_b:
+        return True
+    # Mensajes cortos: solo igualdad o uno es prefijo exacto del otro (min 12 chars)
+    shorter, longer = (norm_a, norm_b) if len(norm_a) <= len(norm_b) else (norm_b, norm_a)
+    if len(shorter) < 24:
+        return len(shorter) >= 12 and longer.startswith(shorter)
+    return (
+        norm_a.startswith(norm_b[:24])
+        or norm_b.startswith(norm_a[:24])
+        or norm_a[:32] in norm_b
+        or norm_b[:32] in norm_a
+    )
+
+
 def register_outgoing_bot_message(destinatario: str, texto: str) -> None:
-    """Registra preventivamente el mensaje antes de enviarlo por HTTP para evitar condiciones de carrera."""
+    """Registra preventivamente el mensaje antes de enviarlo por HTTP para evitar condiciones de carrera.
+
+    Guarda varias huellas del destinatario (LID y teléfono) para que el eco fromMe
+    coincida aunque Evolution entregue otro JID en el webhook.
+    """
     if not texto:
         return
     now = time.monotonic()
-    from app.services.whatsapp_identity import limpiar_digitos
-    clean_dest = limpiar_digitos(destinatario)
-    if len(clean_dest) > 10:
-        clean_dest = clean_dest[-10:]
-    norm_text = _normalize_msg_snippet(texto)[:100]
+    norm_text = _normalize_msg_snippet(texto)[:120]
+    if not norm_text:
+        return
+
+    fingerprints = _dest_fingerprints(destinatario) or [""]
 
     global _BOT_RECENT_OUTGOING
-    _BOT_RECENT_OUTGOING = [item for item in _BOT_RECENT_OUTGOING if now - item[2] <= _BOT_SENT_TTL]
-    _BOT_RECENT_OUTGOING.append((clean_dest, norm_text, now))
+    _BOT_RECENT_OUTGOING = [
+        item for item in _BOT_RECENT_OUTGOING if now - item[2] <= _BOT_SENT_TTL
+    ]
+    for fp in fingerprints:
+        _BOT_RECENT_OUTGOING.append((fp, norm_text, now))
+    # Entrada sin destino: fallback de coincidencia solo por texto (fromMe ya prueba origen local)
+    _BOT_RECENT_OUTGOING.append(("", norm_text, now))
+    logger.debug(
+        "[Evolution API] Outgoing registrado dest=%s fps=%s snippet=%r",
+        destinatario,
+        fingerprints,
+        norm_text[:40],
+    )
 
 
 def is_recent_bot_text(destinatario: str, texto: str) -> bool:
-    """Retorna True si un mensaje con texto coincidente fue enviado recientemente por el bot hacia ese destinatario."""
+    """Retorna True si un mensaje con texto coincidente fue enviado recientemente por el bot.
+
+    Si el destinatario no coincide (LID vs teléfono), aún puede hacer match por texto
+    contra entradas registradas sin destino — necesario porque fromMe ya garantiza
+    que el mensaje salió del dispositivo vinculado.
+    """
     if not texto:
         return False
     now = time.monotonic()
-    from app.services.whatsapp_identity import limpiar_digitos
-    clean_dest = limpiar_digitos(destinatario)
-    if len(clean_dest) > 10:
-        clean_dest = clean_dest[-10:]
-    norm_text = _normalize_msg_snippet(texto)[:100]
+    norm_text = _normalize_msg_snippet(texto)[:120]
+    if not norm_text:
+        return False
+
+    dest_fps = set(_dest_fingerprints(destinatario))
 
     for item_dest, item_text, ts in _BOT_RECENT_OUTGOING:
-        if now - ts <= _BOT_SENT_TTL:
-            if not clean_dest or not item_dest or clean_dest == item_dest:
-                if item_text and norm_text:
-                    prefix_match = (
-                        norm_text.startswith(item_text[:25])
-                        or item_text.startswith(norm_text[:25])
-                    )
-                    substring_match = (
-                        len(norm_text) >= 20 and norm_text[:30] in item_text
-                    ) or (
-                        len(item_text) >= 20 and item_text[:30] in norm_text
-                    )
-                    if prefix_match or substring_match:
-                        return True
+        if now - ts > _BOT_SENT_TTL:
+            continue
+        if not item_text or not _texts_match(norm_text, item_text):
+            continue
+        # Match por destino (huellas) o entrada comodín sin destino
+        if not item_dest or not dest_fps or item_dest in dest_fps:
+            return True
     return False
+
+
+def extract_evolution_message_id(resp_data: Any) -> Optional[str]:
+    """Extrae key.id de respuestas Evolution (formas anidadas variables entre versiones)."""
+    if not isinstance(resp_data, dict):
+        return None
+
+    candidates: list[Any] = [
+        (resp_data.get("key") or {}).get("id") if isinstance(resp_data.get("key"), dict) else None,
+        resp_data.get("id"),
+        resp_data.get("messageId"),
+        resp_data.get("message_id"),
+    ]
+    data = resp_data.get("data")
+    if isinstance(data, dict):
+        key = data.get("key")
+        if isinstance(key, dict):
+            candidates.append(key.get("id"))
+        candidates.append(data.get("id"))
+        candidates.append(data.get("messageId"))
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("key"), dict):
+            candidates.append(msg["key"].get("id"))
+
+    key = resp_data.get("key")
+    if isinstance(key, dict):
+        candidates.append(key.get("id"))
+
+    for cand in candidates:
+        if cand is not None and str(cand).strip():
+            return str(cand).strip()
+    return None
 
 
 def register_bot_message_id(msg_id: str) -> None:
@@ -81,7 +160,6 @@ def register_bot_message_id(msg_id: str) -> None:
     if not msg_id:
         return
     now = time.monotonic()
-    # Limpiar entradas viejas
     to_remove = [k for k, ts in _BOT_SENT_IDS.items() if now - ts > _BOT_SENT_TTL]
     for k in to_remove:
         del _BOT_SENT_IDS[k]
@@ -153,9 +231,11 @@ class EvolutionClient:
 
         from app.domain.formatters.whatsapp_formatter import formatear_para_whatsapp
         texto_formateado = formatear_para_whatsapp(texto)
-        
-        # Registrar preventivamente para que el webhook fromMe no lo clasifique como asesor
-        register_outgoing_bot_message(target_number, texto_formateado)
+
+        # Registrar preventivamente (teléfono original + destino Evolution/LID) para el eco fromMe
+        register_outgoing_bot_message(numero, texto_formateado)
+        if target_number and target_number != numero:
+            register_outgoing_bot_message(target_number, texto_formateado)
 
         payload = {
             "number": target_number,
@@ -173,15 +253,14 @@ class EvolutionClient:
                 response.raise_for_status()
                 logger.info(f"[Evolution API] Mensaje enviado exitosamente a {numero}")
                 resp_data = response.json()
-                # Registrar el ID del mensaje para ignorar el eco fromMe del webhook
-                sent_id = None
-                if isinstance(resp_data, dict):
-                    sent_id = (
-                        resp_data.get("key", {}).get("id")
-                        or resp_data.get("id")
-                    )
+                sent_id = extract_evolution_message_id(resp_data)
                 if sent_id:
-                    register_bot_message_id(str(sent_id))
+                    register_bot_message_id(sent_id)
+                else:
+                    logger.warning(
+                        "[Evolution API] sendText OK pero sin key.id parseable; eco fromMe dependerá de match por texto. keys=%s",
+                        list(resp_data.keys()) if isinstance(resp_data, dict) else type(resp_data),
+                    )
                 return resp_data
             except httpx.HTTPStatusError as e:
                 logger.error(f"[Evolution API] Error HTTP {e.response.status_code} al enviar mensaje: {e.response.text}")
@@ -339,7 +418,19 @@ class EvolutionClient:
                 if resp.status_code == 200:
                     data = resp.json()
                     wh = data.get("webhook") if isinstance(data, dict) and isinstance(data.get("webhook"), dict) else data
-                    if isinstance(wh, dict) and wh.get("url") == webhook_url and wh.get("enabled"):
+                    events = []
+                    if isinstance(wh, dict):
+                        events = wh.get("events") or []
+                    # Reconfigurar si falta URL o si aún incluye MESSAGES_UPDATE (ecos fromMe / flood)
+                    events_upper = {str(e).upper() for e in events}
+                    upsert_only_ok = (
+                        isinstance(wh, dict)
+                        and wh.get("url") == webhook_url
+                        and wh.get("enabled")
+                        and "MESSAGES_UPSERT" in events_upper
+                        and "MESSAGES_UPDATE" not in events_upper
+                    )
+                    if upsert_only_ok:
                         logger.debug("[Evolution API] Webhook ya configurado correctamente para %s", self.instance_name)
                         return True
 
@@ -354,9 +445,9 @@ class EvolutionClient:
                         "headers": headers_dict,
                         "byEvents": False,
                         "base64": True,
+                        # Solo UPSERT: UPDATE reenvía fromMe y provoca spam de ecos
                         "events": [
                             "MESSAGES_UPSERT",
-                            "MESSAGES_UPDATE",
                             "CONNECTION_UPDATE",
                         ],
                     }
