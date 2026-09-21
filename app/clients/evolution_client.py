@@ -11,12 +11,56 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# ─── IDs de mensajes enviados por el bot ──────────────────────────────────────────────
-# Guardamos el key.id de cada mensaje que el bot envía a través de Evolution.
-# Cuando el webhook recibe el eco fromMe con ese mismo ID, lo reconoce como bot
-# y no lo registra como mensaje de asesor humano.
+# ─── IDs y textos de mensajes enviados por el bot ────────────────────────────────────
+# Guardamos el key.id y el snippet de texto de cada mensaje saliente del bot.
+# Esto previene que si Baileys emite el webhook fromMe antes de que termine el POST HTTP,
+# el webhook lo clasifique erróneamente como mensaje manual de asesor humano.
 _BOT_SENT_IDS: OrderedDict[str, float] = OrderedDict()
-_BOT_SENT_TTL = 120  # segundos hasta descartar el ID
+_BOT_RECENT_OUTGOING: list[tuple[str, str, float]] = []
+_BOT_SENT_TTL = 120  # segundos hasta descartar
+
+
+def _normalize_msg_snippet(text: str) -> str:
+    if not text:
+        return ""
+    import re
+    cleaned = re.sub(r"[*_~`\"']", "", text.strip().lower())
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def register_outgoing_bot_message(destinatario: str, texto: str) -> None:
+    """Registra preventivamente el mensaje antes de enviarlo por HTTP para evitar condiciones de carrera."""
+    if not texto:
+        return
+    now = time.monotonic()
+    from app.services.whatsapp_identity import limpiar_digitos
+    clean_dest = limpiar_digitos(destinatario)
+    if len(clean_dest) > 10:
+        clean_dest = clean_dest[-10:]
+    norm_text = _normalize_msg_snippet(texto)[:80]
+
+    global _BOT_RECENT_OUTGOING
+    _BOT_RECENT_OUTGOING = [item for item in _BOT_RECENT_OUTGOING if now - item[2] <= _BOT_SENT_TTL]
+    _BOT_RECENT_OUTGOING.append((clean_dest, norm_text, now))
+
+
+def is_recent_bot_text(destinatario: str, texto: str) -> bool:
+    """Retorna True si un mensaje con texto coincidente fue enviado recientemente por el bot hacia ese destinatario."""
+    if not texto:
+        return False
+    now = time.monotonic()
+    from app.services.whatsapp_identity import limpiar_digitos
+    clean_dest = limpiar_digitos(destinatario)
+    if len(clean_dest) > 10:
+        clean_dest = clean_dest[-10:]
+    norm_text = _normalize_msg_snippet(texto)[:80]
+
+    for item_dest, item_text, ts in _BOT_RECENT_OUTGOING:
+        if now - ts <= _BOT_SENT_TTL:
+            if item_text and (norm_text.startswith(item_text[:35]) or item_text.startswith(norm_text[:35])):
+                if not clean_dest or not item_dest or clean_dest == item_dest:
+                    return True
+    return False
 
 
 def register_bot_message_id(msg_id: str) -> None:
@@ -97,6 +141,9 @@ class EvolutionClient:
         from app.domain.formatters.whatsapp_formatter import formatear_para_whatsapp
         texto_formateado = formatear_para_whatsapp(texto)
         
+        # Registrar preventivamente para que el webhook fromMe no lo clasifique como asesor
+        register_outgoing_bot_message(target_number, texto_formateado)
+
         payload = {
             "number": target_number,
             "options": {

@@ -758,8 +758,8 @@ def consultar_cita_por_cedula_tool(cedula: str) -> str:
     Consulta todas las citas programadas de un paciente usando su número de cédula o documento de identidad.
     Muestra: nombre del paciente, cédula, doctor asignado, tratamiento, fecha, horario y estado de cada cita.
     
-    Usa esta herramienta cuando el usuario pregunte por sus citas, quiera ver el estado de su agendamiento
-    o necesite el ID de una cita para modificarla o cancelarla.
+    Usa esta herramienta ÚNICAMENTE cuando el usuario realice una consulta general sobre sus citas ("¿qué citas tengo?", "¿cuándo es mi cita?").
+    NUNCA uses esta herramienta si el usuario ya expresó la intención de cancelar o reprogramar su cita; en esos casos debes usar DIRECTAMENTE cancelar_cita_tool o modificar_cita_tool.
     Si el usuario no ha proporcionado su cédula, pídesela antes de invocar esta herramienta.
     """
     return _run_sync(_consultar_cita_por_cedula_impl(cedula))
@@ -769,12 +769,14 @@ def consultar_cita_por_cedula_tool(cedula: str) -> str:
 def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     """
     Cancela una cita activa de un paciente verificando su cédula.
+    Si el paciente tiene una única cita activa, el sistema la cancelará automáticamente de inmediato.
+    Si tiene múltiples citas activas y no especificó cuál, el sistema listará sus opciones y le preguntará cuál desea cancelar.
     
     Parámetros:
     - cedula: Número de cédula o documento de identidad del paciente (OBLIGATORIO).
-    - cita_id: (Opcional) Número de la cita que el paciente desea cancelar (ej: '1', '2', 'primera', 'cita 1') o ID de la cita. Si el paciente tiene solo una cita activa, el sistema la identificará automáticamente sin necesidad de especificar este parámetro.
+    - cita_id: (Opcional) Número o selector de la cita que el paciente desea cancelar (ej: '1', '2', 'primera', 'cita 1') o ID de la cita si el usuario lo indicó. Si se omite, el sistema la resolverá automáticamente.
     
-    Usa esta herramienta SOLAMENTE tras haber confirmado con el usuario que realmente desea cancelar su cita.
+    Usa esta herramienta DE INMEDIATO tan pronto el usuario manifieste que desea cancelar su cita y proporcione su número de cédula. NO llames a consultar_cita_por_cedula_tool antes.
     """
     return _run_sync(_cancelar_cita_impl(cedula, cita_id))
 
@@ -796,9 +798,10 @@ def modificar_cita_tool(
     - nuevo_profesional_id: (Opcional) ID o nombre del nuevo profesional si desea cambiarlo.
     
     IMPORTANTE: Antes de proponer o confirmar un nuevo horario, consulta SIEMPRE la disponibilidad con consultar_disponibilidad_tool para asegurar que el especialista no esté en horario de almuerzo (ej. 12:00 PM a 2:00 PM) ni fuera de turno.
-    Usa esta herramienta SOLAMENTE después de presentar la propuesta de cambio y obtener confirmación explícita del usuario.
+    Usa esta herramienta DE INMEDIATO una vez acordada la nueva fecha/horario y teniendo la cédula del paciente. NO llames a consultar_cita_por_cedula_tool antes.
     """
     return _run_sync(_modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id))
+
 
 
 @tool

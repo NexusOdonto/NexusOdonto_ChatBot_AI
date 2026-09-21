@@ -101,6 +101,8 @@ services:
     depends_on:
       - qdrant-db
       - bot-memory-db
+    volumes:
+      - ./app:/app/app
     networks:
       - odontologia_network
 

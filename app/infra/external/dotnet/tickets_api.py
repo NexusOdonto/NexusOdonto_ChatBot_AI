@@ -360,12 +360,27 @@ class DotNetTicketsApi:
             )
             if not conv_id:
                 return None
-            return await self.guardar_mensaje_conversacion(
+            res = await self.guardar_mensaje_conversacion(
                 conversation_id=conv_id,
                 rol=rol,
                 contenido=contenido,
                 rag_confidence=rag_confidence,
             )
+
+            # Si el usuario escribió, asegurar que la conversación quede activa y con timestamp al día en recepción
+            if str(rol).upper().strip() in ("USUARIO", "USER", "HUMAN"):
+                try:
+                    payload_touch = {
+                        "conversationStatusId": self.STATUS_ACTIVA,
+                        "closedAt": None,
+                    }
+                    asyncio.create_task(
+                        self.transport.request("PUT", f"ChatbotConversations/{conv_id}", json=payload_touch)
+                    )
+                except Exception as e_touch:
+                    logger.debug(f"[TicketsApi] No se pudo refrescar timestamp de conversación {conv_id}: {e_touch}")
+
+            return res
         except Exception as e:
             logger.error(f"[TicketsApi] Error registrando mensaje para {chat_identifier}: {e}")
             return None

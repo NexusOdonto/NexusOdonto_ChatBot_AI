@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
-from app.clients.evolution_client import is_bot_message_id
+from app.clients.evolution_client import is_bot_message_id, is_recent_bot_text
 from app.services.semantic_cache import purgar_cache_semantico
 from app.services.chat.chat_orchestrator import (
     chat_orchestrator,
@@ -117,6 +117,11 @@ async def receive_whatsapp_message(request: Request):
                         if cap:
                             texto_asesor = cap
                             break
+
+            # Si el texto coincide con un mensaje saliente reciente del bot a ese destinatario, es un eco del bot
+            if is_recent_bot_text(destinatario, texto_asesor):
+                logger.info(f"[fromMe-BotEcho] Eco de mensaje enviado por el bot hacia {destinatario} descartado.")
+                return {"status": "ignored", "reason": "self_message_bot_echo"}
 
             if texto_asesor and destinatario:
                 asyncio.create_task(registrar_mensaje_asesor(destinatario, texto_asesor))
