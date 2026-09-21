@@ -1,73 +1,79 @@
-#  NexusOdonto ChatBot AI — Asistente Clínico Inteligente
+# 🦷 NexusOdonto ChatBot AI — Asistente Clínico Inteligente
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.112.1-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2.14-blue?style=flat-square)](https://langchain-ai.github.io/langgraph/)
-[![LangChain](https://img.shields.io/badge/LangChain-0.2.14-1C3C3C?style=flat-square)](https://www.langchain.com/)
-[![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-dc2626?style=flat-square&logo=qdrant)](https://qdrant.tech/)
-[![Evolution API](https://img.shields.io/badge/Evolution_API-WhatsApp_Baileys-25D366?style=flat-square&logo=whatsapp)](https://evolution-api.com/)
+[![Clean Architecture](https://img.shields.io/badge/Architecture-Clean%20%2F%20Layered-orange?style=flat-square)](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html)
+[![Tests](https://img.shields.io/badge/Tests-41%20Passing%20(100%25)-brightgreen?style=flat-square)](tests/)
+[![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB%20%2B%20Reranker-dc2626?style=flat-square&logo=qdrant)](https://qdrant.tech/)
+[![Evolution API](https://img.shields.io/badge/Evolution_API-WhatsApp_Native-25D366?style=flat-square&logo=whatsapp)](https://evolution-api.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15_Checkpointer-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org/)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python)](https://www.python.org/)
 
-**NexusOdonto ChatBot AI** es un agente conversacional autónomo de grado clínico diseñado para operar en **WhatsApp** mediante **Evolution API**. Está construido con **FastAPI**, **LangGraph** y un motor **RAG híbrido (Qdrant + Re-ranking)**, integrándose bidireccionalmente con el backend hospitalario en **.NET / Oracle Database**.
+**NexusOdonto ChatBot AI** es un agente conversacional autónomo de grado clínico diseñado para operar en **WhatsApp** mediante **Evolution API**. Está estructurado bajo **Arquitectura Limpia (Clean Architecture)** con desacoplamiento estricto en capas de Dominio, Aplicación e Infraestructura, operando sobre **FastAPI**, **LangGraph** y un motor **RAG híbrido (Qdrant + Cross-Encoder Re-ranking)**, con integración bidireccional al backend hospitalario en **.NET / Oracle Database**.
 
-El sistema permite a los pacientes consultar servicios y tarifas, verificar preparación previa y cuidados postoperatorios, agendar, reprogramar o cancelar citas en tiempo real, interactuar mediante texto o **notas de voz (audio)**, y recibir recordatorios automatizados.
+El sistema permite a los pacientes consultar servicios y tarifas, verificar preparación previa y cuidados postoperatorios, agendar, reprogramar o cancelar citas en tiempo real, interactuar mediante texto o **notas de voz (audio)**, y recibir recordatorios automatizados con simulación de presencia (*"Escribiendo..."*) y formato nativo optimizado para WhatsApp.
 
 ---
 
-##  Tabla de Contenidos
+## 📋 Tabla de Contenidos
 
 1. [¿Qué es y Para Qué Sirve?](#-qué-es-y-para-qué-sirve)
 2. [Beneficios y Utilidad del Chatbot](#-beneficios-y-utilidad-del-chatbot)
 3. [Arquitectura y Cómo Funciona](#-arquitectura-y-cómo-funciona)
-   - [Diagrama de Flujo y Componentes](#diagrama-de-flujo-y-componentes)
+   - [Diagrama de Flujo por Capas](#diagrama-de-flujo-por-capas)
    - [El Grafo de LangGraph](#el-grafo-de-langgraph)
    - [Ciclo de Vida del Mensaje](#ciclo-de-vida-del-mensaje)
-4. [Estructura del Proyecto](#-estructura-del-proyecto)
+4. [Estructura del Proyecto (Clean Architecture)](#-estructura-del-proyecto-clean-architecture)
 5. [Herramientas del Agente (Tools)](#-herramientas-del-agente-tools)
 6. [Triage de Emergencias y Seguridad](#-triage-de-emergencias-y-seguridad)
-7. [Requisitos Previos y Variables de Entorno](#-requisitos-previos-y-variables-de-entorno)
-8. [Guía de Instalación y Uso](#-guía-de-instalación-y-uso)
+7. [Experiencia Nativa de WhatsApp](#-experiencia-nativa-de-whatsapp)
+8. [Requisitos Previos y Variables de Entorno](#-requisitos-previos-y-variables-de-entorno)
+9. [Guía de Instalación y Uso](#-guía-de-instalación-y-uso)
    - [Opción 1: Docker Compose (Recomendada)](#opción-1-despliegue-con-docker-compose-recomendada)
    - [Opción 2: Ejecución Local en Desarrollo](#opción-2-ejecución-local-en-desarrollo)
    - [Carga de Conocimiento Clínico (RAG)](#carga-de-conocimiento-clínico-rag)
    - [Vinculación de WhatsApp (Panel QR)](#vinculación-de-whatsapp-panel-qr)
-9. [Comandos y Atajos del Usuario](#-comandos-y-atajos-del-usuario)
-10. [Endpoints Principales de la API](#-endpoints-principales-de-la-api)
+10. [Ejecución de Pruebas Automatizadas](#-ejecución-de-pruebas-automatizadas)
+11. [Comandos y Atajos del Usuario](#-comandos-y-atajos-del-usuario)
+12. [Endpoints Principales de la API](#-endpoints-principales-de-la-api)
 
 ---
 
-##   **NexusOdonto ChatBot AI**?
+## 💡 ¿Qué es y Para Qué Sirve?
 
-- Actúa como un **recepcionista virtual 24/7** con lenguaje natural humano, empático y profesional.
-- **Acceso directo a la agenda médica:** interactúa con el backend en .NET para consultar huecos libres reales, crear citas en firme y cancelarlas sin solapamientos.
-- **Base de Conocimiento Clínico Verificada (RAG):** responde preguntas sobre tratamientos, indicaciones prequirúrgicas y cuidados postoperatorios anclado estrictamente a guías clínicas aprobadas (anti-alucinación).
-- **Procesamiento de Voz:** transcribe notas de voz de WhatsApp automáticamente mediante modelos de transcripción (Whisper) para pacientes que prefieren hablar en lugar de escribir.
-- **Triage de Emergencias:** detecta situaciones de riesgo (hemorragias abundantes, asfixia, flemón con fiebre, traumatismo mandibular) y deriva de inmediato a la línea telefónica y centro de urgencias.
+- **Recepcionista virtual 24/7:** Atención cálida, humana y profesional sin menús robóticos fríos.
+- **Acceso directo a la agenda médica:** Interacción en tiempo real con .NET para consultar turnos libres, bloquear franjas de almuerzo (12:00 PM a 2:00 PM) y registrar o cancelar citas sin solapamientos.
+- **Base de Conocimiento Clínico Verificada (RAG Robusto):** 24 guías odontológicas oficiales, expansor de modismos coloquiales y re-ranking semántico para responder dudas clínicas con precisión anti-alucinación.
+- **Procesamiento de Voz:** Transcribe notas de voz automáticamente mediante Whisper para pacientes que prefieren hablar.
+- **Triage de Emergencias Odontológicas:** Detección inmediata de hemorragias, dolor agudo, flemón con fiebre y traumas maxilofaciales con derivación prioritaria.
+- **Privacidad y Habeas Data (Ley 1581):** Cero asunción de identidad; validación estricta de cédula antes de revelar o procesar citas.
+- **Presencia en Vivo:** Simulación de estado *"Escribiendo..."* (`composing`) y *"Grabando audio..."* (`recording`) en tiempo real mientras el bot procesa.
 
 ---
 
-##  Beneficios y Utilidad del Chatbot
+## 🏆 Beneficios y Utilidad del Chatbot
 
 | Beneficio | Impacto en la Clínica y el Paciente |
 | :--- | :--- |
 | **Disponibilidad 24/7** | Los pacientes pueden agendar citas a las 11:00 PM o domingos sin esperar a horario hábil. |
 | **Cero Ausentismo (No-Show)** | Cron automático con recordatorios el día anterior (8:00 AM) y alerta de confirmación 30 minutos antes. |
-| **Reducción de Espera** | Respuestas inmediatas (< 2s) apoyadas por **Caché Semántico** en Qdrant. |
+| **Reducción de Espera** | Respuestas inmediatas (< 2s) apoyadas por **Caché Semántico** en Qdrant (0 tokens consumidos). |
 | **Soporte de Notas de Voz** | Ideal para personas mayores o usuarios en movimiento que envían audios por WhatsApp. |
-| **Integración Segura** | No expone la base de datos Oracle directamente; consume la API REST de .NET con tokens de servicio. |
+| **Reglas Clínicas Estrictas** | Cero citas en horario de almuerzo de doctores (12-2 PM) y redondeo a bloques exactos de 30 minutos. |
 | **Escalamiento a Humanos** | Si el paciente solicita un humano o el bot no tiene suficiente certeza clínica, genera un ticket en recepción y pausa la intervención del bot. |
+| **Purga Inteligente de Inactividad** | Tras 15 minutos sin respuesta, cierra la sesión ordenadamente, detecta si quedó una cita a medias y notifica al usuario sin dejar sesiones huérfanas. |
 
 ---
 
-##  Arquitectura y Cómo Funciona
+## 🏛️ Arquitectura y Cómo Funciona
 
-### Diagrama de Flujo y Componentes
+### Diagrama de Flujo por Capas
 
 ```mermaid
 flowchart TD
     subgraph WhatsApp["Canal Paciente"]
-        User[" Paciente (WhatsApp)"]
-        Voice[" Nota de Voz / Texto"]
+        User["👤 Paciente (WhatsApp)"]
+        Voice["🎙️ Nota de Voz / 💬 Texto"]
         User --> Voice
     end
 
@@ -76,23 +82,31 @@ flowchart TD
         Voice --> Evo
     end
 
-    subgraph FastAPI_Server["NexusOdonto Bot (FastAPI)"]
-        Webhook["POST /webhook/whatsapp\n(Deduplicación + Locks + Auth)"]
+    subgraph Presentation["Capa de Presentación / API"]
+        Webhook["POST /webhook/whatsapp\n(Deduplicación 90s + Auth)"]
+        QRRoute["GET /qr (Panel Interactivo)"]
+        HealthRoute["GET /health/deep (Diagnóstico)"]
         Evo -->|Webhook JSON| Webhook
-
-        AudioSvc["Audio Service\n(Descarga + Whisper)"]
-        SemCache["Caché Semántico\n(Qdrant Cosine >= 0.90)"]
-        
-        Webhook -->|Es Audio| AudioSvc --> SemCache
-        Webhook -->|Es Texto| SemCache
     end
 
-    subgraph LangGraph_Flow["Orquestador LangGraph"]
-        CheckEmerg["1. emergency_check_node\n(Regex + LLM Triage)"]
-        CheckSec["2. security_check_node\n(Prompt Injection & Estado)"]
+    subgraph Application["Capa de Aplicación / Servicios"]
+        Orchestrator["ChatOrchestrator\n(Debounce 2s + Anti-Spam + Presence)"]
+        MsgProc["MessageProcessor\n(Orquestación Grafo + Control TTL 15m)"]
+        AudioSvc["AudioService\n(Descarga + Whisper)"]
+        SemCache["Caché Semántico\n(Qdrant Cosine >= 0.90)"]
+        Inactivity["InactivityService\n(Sweeper 60s + Detección Cita Incompleta)"]
+        
+        Webhook --> Orchestrator --> MsgProc
+        MsgProc --> AudioSvc
+        MsgProc --> SemCache
+    end
+
+    subgraph LangGraph_Flow["Orquestador Conversacional (LangGraph)"]
+        CheckEmerg["1. emergency_check\n(30+ Patrones Regex + Triage)"]
+        CheckSec["2. security_check\n(Prompt Injection & Estado)"]
         Compress["3. summarize_conversation\n(Compresión de Historial)"]
-        Chatbot["4. chatbot_node\n(OpenAI / Gemini con Tools)"]
-        ToolsNode["5. tools (Ejecutor de Herramientas)"]
+        Chatbot["4. chatbot_node\n(LLM con Formato WhatsApp Nativo)"]
+        ToolsNode["5. tools (Ejecutor de Herramientas Atómicas)"]
 
         SemCache -->|Miss| CheckEmerg
         CheckEmerg -->|Normal| CheckSec
@@ -101,47 +115,50 @@ flowchart TD
         Chatbot -->|Requiere Acción| ToolsNode --> Chatbot
     end
 
-    subgraph External_Services["Sistemas Externos y Almacenamiento"]
-        Qdrant[("Qdrant Vector DB\n(Conocimiento RAG)")]
-        Postgres[("PostgreSQL\n(Memoria LangGraph)")]
-        DotNetAPI["Backend .NET REST API\n(Agenda, Citas, Pacientes)"]
-        OracleDB[("Oracle Database\n(Datos Maestros)")]
-
-        ToolsNode -->|Búsqueda Semántica| Qdrant
-        ToolsNode -->|Agendar / Consultar / Cancelar| DotNetAPI
-        DotNetAPI --> OracleDB
-        FastAPI_Server <-->|Checkpoints & Threads| Postgres
+    subgraph Domain["Capa de Dominio Puro (0 Dependencias)"]
+        Rules["Reglas Clínicas (Schedule Rules)\nBloqueo Almuerzo 12-2 PM"]
+        Habeas["Habeas Data (Ley 1581)\nValidación Cédula >= 7 dígitos"]
+        Formatter["WhatsApp Formatter\nLimpieza ** a *, Viñetas y Enlaces"]
+        KB["Base de Conocimiento (24 Guías)\nExpansor de Consultas Coloquiales"]
     end
 
-    CheckEmerg -->|🚨 Emergencia Severa| UrgenciasMsg["🚨 Alerta Inmediata + Escalar a Recepción"]
-    SemCache -->|Hit| DirectResponse["Respuesta Instantánea"]
-    Chatbot -->|Respuesta Final| Evo --> User
-    UrgenciasMsg --> Evo
-    DirectResponse --> Evo
+    subgraph Infrastructure["Capa de Infraestructura Externa"]
+        Qdrant[("Qdrant Vector DB\nRAG + Cross-Encoder Re-ranker")]
+        Postgres[("PostgreSQL\nMemoria LangGraph & Checkpoints")]
+        DotNetAPI["Backend .NET REST API\n(Appointments, Patients, Catalog, Tickets)"]
+        OracleDB[("Oracle Database\nDatos Maestros Clínicos")]
+
+        ToolsNode --> DotNetAPI --> OracleDB
+        ToolsNode --> Qdrant
+        MsgProc <--> Postgres
+    end
+
+    Chatbot -->|Texto en Crudo| Formatter
+    Formatter -->|Texto Nativo WhatsApp| Evo --> User
 ```
 
 ### El Grafo de LangGraph
 
-El flujo de procesamiento conversacional está compuesto por un **`StateGraph`** con memoria persistente en PostgreSQL:
-
-1. **`emergency_check`**: Evalúa si el paciente describe síntomas de riesgo vital o emergencia odontológica crítica. Si se detecta, se interrumpe el flujo normal, se envía la advertencia médica con el teléfono de urgencias y se escala.
+1. **`emergency_check`**: Evalúa si el paciente describe síntomas de riesgo vital o urgencia médica severa. Si se detecta, interrumpe el flujo, envía la advertencia con el teléfono de urgencias y escala.
 2. **`security_check`**: Analiza intentos de inyección de prompts, verifica si la conversación está bloqueada o si ya fue escalada a un asesor humano.
-3. **`summarize_conversation`**: Si la conversación supera un umbral de mensajes (`SUMMARY_THRESHOLD`), comprime el historial mediante un resumen estructurado para optimizar tokens y evitar exceder la ventana de contexto.
-4. **`chatbot`**: Nodo central con el modelo LLM configurado (Google Gemini o OpenAI) con *Function Calling*. Analiza el mensaje, decide qué herramientas invocar o formula la respuesta final.
-5. **`tools`**: Ejecuta de forma determinista las herramientas invocadas y devuelve los resultados estructurados al chatbot.
+3. **`summarize_conversation`**: Si la conversación supera el umbral de mensajes (`SUMMARY_THRESHOLD`), comprime el historial mediante un resumen estructurado para optimizar tokens.
+4. **`chatbot`**: Nodo central con el modelo LLM configurado (Google Gemini u OpenAI) con *Function Calling*. Analiza el mensaje, decide qué herramientas invocar y formula la respuesta con estilo 100% humano y empático.
+5. **`tools`**: Ejecuta de forma determinista las herramientas atómicas invocadas y devuelve los resultados estructurados al chatbot.
 
 ### Ciclo de Vida del Mensaje
 
 1. **Recepción:** Evolution API recibe el mensaje de WhatsApp y dispara un evento `MESSAGES_UPSERT` hacia `/webhook/whatsapp`.
-2. **Deduplicación y Bloqueo:** El webhook filtra mensajes duplicados (TTL de 90s) y adquiere un candado asíncrono (`asyncio.Lock`) por cada chat para evitar respuestas desordenadas si el usuario envía mensajes seguidos.
-3. **Audio a Texto:** Si el mensaje es una nota de voz (`audioMessage`), se descarga el binario base64 y se transcribe a texto en español.
-4. **Caché Semántico:** Se consulta Qdrant para preguntas frecuentes idénticas o semánticamente similares (umbral `>= 0.90`). Si hay acierto, se responde de inmediato sin consumir tokens del LLM.
-5. **Ejecución del Grafo:** Si no está en caché, LangGraph procesa el hilo (`thread_id = número_whatsapp`), guarda el punto de control en PostgreSQL y ejecuta las llamadas a la API de .NET necesarias.
-6. **Entrega:** La respuesta final se envía de vuelta al chat del paciente vía Evolution API con simulación de presencia (*escribiendo...*).
+2. **Deduplicación:** El webhook descarta entregas duplicadas (TTL 90 segundos) y detecta si el mensaje fue enviado manualmente por un asesor humano (`fromMe`).
+3. **Presencia Inmediata:** Se envía `sendPresence("composing")` a WhatsApp para mostrar *"Escribiendo..."* desde el primer milisegundo.
+4. **Debounce:** `ChatOrchestrator` acumula ráfagas de mensajes durante 2 segundos para responder con un solo mensaje consolidado.
+5. **Transcripción:** Si el mensaje es una nota de voz, se transcribe a texto mediante Whisper.
+6. **Caché Semántico:** Se consulta Qdrant para preguntas frecuentes (similitud `>= 0.90`). Si hay acierto, responde en milisegundos a costo cero de tokens.
+7. **Ejecución del Grafo:** LangGraph procesa el hilo con memoria en PostgreSQL, aplicando las reglas de agenda y catálogo en .NET.
+8. **Sanitización y Entrega:** `whatsapp_formatter` limpia el texto final (eliminando asteriscos dobles y adaptando viñetas) antes de entregarlo por WhatsApp.
 
 ---
 
-##  Estructura del Proyecto
+## 📁 Estructura del Proyecto (Clean Architecture)
 
 ```text
 NexusOdonto_ChatBot_AI/
@@ -149,112 +166,153 @@ NexusOdonto_ChatBot_AI/
 ├── app/
 │   ├── agents/
 │   │   └── tools/
-│   │       ├── agenda_tools.py        # Tools de interacción con el backend .NET (citas, doctores, servicios)
-│   │       └── qdrant_tool.py         # Tool de RAG clínico y conexión con Qdrant
+│   │       ├── agenda_tools.py            # Facade retrocompatible para el agente
+│   │       ├── appointment_tools.py       # Herramientas atómicas de agendamiento y citas
+│   │       ├── catalog_tools.py           # Herramientas atómicas de catálogo y disponibilidad
+│   │       ├── clinical_rag_tool.py       # Herramienta RAG de conocimiento clínico
+│   │       ├── agenda_helpers.py          # Validaciones de horarios y diccionarios
+│   │       └── qdrant_tool.py             # Conector con la base vectorial Qdrant
 │   │
 │   ├── api/
 │   │   └── routes/
-│   │       ├── agent_handoff.py       # Endpoints para pausar bot y transferir a asesores humanos
-│   │       ├── reminders.py           # Disparadores manuales y consulta de recordatorios de citas
-│   │       └── webhook.py             # Webhook principal receptor de eventos de Evolution API (WhatsApp)
+│   │       ├── webhook.py                 # Controlador HTTP de eventos WhatsApp (Evolution API)
+│   │       ├── qr.py                      # Panel web interactivo para vincular WhatsApp
+│   │       ├── health.py                  # Endpoints /health y /health/deep (diagnóstico completo)
+│   │       ├── agent_handoff.py           # Pausa y reactivación entre bot y asesores humanos
+│   │       └── reminders.py               # Disparadores manuales de recordatorios de citas
 │   │
 │   ├── clients/
-│   │   ├── dotnet_client.py           # Cliente HTTP asíncrono con reintentos para la API de .NET
-│   │   └── evolution_client.py        # Cliente HTTP para envío de mensajes, presencia y estado en Evolution API
+│   │   ├── dotnet_client.py               # Facade retrocompatible para la API .NET
+│   │   └── evolution_client.py            # Cliente Evolution API con presencia, botones y texto
+│   │
+│   ├── domain/                            # CAPA DE DOMINIO PURA (0 dependencias externas)
+│   │   ├── clinical/
+│   │   │   ├── schedule_rules.py          # Reglas de horario laboral y bloqueo de almuerzo
+│   │   │   ├── emergency_triage.py        # Triage clínico determinista (30+ patrones)
+│   │   │   ├── knowledge_base.py          # 24 guías clínicas estructuradas oficiales
+│   │   │   └── query_expander.py          # Expansor semántico de jerga colombiana a términos médicos
+│   │   ├── formatters/
+│   │   │   └── whatsapp_formatter.py      # Sanitizador nativo de WhatsApp (elimina **, viñetas •)
+│   │   ├── models/
+│   │   │   ├── appointment.py             # Entidades tipadas de Citas
+│   │   │   ├── patient.py                 # Entidades tipadas de Pacientes y Contexto Seguro
+│   │   │   ├── catalog.py                 # Entidades tipadas de Servicios y Disponibilidad
+│   │   │   └── emergency.py               # Entidades tipadas de Triage de Emergencias
+│   │   └── security/
+│   │       └── habeas_data.py             # Reglas Ley 1581 y validación de cédulas (>= 7 dígitos)
+│   │
+│   ├── graph/                             # ORQUESTADOR LANGGRAPH
+│   │   ├── nodes/
+│   │   │   ├── chatbot_node.py            # LLM principal con prompt humano y formato WhatsApp
+│   │   │   ├── emergency_node.py          # Nodo de detección de emergencias
+│   │   │   ├── security_node.py           # Nodo de defensa contra prompt injection
+│   │   │   └── summarizer_node.py         # Nodo de compresión de historial
+│   │   ├── builder.py                     # Compilador del StateGraph
+│   │   ├── nodes.py                       # Facade retrocompatible de nodos
+│   │   └── state.py                       # Esquema de estado AgentState
+│   │
+│   ├── infra/                             # CAPA DE INFRAESTRUCTURA EXTERNA
+│   │   ├── external/
+│   │   │   └── dotnet/
+│   │   │       ├── http_transport.py      # Transporte HTTP con auto-refresh JWT (401)
+│   │   │       ├── appointments_api.py    # Endpoints de Citas y Agendamiento en .NET
+│   │   │       ├── patients_api.py        # Endpoints de Pacientes y Onboarding en .NET
+│   │   │       ├── catalog_api.py         # Endpoints de Catálogo, Servicios y Doctores en .NET
+│   │   │       └── tickets_api.py         # Endpoints de Tickets de Soporte y Mensajes en .NET
+│   │   └── persistence/
+│   │       └── clinical_retriever.py      # Búsqueda semántica + Cross-Encoder Re-ranking
+│   │
+│   ├── services/                          # CAPA DE APLICACIÓN
+│   │   ├── chat/
+│   │   │   ├── chat_orchestrator.py       # Debounce 2s, control de spam y presencia
+│   │   │   └── message_processor.py       # Procesamiento de hilos, TTL de 15 min y memoria
+│   │   ├── appointment/
+│   │   │   └── appointment_service.py     # Enriquecimiento de citas y validación de pacientes
+│   │   ├── appointment_reminders.py       # Cron APScheduler (diario 8:00 AM y cada 2 min)
+│   │   ├── inactivity_service.py          # Sweeper de inactividad 15 min y detección de citas a medias
+│   │   ├── audio_service.py               # Transcripción Whisper de notas de voz
+│   │   └── semantic_cache.py              # Caché semántico vectorial en Qdrant
 │   │
 │   ├── core/
-│   │   ├── config.py                  # Configuración central tipada mediante Pydantic BaseSettings (.env)
-│   │   └── llm_factory.py             # Fábrica desacoplada para instanciar OpenAI o Google Gemini
-│   │
-│   ├── graph/
-│   │   ├── builder.py                 # Definición y compilación del StateGraph de LangGraph
-│   │   ├── nodes.py                   # Lógica de cada nodo (chatbot, emergency, security, summarize)
-│   │   └── state.py                   # Esquema de estado AgentState (mensajes, banderas, paciente)
-│   │
-│   ├── rag/
-│   │   └── data_loader.py             # Script de carga y chunking de documentos a Qdrant (.json, .txt, .md)
-│   │
-│   ├── schemas/
-│   │   └── chat.py                    # Modelos Pydantic para payloads de WhatsApp, Evolution y estado
-│   │
-│   ├── security/
-│   │   ├── emergency_detector.py      # Detección determinista (Regex) y heurística de emergencias
-│   │   └── webhook_signature.py       # Validación de firmas HMAC-SHA256 del webhook
-│   │
-│   ├── services/
-│   │   ├── appointment_reminders.py   # Tareas programadas de recordatorios (día anterior y -30 minutos)
-│   │   ├── audio_service.py           # Descarga de notas de voz de WhatsApp y transcripción con Whisper
-│   │   ├── knowledge_ingestion.py     # Base de conocimiento clínico estructurada e indexación
-│   │   └── semantic_cache.py          # Caché semántico vectorial de preguntas frecuentes en Qdrant
+│   │   ├── config.py                      # Configuración central tipada con Pydantic (.env)
+│   │   └── llm_factory.py                 # Fábrica agnóstica para OpenAI y Google Gemini
 │   │
 │   ├── session/
-│   │   ├── memory_store.py            # Utilidades de configuración de sesión y threads
-│   │   └── postgres_checkpointer.py   # Checkpointer asíncrono en PostgreSQL para persistencia de LangGraph
+│   │   ├── postgres_checkpointer.py       # Checkpointer asíncrono en PostgreSQL
+│   │   └── memory_store.py                # Configuración de threads de LangGraph
 │   │
-│   └── main.py                        # Punto de entrada FastAPI, ciclo de vida, middleware y servidor QR
+│   └── main.py                            # Punto de entrada FastAPI, ciclo de vida y schedulers
 │
-├── docs/
-│   └── bot-api-contract.md            # Especificación técnica y contrato de endpoints con el backend .NET
+├── tests/                                 # SUITE DE PRUEBAS AUTOMATIZADAS (41 TESTS)
+│   ├── test_domain_and_rag.py             # Pruebas de reglas clínicas, Habeas Data y RAG
+│   ├── test_phase2_tools_and_nodes.py     # Pruebas de herramientas atómicas y nodos del grafo
+│   ├── test_phase3_reminders_and_inactivity.py # Pruebas de recordatorios e inactividad
+│   ├── test_phase4_e2e_concurrency.py     # Pruebas E2E de concurrencia y aislamiento
+│   └── test_whatsapp_formatter.py         # Pruebas de formato WhatsApp y presencia en tiempo real
 │
-├── Dockerfile                         # Imagen Docker optimizada para producción
-├── docker-compose.yml                 # Orquestación completa (Agente + Evolution + PostgreSQL + Qdrant)
-├── requirements.txt                   # Dependencias de Python del proyecto
-├── .env.example                       # Plantilla documentada de variables de entorno
-└── README.md                          # Documentación oficial del proyecto
+├── scripts/
+│   └── limpiar_cache_y_sesiones.py        # Script para purgar caché semántico y sesiones
+├── Dockerfile                             # Imagen Docker de producción
+├── docker-compose.yml                     # Orquestación (Agente + Evolution + Postgres + Qdrant)
+├── requirements.txt                       # Dependencias del proyecto
+├── .env.example                           # Plantilla de variables de entorno
+└── README.md                              # Documentación oficial
 ```
 
 ---
 
-##  Herramientas del Agente (Tools)
+## 🛠️ Herramientas del Agente (Tools)
 
-El agente dispone de 9 herramientas principales con validación estricta de argumentos:
+El agente dispone de herramientas atómicas especializadas agrupadas bajo el principio de Responsabilidad Única (SRP):
 
-| Herramienta | Función Principal | Origen de Datos |
+| Herramienta | Módulo Fuente | Función Principal |
 | :--- | :--- | :--- |
-| `clinical_knowledge_tool` | Responde dudas sobre cuidados pre y postoperatorios, tratamientos, duración y preguntas frecuentes. | **Qdrant (RAG)** + Re-ranker |
-| `consultar_disponibilidad_tool` | Consulta turnos libres de un doctor para una fecha y servicio específicos. | `GET /profesionales/{id}/horarios-disponibles` (.NET) |
-| `agendar_cita_tool` | Reserva una nueva cita médica en el calendario oficial de la clínica. | `POST /citas` (.NET) |
-| `consultar_cita_por_cedula_tool` | Localiza citas activas o históricas del paciente usando su documento de identidad. | `GET /citas` + filtro paciente (.NET) |
-| `confirmar_cita_tool` | Valida y confirma la asistencia del paciente a una cita agendada. | `PUT/POST /citas/{id}/confirmar` (.NET) |
-| `modificar_cita_tool` | Reprograma la fecha y hora de una cita ya existente. | `POST /citas/{id}/reprogramar` (.NET) |
-| `cancelar_cita_tool` | Cancela una cita médica registrando el motivo de la cancelación. | `POST /citas/{id}/cancelar` (.NET) |
-| `consultar_doctores_tool` | Lista los odontólogos del centro, sus especialidades y registro médico. | `GET /profesionales` (.NET) |
-| `consultar_servicios_y_precios_tool` | Retorna el catálogo oficial de servicios odontológicos, precios y duraciones. | `GET /servicios` (.NET) |
+| `consultar_servicios_y_precios_tool` | `catalog_tools.py` | Consulta el catálogo oficial de procedimientos activos y tarifas. |
+| `consultar_doctores_tool` | `catalog_tools.py` | Retorna los especialistas de la clínica y sus especialidades. |
+| `consultar_disponibilidad_tool` | `catalog_tools.py` | Consulta turnos libres aplicando reglas de almuerzo (12-2 PM). |
+| `agendar_cita_tool` | `appointment_tools.py` | Valida cédula, asegura al paciente y reserva la cita en el sistema. |
+| `consultar_cita_por_cedula_tool` | `appointment_tools.py` | Busca citas activas o históricas asociadas al número de documento. |
+| `modificar_cita_tool` | `appointment_tools.py` | Reprograma fecha u hora de una cita previa verificando disponibilidad. |
+| `cancelar_cita_tool` | `appointment_tools.py` | Cancela una cita registrando el motivo y liberando el horario. |
+| `confirmar_cita_tool` | `appointment_tools.py` | Confirma la asistencia a una cita programada o recordatorio. |
+| `clinical_knowledge_tool` | `clinical_rag_tool.py` | Responde dudas odontológicas anclado a las 24 guías clínicas oficiales. |
 
 ---
 
-##  Triager de Emergencias y Seguridad
+## 🚨 Triage de Emergencias y Seguridad
 
-El chatbot no reemplaza la atención de urgencia presencial. Implementa un sistema de protección en 2 capas:
+El chatbot implementa una estrategia de protección médica en dos capas:
 
-1. **Capa Determinista (Regex Médico):** Monitorea patrones críticos como:
+1. **Capa Determinista (30+ Patrones Regex):**
    - Hemorragias incontrolables / *"sangrado que no para"*
-   - Dolor intolerable / *"no aguanto el dolor"*
-   - Infección grave, flemón con fiebre o dificultad respiratoria / asfixia
-   - Traumatismos maxilofaciales o fracturas dentales por impacto
-2. **Acción Inmediata:** Si se detecta cualquiera de estos casos:
-   - Se suspende de inmediato la atención del bot.
-   - Se instruye al usuario a acudir de urgencia a la dirección del consultorio (**Cr 24 #35-12, Santander**) o llamar al **+57 324 6030217**.
-   - Se marca el caso con prioridad `CRITICA` en el sistema.
+   - Dolor intolerable / *"no aguanto el dolor"* (dolor severo > 8/10)
+   - Flemón con fiebre o hinchazón en el cuello (compromiso de vía aérea)
+   - Traumatismos severos o fracturas dentales por golpe
+2. **Acción Inmediata:**
+   - Se suspende de inmediato la atención del bot para no demorar la atención médica.
+   - Se instruye al paciente a acudir de urgencia a **Calle 100 # 15-20, Centro Médico Odontológico** o comunicarse a la línea **+57 324 6030217**.
+   - Se genera un ticket en el sistema hospitalario marcado con prioridad `CRITICA`.
 
 ---
 
-##  Requisitos Previos y Variables de Entorno
+## 💬 Experiencia Nativa de WhatsApp
+
+El bot incorpora optimizaciones específicas para el canal de WhatsApp:
+
+- **Sanitizador Automático (`whatsapp_formatter.py`):** Convierte negritas Markdown (`**texto**`) a sintaxis nativa de WhatsApp (`*texto*`), repara asteriscos dentro de palabras y transforma enlaces en texto legible.
+- **Listas Conversacionales:** Presenta tratamientos y opciones en viñetas limpias (`•`) eliminando los menús numéricos robóticos (*"escribe el número 1 o 2"*).
+- **Presencia en Tiempo Real:** Dispara estados de `composing` (*"Escribiendo..."*) y `recording` (*"Grabando audio..."*) inmediatamente al recibir mensajes o notas de voz, dando retroalimentación visual al paciente mientras se genera la respuesta.
+
+---
+
+## ⚙️ Requisitos Previos y Variables de Entorno
 
 ### Requisitos del Sistema
 - **Docker y Docker Compose** (versión recomendada: Docker 24+, Compose v2).
 - O alternativamente: **Python 3.11+**, instancia de **PostgreSQL 15+** y **Qdrant 1.11+**.
-- Acceso a la API de **OpenAI** (clave `sk-...`) o **Google Gemini** (gratuita en [Google AI Studio](https://aistudio.google.com/)).
+- Clave de API de **OpenAI** o **Google Gemini** (gratuita en [Google AI Studio](https://aistudio.google.com/)).
 
 ### Configuración del archivo `.env`
-
-Copia el archivo de plantilla y configura tus credenciales:
-
-```bash
-cp .env.example .env
-```
-
-Principales variables configurables:
 
 ```ini
 # --- Proveedor de IA (openai o gemini) ---
@@ -285,51 +343,37 @@ POSTGRES_CHECKPOINT_URL="postgresql://bot_user:bot_password@localhost:5433/bot_m
 REMINDER_SCHEDULE_HOUR=8
 REMINDER_SCHEDULE_MINUTE=0
 REMINDER_TIMEZONE="America/Bogota"
+SESSION_TTL_SECONDS=900
 ```
 
 ---
 
-##  Guía de Instalación y Uso
+## 🚀 Guía de Instalación y Uso
 
-### Opción 1: Despliegue con Docker Compose 
-
-El repositorio incluye un archivo [`docker-compose.yml`](docker-compose.yml) listo para producción que orquesta todos los microservicios:
-- **`evolution-whatsapp`**: Servidor WhatsApp con motor Baileys.
-- **`evolution-postgres`**: Base de datos de sesiones para Evolution API.
-- **`qdrant-db`**: Base de datos vectorial para RAG y Caché Semántico.
-- **`bot-memory-db`**: PostgreSQL para checkpoints de LangGraph.
-- **`agente-python`**: Contenedor de NexusOdonto ChatBot AI (FastAPI).
-
-Para iniciar toda la infraestructura:
+### Opción 1: Despliegue con Docker Compose (Recomendada)
 
 ```bash
 # 1. Clonar el repositorio
 git clone https://github.com/tu-usuario/NexusOdonto_ChatBot_AI.git
 cd NexusOdonto_ChatBot_AI
 
-# 2. Configurar variables
+# 2. Configurar variables de entorno
 cp .env.example .env
-# Edita las claves API en .env
 
-# 3. Levantar los contenedores
+# 3. Iniciar todos los servicios
 docker compose up -d --build
 
-# 4. Verificar logs
+# 4. Monitorear logs del agente
 docker compose logs -f agente-python
 ```
 
 ### Opción 2: Ejecución Local en Desarrollo
 
-Si prefieres correr el agente en tu máquina local:
-
 ```bash
 # 1. Crear entorno virtual
 python -m venv .venv
-
-# En Windows:
-.venv\Scripts\activate
-# En Linux/macOS:
-# source .venv/bin/activate
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/macOS
 
 # 2. Instalar dependencias
 pip install -r requirements.txt
@@ -340,72 +384,79 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-###  Carga de Conocimiento Clínico (RAG)
+### 📚 Carga de Conocimiento Clínico (RAG)
 
-Para que el agente responda preguntas clínicas con precisión, debes indexar el catálogo de procedimientos y cuidados en Qdrant:
+Para inicializar o reindexar las 24 guías clínicas oficiales en Qdrant:
 
 ```bash
-# Carga estructurada oficial
 python -m app.services.knowledge_ingestion
-
-# O cargar un archivo de texto/markdown/JSON personalizado:
-python -m app.rag.data_loader --source data/catalogo_clinico.json
 ```
 
 ---
 
-###  Vinculación de WhatsApp (Panel QR)
-
-NexusOdonto incluye una interfaz web interactiva en tiempo real con recarga reactiva para vincular la línea de WhatsApp:
+### 📱 Vinculación de WhatsApp (Panel QR)
 
 1. Abre en tu navegador: **`http://localhost:8000/qr`**
 2. En tu celular, abre **WhatsApp** > **Dispositivos vinculados** > **Vincular un dispositivo**.
-3. Escanea el código QR que aparece en pantalla.
-4. El panel detectará la sincronización automáticamente y mostrará el estado **¡WhatsApp Conectado!** con la instancia en línea.
-
-*(También puedes gestionar la instancia desde el panel oficial de Evolution Manager en `http://localhost:8085/manager/`).*
+3. Escanea el código QR que se actualiza automáticamente en pantalla.
+4. El panel detectará la conexión y mostrará el estado **¡WhatsApp Conectado!**.
 
 ---
 
-##  Comandos y Atajos del Usuario
+## 🧪 Ejecución de Pruebas Automatizadas
 
-Los usuarios pueden utilizar comandos rápidos en el chat de WhatsApp:
+El proyecto cuenta con una suite completa de **41 pruebas unitarias e integradas** que se ejecutan sin depender de servicios externos levantados:
 
-- **`/reset` o `/limpiar`:** Reinicia la memoria de la conversación actual y comienza un nuevo hilo limpio.
-- **`/start` o `/inicio`:** Mensaje de bienvenida inicial y presentación de servicios principales.
+```bash
+python -m unittest discover tests
+```
+
+**Resultado esperado:**
+```text
+Ran 41 tests in 0.128s
+OK
+```
+
+---
+
+## ⌨️ Comandos y Atajos del Usuario
+
+- **`/reset` o `/limpiar`:** Reinicia la memoria de la conversación actual e inicia un nuevo hilo.
+- **`/start` o `/inicio`:** Envía el saludo de bienvenida y la presentación de opciones.
 - **`"Hablar con un asesor"`:** Escala la conversación a recepción y pausa las respuestas automáticas del bot.
-- **`"Volver al bot"` o `"/bot"`:** Reactiva el bot automático si la conversación estaba pausada tras una atención humana.
+- **`"Volver al bot"` o `"/bot"`:** Reactiva las respuestas automáticas del bot tras haber finalizado la atención con un humano.
 
 ---
 
-##  Endpoints Principales de la API
+## 🔌 Endpoints Principales de la API
 
-Una vez iniciado el servidor, accede a la documentación interactiva en Swagger:
- **`http://localhost:8000/docs`**
+Acceso a la documentación interactiva en Swagger: **`http://localhost:8000/docs`**
 
 | Método | Ruta | Descripción |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Chequeo de salud del servicio. |
-| `POST` | `/webhook/whatsapp` | Webhook receptor de mensajes de Evolution API. |
-| `GET` | `/qr` | Interfaz visual interactiva para escaneo y vinculación de WhatsApp. |
+| `GET` | `/health` | Chequeo rápido de disponibilidad (liveness probe). |
+| `GET` | `/health/deep` | Diagnóstico profundo de conectividad con .NET API, Qdrant y PostgreSQL. |
+| `POST` | `/webhook/whatsapp` | Webhook receptor de eventos y mensajes de Evolution API. |
+| `GET` | `/qr` | Interfaz visual interactiva para vinculación de WhatsApp con recarga reactiva. |
 | `GET` | `/qr/data` | Estado de conexión JSON y string base64 del código QR activo. |
 | `POST` | `/qr/restart` | Fuerza la regeneración de una nueva sesión y código QR limpio. |
 | `POST` | `/api/v1/handoff/pause` | Pausa la atención del bot para permitir atención humana manual. |
 | `POST` | `/api/v1/handoff/resume` | Reanuda el bot tras la intervención del asesor de recepción. |
-| `POST` | `/api/v1/reminders/trigger-daily` | Ejecución manual de la ronda de recordatorios para citas del día siguiente. |
-| `POST` | `/api/v1/reminders/trigger-30m` | Ejecución manual del barrido de recordatorios para citas en los próximos 30 minutos. |
+| `POST` | `/api/v1/reminders/trigger-daily` | Disparo manual de la ronda de recordatorios diarios (8:00 AM). |
+| `POST` | `/api/v1/reminders/trigger-30m` | Disparo manual de recordatorios de proximidad (30 minutos antes). |
+| `POST` | `/webhook/cache/purge` | Purga manual de la colección de caché semántico en Qdrant. |
 
 ---
 
-##  Equipo y Créditos
+## 👥 Equipo y Créditos
 
-Proyecto desarrollado para el ecosistema **NexusOdonto** integrando:
-- **Backend .NET:** Lógica de negocio y persistencia en Oracle Database.
-- **Frontend React:** Panel de gestión administrativa para la clínica.
-- **Agente Inteligente:** Orquestación conversacional con LangGraph, RAG y WhatsApp.
+Proyecto desarrollado para el ecosistema **NexusOdonto**:
+- **Backend .NET:** Lógica hospitalaria central y persistencia en Oracle Database.
+- **Frontend React:** Panel de gestión clínica y recepción administrativa.
+- **Agente IA (Este repositorio):** Orquestación conversacional con LangGraph, RAG y WhatsApp.
 
 ---
 
-##  Licencia
+## 📄 Licencia
 
 Este proyecto está bajo la licencia [MIT](LICENSE).

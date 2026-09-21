@@ -1,10 +1,4 @@
-"""Facade para los nodos del grafo conversacional de LangGraph.
-Re-exporta los nodos atómicos desde el paquete app.graph.nodes:
-- emergency_check_node (detección médica)
-- security_check_node (defensa de prompts)
-- summarize_conversation_node (resumen de memoria)
-- chatbot_node (orquestación LLM)
-"""
+"""Paquete de nodos especializados del Grafo de LangGraph para Nexus Odonto."""
 
 from app.graph.nodes.emergency_node import emergency_check_node
 from app.graph.nodes.security_node import security_check_node, INJECTION_PATTERNS

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     evolution_api_url: str = "http://localhost:8080"
     evolution_api_key: str = ""
     instance_name: str = "Nexus_Odonto"
+    evolution_instance_name: str = "Nexus_Odonto"
 
     # Secreto y encabezado usados para autenticar webhooks de Evolution API.
     webhook_secret: str = ""
@@ -77,8 +78,12 @@ class Settings(BaseSettings):
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
-    rag_min_confidence: float = 0.65
-    rag_candidate_count: int = 3
+    rag_min_confidence: float = 0.50
+    rag_candidate_count: int = 4
+    rag_hybrid_enabled: bool = True
+    rag_bm25_weight: float = 0.4
+    rag_dense_weight: float = 0.6
+    rag_rrf_k: int = 60
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     allowed_origins: str = "*"
 

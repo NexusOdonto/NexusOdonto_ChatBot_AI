@@ -59,17 +59,19 @@ _MARCADORES_CITA_PENDIENTE = [
 ]
 
 _MARCADORES_CITA_EXITOSA = [
-    "✅ ¡tu cita ha sido agendada con éxito",
-    "✅ ¡cita agendada exitosamente",
+    "cita agendada exitosamente",
+    "cita agendada con éxito",
     "ha sido agendada con éxito",
     "tu cita ha sido registrada",
     "cita confirmada",
     "tu cita fue cancelada",
     "tu cita ha sido reprogramada",
     "cita reprogramada exitosamente",
-    "¡tu cita fue agendada",
+    "tu cita fue agendada",
     "quedó agendada para",
     "cita cancelada exitosamente",
+    "agendada exitosamente",
+    "agendada con éxito",
 ]
 
 
@@ -197,12 +199,12 @@ class InactivityService:
         from app.clients.evolution_client import evolution_client
         from app.clients.dotnet_client import dotnet_client
         from app.session.postgres_checkpointer import get_checkpointer_instance
-        from app.api.routes.webhook import (
-            _is_escalated,
-            _PATIENT_CONTEXT_CACHE,
-            _USER_PUSH_NAMES,
+        from app.services.chat.message_processor import (
+            is_escalated as _is_escalated,
             _USER_LAST_ACTIVE,
         )
+        from app.services.chat.chat_orchestrator import _USER_PUSH_NAMES
+        from app.api.routes.webhook import _PATIENT_CONTEXT_CACHE
         from app.services.whatsapp_identity import (
             obtener_telefono_canonico,
             obtener_destino_envio,
@@ -326,20 +328,30 @@ class InactivityService:
             if not ai_messages_recientes:
                 return False
 
-            # Si el último mensaje del bot indica éxito en la cita, NO hay cita incompleta
+            # 1. Inspección estructurada de ToolMessages de agendamiento
+            from langchain_core.messages import ToolMessage
+            for m in reversed(messages[-12:]):
+                if isinstance(m, ToolMessage):
+                    tool_name = getattr(m, "name", "")
+                    content_str = str(getattr(m, "content", "")).lower()
+                    if tool_name == "agendar_cita_tool" and ("¡cita confirmada" in content_str or "éxito" in content_str):
+                        return False
+
+            # 2. Si el último mensaje del bot indica éxito en la cita, NO hay cita incompleta
             ultimo_ai = ai_messages_recientes[-1]
             contenido_ultimo = (ultimo_ai.content or "").lower()
             for marcador in _MARCADORES_CITA_EXITOSA:
                 if marcador in contenido_ultimo:
                     return False
 
-            # Verificar si algún mensaje reciente del bot solicita datos de cita
-            texto_reciente = " ".join(
-                m.content for m in ai_messages_recientes if m.content
-            ).lower()
-
-            for marcador in _MARCADORES_CITA_PENDIENTE:
-                if marcador in texto_reciente:
+            # 3. Verificar si el bot presentó una propuesta formal o solicitó datos para agendar
+            for m in reversed(ai_messages_recientes):
+                c = (m.content or "").lower()
+                # Tarjeta de propuesta visual o solicitud explícita de confirmación
+                if "propuesta de cita" in c or "propuesta de cambio" in c or "¿confirmas estos datos" in c:
+                    return True
+                # Búsqueda complementaria de marcadores de agendamiento en curso
+                if any(marcador in c for marcador in _MARCADORES_CITA_PENDIENTE):
                     return True
 
             return False

@@ -56,6 +56,33 @@ class EvolutionClient:
         from app.services.whatsapp_identity import obtener_destino_envio
         return obtener_destino_envio(numero)
 
+    async def enviar_presencia(
+        self,
+        numero: str,
+        presencia: str = "composing",
+        delay: int = 1200,
+    ) -> bool:
+        """Envía el estado de presencia ('composing', 'recording', 'paused')
+        en tiempo real a través de Evolution API v2 para feedback visual inmediato en WhatsApp.
+        Endpoint: POST /chat/sendPresence/{instance_name}
+        """
+        url = f"{self.base_url}/chat/sendPresence/{self.instance_name}"
+        target_number = self._normalize_destination(numero)
+        payload = {
+            "number": target_number,
+            "presence": presencia,
+            "delay": delay,
+        }
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            try:
+                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response = await client.post(url, content=body_bytes, headers=self._get_headers())
+                return response.status_code in (200, 201)
+            except Exception as e:
+                logger.debug(f"[Evolution API] No se pudo enviar presencia '{presencia}' a {numero}: {e}")
+                return False
+
     async def enviar_mensaje(self, numero: str, texto: str, delay: int | None = None) -> Optional[Dict[str, Any]]:
         """
         Envía un mensaje de texto a través de Evolution API v2.
@@ -66,6 +93,9 @@ class EvolutionClient:
             delay = self._default_delay_ms
         url = f"{self.base_url}/message/sendText/{self.instance_name}"
         target_number = self._normalize_destination(numero)
+
+        from app.domain.formatters.whatsapp_formatter import formatear_para_whatsapp
+        texto_formateado = formatear_para_whatsapp(texto)
         
         payload = {
             "number": target_number,
@@ -73,7 +103,7 @@ class EvolutionClient:
                 "delay": delay,
                 "presence": "composing"
             },
-            "text": texto
+            "text": texto_formateado
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -236,9 +266,54 @@ class EvolutionClient:
             except httpx.HTTPStatusError as e:
                 logger.error(f"[Evolution API] Error HTTP {e.response.status_code} al obtener base64: {e.response.text}")
                 return None
-            except httpx.RequestError as e:
-                logger.error(f"[Evolution API] Error de conexión al solicitar base64 multimedia: {str(e)}")
-                return None
+    async def ensure_webhook_configured(self) -> bool:
+        """Asegura de forma idempotente que Evolution API tenga configurado el webhook para la instancia."""
+        webhook_url = os.getenv("EVOLUTION_WEBHOOK_URL", "http://agente-python:8000/webhook/whatsapp")
+        webhook_secret = os.getenv("WEBHOOK_SECRET", "SECRETO_COMPARTIDO_CON_EVOLUTION")
+        url_find = f"{self.base_url}/webhook/find/{self.instance_name}"
+        url_set = f"{self.base_url}/webhook/set/{self.instance_name}"
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                resp = await client.get(url_find, headers=self._get_headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    wh = data.get("webhook") if isinstance(data, dict) and isinstance(data.get("webhook"), dict) else data
+                    if isinstance(wh, dict) and wh.get("url") == webhook_url and wh.get("enabled"):
+                        logger.debug("[Evolution API] Webhook ya configurado correctamente para %s", self.instance_name)
+                        return True
+
+                headers_dict = {"apikey": self.api_key}
+                if webhook_secret:
+                    headers_dict["Authorization"] = f"Bearer {webhook_secret}"
+
+                payload = {
+                    "webhook": {
+                        "enabled": True,
+                        "url": webhook_url,
+                        "headers": headers_dict,
+                        "byEvents": False,
+                        "base64": True,
+                        "events": [
+                            "MESSAGES_UPSERT",
+                            "MESSAGES_UPDATE",
+                            "CONNECTION_UPDATE",
+                        ],
+                    }
+                }
+                resp_set = await client.post(url_set, json=payload, headers=self._get_headers())
+                if resp_set.status_code in (200, 201):
+                    logger.info("[Evolution API] Webhook configurado exitosamente para instancia %s", self.instance_name)
+                    return True
+                logger.warning(
+                    "[Evolution API] Falló configuración de webhook (HTTP %s): %s",
+                    resp_set.status_code,
+                    resp_set.text,
+                )
+            except Exception as e:
+                logger.warning("[Evolution API] Error verificando/configurando webhook: %s", e)
+            return False
+
 
 # Instancia singleton para reutilizar en el agente
 evolution_client = EvolutionClient()

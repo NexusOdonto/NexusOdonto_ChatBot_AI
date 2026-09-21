@@ -6,10 +6,10 @@ from zoneinfo import ZoneInfo
 from app.clients.dotnet_client import dotnet_client
 from app.clients.evolution_client import evolution_client
 from app.core.config import settings
+from app.services.appointment.appointment_service import appointment_service
 
 logger = logging.getLogger(__name__)
 
-# Registro en memoria de recordatorios enviados por fecha e ID de cita para evitar duplicados (Anti-Spam)
 _RECORDATORIOS_ENVIADOS: Set[str] = set()
 
 
@@ -68,7 +68,7 @@ async def obtener_preview_recordatorios(fecha: Optional[str] = None) -> List[Dic
         tz = ZoneInfo("America/Bogota")
 
     fecha_objetivo = fecha or (datetime.now(tz) + timedelta(days=1)).date().isoformat()
-    citas = await dotnet_client.obtener_citas_agendadas_para_recordatorio(fecha_objetivo)
+    citas = await appointment_service.enriquecer_citas_para_recordatorio(fecha_objetivo)
 
     preview_list = []
     for c in citas:
@@ -109,7 +109,7 @@ async def enviar_recordatorios_citas(
     fecha_objetivo = fecha or (datetime.now(tz) + timedelta(days=1)).date().isoformat()
     logger.info(f"[Recordatorios] Iniciando proceso para fecha {fecha_objetivo} (dry_run={dry_run})")
 
-    citas = await dotnet_client.obtener_citas_agendadas_para_recordatorio(fecha_objetivo)
+    citas = await appointment_service.enriquecer_citas_para_recordatorio(fecha_objetivo)
     if not citas:
         logger.info(f"[Recordatorios] No se encontraron citas agendadas pendientes para {fecha_objetivo}.")
         return {
@@ -235,7 +235,7 @@ async def enviar_recordatorios_30_minutos(dry_run: bool = False) -> Dict[str, An
     now = datetime.now(tz)
     today_str = now.date().isoformat()
 
-    citas = await dotnet_client.obtener_citas_agendadas_para_recordatorio(today_str)
+    citas = await appointment_service.enriquecer_citas_para_recordatorio(today_str)
     if not citas:
         return {"horaActual": now.strftime("%I:%M %p"), "totalCitasHoy": 0, "enviados": 0, "detalles": []}
 
