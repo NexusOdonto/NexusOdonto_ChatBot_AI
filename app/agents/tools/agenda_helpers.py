@@ -59,28 +59,41 @@ def _validar_cedula(cedula: str) -> Optional[str]:
 
 
 def _run_sync(coro) -> Any:
-    """Ejecuta una corrutina de forma síncrona, gestionando de forma segura los loops activos de asyncio."""
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    """Ejecuta una corrutina de forma síncrona desde herramientas sync de LangChain.
 
-    if loop.is_running():
-        result = []
-        def run_in_thread():
-            new_loop = asyncio.new_event_loop()
+    Si ya hay un loop en ejecución, corre la corrutina en un hilo con loop propio.
+    Los clientes .NET usan locks por-loop (`loop_safe_asyncio_lock`) para no chocar
+    con el lock del loop principal.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def run_in_thread() -> None:
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        try:
+            result.append(new_loop.run_until_complete(coro))
+        except BaseException as exc:  # noqa: BLE001 — re-raise after join
+            error.append(exc)
+        finally:
             try:
-                res = new_loop.run_until_complete(coro)
-                result.append(res)
-            finally:
-                new_loop.close()
-        t = threading.Thread(target=run_in_thread)
-        t.start()
-        t.join()
-        return result[0]
-    else:
-        return loop.run_until_complete(coro)
+                new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            new_loop.close()
+            asyncio.set_event_loop(None)
+
+    t = threading.Thread(target=run_in_thread, name="nexus-tool-sync")
+    t.start()
+    t.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 # Mapeo de términos habituales en español a nombres de catálogo en inglés (especialidades)

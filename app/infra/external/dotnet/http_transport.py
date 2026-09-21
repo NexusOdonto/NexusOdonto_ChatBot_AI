@@ -5,11 +5,32 @@ Encapsula la autenticación JWT automática, reintentos con backoff y manejo del
 import os
 import logging
 import asyncio
+import threading
 from typing import Optional, Dict, Any
 import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def loop_safe_asyncio_lock(
+    locks_by_loop: Dict[int, asyncio.Lock],
+    guard: threading.Lock,
+) -> asyncio.Lock:
+    """Return an asyncio.Lock bound to the *current* running loop.
+
+    LangChain tools call `_run_sync`, which may spawn a side thread with a new
+    event loop. A singleton `asyncio.Lock()` created at import time is bound to
+    the main loop and raises "is bound to a different event loop" there.
+    """
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    with guard:
+        lock = locks_by_loop.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks_by_loop[key] = lock
+        return lock
 
 
 class DotNetHttpTransport:
@@ -23,7 +44,11 @@ class DotNetHttpTransport:
         self.timeout: float = float(os.getenv("DOTNET_API_TIMEOUT", settings.dotnet_api_timeout))
 
         self._jwt_token: Optional[str] = None
-        self._auth_lock = asyncio.Lock()
+        self._auth_locks: Dict[int, asyncio.Lock] = {}
+        self._auth_locks_guard = threading.Lock()
+
+    def _auth_lock(self) -> asyncio.Lock:
+        return loop_safe_asyncio_lock(self._auth_locks, self._auth_locks_guard)
 
     @property
     def auth_url(self) -> str:
@@ -39,7 +64,7 @@ class DotNetHttpTransport:
         if not force_refresh and self._jwt_token:
             return self._jwt_token
 
-        async with self._auth_lock:
+        async with self._auth_lock():
             if not force_refresh and self._jwt_token:
                 return self._jwt_token
 
