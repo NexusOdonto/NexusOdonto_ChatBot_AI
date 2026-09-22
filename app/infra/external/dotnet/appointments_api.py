@@ -69,17 +69,45 @@ class DotNetAppointmentsApi:
         return None
 
     async def obtener_citas_paciente(self, patient_id: str) -> List[Dict[str, Any]]:
-        """Obtiene todas las citas de un paciente dado su patientId."""
+        """Obtiene todas las citas de un paciente dado su patientId enriquecidas con servicio y doctor."""
         citas_raw = await self.consultar_citas()
         if not citas_raw:
             return []
         items = citas_raw.get("items", citas_raw) if isinstance(citas_raw, dict) else citas_raw
         if not isinstance(items, list):
             return []
-        return [
+        citas_paciente = [
             c for c in items
             if str(c.get("patientId") or c.get("pacienteId") or "").lower() == str(patient_id).lower()
         ]
+        if not citas_paciente:
+            return []
+
+        # Enriquecer citas con nombres de profesionales, servicios y estados
+        try:
+            profs = await catalog_api.obtener_profesionales() or []
+            servs = await catalog_api.obtener_servicios() or []
+            prof_map = {str(p.get("id")).lower(): (p.get("name") or p.get("nombre")) for p in profs if isinstance(p, dict)}
+            serv_map = {str(s.get("id")).lower(): (s.get("name") or s.get("nombre")) for s in servs if isinstance(s, dict)}
+
+            for c in citas_paciente:
+                if isinstance(c, dict):
+                    pid = str(c.get("professionalId") or "").lower()
+                    sid = str(c.get("serviceId") or "").lower()
+                    if not c.get("professionalName") and pid in prof_map:
+                        c["professionalName"] = prof_map[pid]
+                    if not c.get("serviceName") and sid in serv_map:
+                        c["serviceName"] = serv_map[sid]
+                    elif not c.get("serviceName") and c.get("reasonForVisit"):
+                        motivo = str(c.get("reasonForVisit"))
+                        if motivo.lower().startswith("cita de "):
+                            c["serviceName"] = motivo[8:].strip()
+                        else:
+                            c["serviceName"] = motivo
+        except Exception as enrich_err:
+            logger.warning(f"[AppointmentsApi] Error enriqueciendo citas del paciente: {enrich_err}")
+
+        return citas_paciente
 
     async def buscar_citas_por_cedula(self, cedula: str) -> List[Dict[str, Any]]:
         """Busca todas las citas de un paciente identificado por su cédula."""

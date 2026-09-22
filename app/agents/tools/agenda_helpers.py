@@ -603,9 +603,27 @@ def _filtrar_citas_proximas_activas(
     historial = []
 
     for c in citas:
-        prof_nom = c.get("professionalName", "Especialista Odontológico")
-        serv_nom = c.get("serviceName", "Consulta Odontológica")
-        estado = str(c.get("statusName", "Programada"))
+        prof_nom = (
+            c.get("professionalName")
+            or c.get("doctor")
+            or (c.get("professional") or {}).get("name")
+            or "Especialista Odontológico"
+        )
+
+        serv_nom = c.get("serviceName") or (c.get("service") or {}).get("name")
+        if not serv_nom or serv_nom.lower() in ("consulta odontologica", "consulta odontológica"):
+            motivo = str(c.get("reasonForVisit") or "").strip()
+            if motivo:
+                if motivo.lower().startswith("cita de "):
+                    serv_nom = motivo[8:].strip()
+                elif motivo.lower().startswith("cita "):
+                    serv_nom = motivo[5:].strip()
+                elif motivo.lower() not in ("cita", "consulta", "valoracion", "valoración"):
+                    serv_nom = motivo
+        if not serv_nom:
+            serv_nom = "Consulta Odontológica"
+
+        estado = str(c.get("statusName") or c.get("estado") or "Programada")
         starts_at_raw = c.get("startsAt") or c.get("fechaHoraInicio") or ""
         ends_at_raw = c.get("endsAt") or c.get("fechaHoraFin") or ""
         cita_id = c.get("id") or c.get("citaId") or c.get("appointmentId") or "N/A"

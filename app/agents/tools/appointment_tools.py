@@ -425,7 +425,7 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
 
 async def _modificar_cita_impl(
     cedula: str,
-    nueva_fecha_hora: str,
+    nueva_fecha_hora: Optional[str] = None,
     cita_id: Optional[str] = None,
     nuevo_profesional_id: Optional[str] = None,
 ) -> str:
@@ -435,13 +435,8 @@ async def _modificar_cita_impl(
         cita_id = (cita_id or "").strip()
         nueva_fecha_hora = (nueva_fecha_hora or "").strip()
 
-        if not cedula or not nueva_fecha_hora:
-            return (
-                "Para reprogramar tu cita necesito:\n"
-                "• Tu *número de cédula* 🆔\n"
-                "• La *nueva fecha y horario* deseado (ej: 2026-09-04 14:00)\n\n"
-                "¿Me puedes proporcionar esos datos? 😊"
-            )
+        if not cedula:
+            return "Para reprogramar tu cita, por favor indícame tu *número de cédula* 🆔. 😊"
         error_cedula = _validar_cedula(cedula)
         if error_cedula:
             return error_cedula
@@ -456,6 +451,59 @@ async def _modificar_cita_impl(
         proximas, _ = _filtrar_citas_proximas_activas(citas)
         if not proximas:
             return f"No tienes citas activas para reprogramar con la cédula *{cedula}*. ¿Deseas agendar una nueva cita? 😊"
+
+        # Si el usuario aún no ha indicado la nueva fecha/horario, presentar la cita encontrada
+        if not nueva_fecha_hora or nueva_fecha_hora.lower() in ("none", "null", "n/a", ""):
+            if len(proximas) == 1:
+                c = proximas[0]
+                prof = c.get("profesional") or c.get("professionalName", "Especialista")
+                serv = c.get("servicio") or c.get("serviceName", "Consulta Odontológica")
+                f = c.get("fecha")
+                h = c.get("hora")
+                return (
+                    f"📋 *Cita Activa Encontrada para Reprogramar:* 🦷✨\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• 🆔 *Cédula:* {cedula}\n"
+                    f"• 🦷 *Tratamiento:* {serv}\n"
+                    f"• 👨‍⚕️ *Especialista:* {prof}\n"
+                    f"• 📅 *Fecha Actual:* {f}\n"
+                    f"• ⏰ *Horario Actual:* {h}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"¿Para qué nueva fecha y horario te gustaría reprogramar tu turno? (Ej: *mañana a las 2:00 PM* o *YYYY-MM-DD HH:MM*) 😊"
+                )
+
+            if cita_id:
+                cita_sel, msg_sel = _resolver_cita_por_selector(proximas, cita_id)
+                if cita_sel:
+                    prof = cita_sel.get("profesional") or cita_sel.get("professionalName", "Especialista")
+                    serv = cita_sel.get("servicio") or cita_sel.get("serviceName", "Consulta Odontológica")
+                    f = cita_sel.get("fecha")
+                    h = cita_sel.get("hora")
+                    return (
+                        f"📋 *Cita Seleccionada para Reprogramar:* 🦷✨\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• 🆔 *Cédula:* {cedula}\n"
+                        f"• 🦷 *Tratamiento:* {serv}\n"
+                        f"• 👨‍⚕️ *Especialista:* {prof}\n"
+                        f"• 📅 *Fecha Actual:* {f}\n"
+                        f"• ⏰ *Horario Actual:* {h}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"¿Para qué nueva fecha y horario te gustaría reprogramarla? 😊"
+                    )
+                if msg_sel:
+                    return msg_sel
+
+            opciones = []
+            for i, c in enumerate(proximas, 1):
+                prof = c.get("profesional") or c.get("professionalName", "Especialista")
+                serv = c.get("servicio") or c.get("serviceName", "Consulta Odontológica")
+                opciones.append(f"{i}️⃣ *Cita #{i}:* {serv} con {prof} — 📅 {c['fecha']} a las {c['hora']}")
+
+            return (
+                f"📋 *Tus Citas Activas Programadas:* 🦷✨\n\n"
+                + "\n".join(opciones)
+                + f"\n\n¿Cuál de estas citas deseas reprogramar? Indícame el número (ej: *1* o *2*) y la nueva fecha y horario deseado. 😊"
+            )
 
         cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_encontrada:
@@ -706,21 +754,23 @@ def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
 @tool
 def modificar_cita_tool(
     cedula: str,
-    nueva_fecha_hora: str,
+    nueva_fecha_hora: Optional[str] = None,
     cita_id: Optional[str] = None,
     nuevo_profesional_id: Optional[str] = None,
 ) -> str:
     """
-    Reprograma una cita existente a una nueva fecha y horario (y opcionalmente con otro doctor).
+    Reprograma o consulta una cita activa existente para modificar su fecha u horario.
     
     Parámetros:
     - cedula: Número de cédula del paciente (OBLIGATORIO).
-    - nueva_fecha_hora: Nueva fecha y hora en formato ISO 8601 o 'YYYY-MM-DD HH:MM' (ej: '2026-09-04 14:00').
-    - cita_id: (Opcional) Número de cita a modificar (ej: '1', '2', 'primera', 'cita 1') o ID de la cita. Si el paciente solo tiene una cita activa, el sistema la detectará automáticamente.
+    - nueva_fecha_hora: (Opcional) Nueva fecha y horario solicitado (ej: '2026-09-23 10:00 AM' o 'mañana a las 2:00 PM').
+      Si el usuario aún no ha indicado la nueva fecha/horario, déjalo vacío o None para que la herramienta busque y presente sus citas activas actuales primero.
+    - cita_id: (Opcional) Número o selector de la cita a modificar (ej: '1', '2', 'primera') o ID de la cita. Si el paciente solo tiene una cita activa, el sistema la detectará automáticamente.
     - nuevo_profesional_id: (Opcional) ID o nombre del nuevo profesional si desea cambiarlo.
     
-    IMPORTANTE: Antes de proponer o confirmar un nuevo horario, consulta SIEMPRE la disponibilidad con consultar_disponibilidad_tool para asegurar que el especialista no esté en horario de almuerzo (ej. 12:00 PM a 2:00 PM) ni fuera de turno.
-    Usa esta herramienta DE INMEDIATO una vez acordada la nueva fecha/horario y teniendo la cédula del paciente. NO llames a consultar_cita_por_cedula_tool antes.
+    IMPORTANTE: Usa esta herramienta DE INMEDIATO tan pronto el usuario manifieste que desea modificar, cambiar o reprogramar una cita y tengas su cédula.
+    Si la cédula ya fue mencionada en el chat, NO se la vuelvas a pedir, invoca esta herramienta de una vez.
+    NO uses consultar_cita_por_cedula_tool para reprogramar citas.
     """
     return _run_sync(_modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id))
 
