@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 # Mensajes institucionales de contingencia y medios
 MENSAJE_FALLBACK_PACIENTE = (
-    "En este momento nuestro sistema de agenda está en mantenimiento o presentando intermitencias. "
-    "Por favor, intenta nuevamente en unos minutos. ¡Disculpa las molestias!"
+    "En este momento presentamos intermitencias temporales en el servicio. "
+    "Por favor, intenta nuevamente en unos momentos. ¡Disculpa las molestias!"
 )
 
 MENSAJE_ESCALAMIENTO = (

@@ -15,10 +15,9 @@ services:
       - WEBSOCKET_ENABLED=false
       # Instance webhook only — avoid duplicate deliveries via global + instance webhooks
       - WEBHOOK_GLOBAL_ENABLED=false
-      - WEBHOOK_GLOBAL_URL=http://agente-python:8000/webhook/whatsapp
-      - WEBHOOK_GLOBAL_AUTHORIZATION=${WEBHOOK_SECRET:-SECRETO_COMPARTIDO_CON_EVOLUTION}
+      - WEBHOOK_GLOBAL_URL=
       - WEBHOOK_EVENTS_MESSAGES_UPSERT=true
-      - WEBHOOK_EVENTS_MESSAGES_UPDATE=true
+      - WEBHOOK_EVENTS_MESSAGES_UPDATE=false
       - WEBHOOK_EVENTS_CONNECTION_UPDATE=true
       # URL interna de la API (ayuda a Baileys a estabilizar el handshake)
       - SERVER_URL=http://evolution-whatsapp:8080

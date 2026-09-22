@@ -28,6 +28,7 @@ _USER_DEBOUNCE_TASKS: Dict[str, asyncio.Task] = {}
 _USER_PUSH_NAMES: Dict[str, str] = {}
 _USER_PROCESSING: Dict[str, bool] = {}
 _USER_CALLBACKS: Dict[str, Any] = {}
+_USER_LAST_PROCESSED: Dict[str, tuple[str, float]] = {}
 
 KEYWORDS_CLINICA = {
     "cita", "citas", "agendar", "agenda", "apartar", "programar", "horario", "horarios",
@@ -142,10 +143,12 @@ class ChatOrchestrator:
             dotnet_client.registrar_mensaje(chat_identifier=phone, rol="USUARIO", contenido=message)
         )
 
-        # Acumular en el buffer del usuario
+        # Acumular en el buffer del usuario sin duplicar cadenas idénticas consecutivas
+        clean_msg = message.strip()
         if phone not in _USER_MESSAGE_BUFFERS:
             _USER_MESSAGE_BUFFERS[phone] = []
-        _USER_MESSAGE_BUFFERS[phone].append(message.strip())
+        if not _USER_MESSAGE_BUFFERS[phone] or _USER_MESSAGE_BUFFERS[phone][-1] != clean_msg:
+            _USER_MESSAGE_BUFFERS[phone].append(clean_msg)
 
         # Si ya hay un worker (debounce o procesando), solo acumular en buffer.
         # Evita dos workers en paralelo que producen respuestas duplicadas (flood).
@@ -182,7 +185,18 @@ class ChatOrchestrator:
                     cb = _USER_CALLBACKS.get(phone)
                     texto_consolidado = " ".join(mensajes).strip()
 
+                    now_mono = time.monotonic()
+                    last_processed = _USER_LAST_PROCESSED.get(phone)
+                    if last_processed:
+                        prev_text, prev_time = last_processed
+                        if prev_text == texto_consolidado and (now_mono - prev_time) < 4.0:
+                            logger.info(
+                                f"[Orchestrator] Texto idéntico ignorado por repetición rápida para {phone}: '{texto_consolidado[:40]}'"
+                            )
+                            continue
+
                     if texto_consolidado and cb:
+                        _USER_LAST_PROCESSED[phone] = (texto_consolidado, now_mono)
                         logger.info(
                             f"[Debounce Flush] Mensajes agrupados ({len(mensajes)}) para {phone}: '{texto_consolidado}'"
                         )
@@ -194,7 +208,7 @@ class ChatOrchestrator:
                 logger.error(f"[Orchestrator] Error en loop de procesamiento de {phone}: {e}", exc_info=True)
             finally:
                 _USER_PROCESSING[phone] = False
-                # Relanzar solo si hay buffer y nadie más ya encoló un worker
+                # Relanzar solo si hay buffer con contenido nuevo
                 if _USER_MESSAGE_BUFFERS.get(phone):
                     pending = _USER_DEBOUNCE_TASKS.get(phone)
                     if not pending or pending.done():

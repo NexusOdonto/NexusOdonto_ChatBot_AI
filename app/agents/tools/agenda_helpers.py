@@ -581,6 +581,111 @@ def _validar_horario_cita(
     return (True, None)
 
 
+def _filtrar_citas_proximas_activas(
+    citas: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Separa las citas de un paciente en (proximas_activas, historial).
+
+    - proximas_activas: Citas futuras o vigentes hoy (con margen de 45 min), que no
+      estén canceladas, completadas ni marcadas como no asistió.
+    - historial: Citas pasadas, canceladas, completadas o no asistidas.
+    """
+    if not citas:
+        return [], []
+
+    try:
+        from zoneinfo import ZoneInfo
+        now_colombia = datetime.now(ZoneInfo("America/Bogota"))
+    except Exception:
+        now_colombia = datetime.now()
+
+    proximas = []
+    historial = []
+
+    for c in citas:
+        prof_nom = c.get("professionalName", "Especialista Odontológico")
+        serv_nom = c.get("serviceName", "Consulta Odontológica")
+        estado = str(c.get("statusName", "Programada"))
+        starts_at_raw = c.get("startsAt") or c.get("fechaHoraInicio") or ""
+        ends_at_raw = c.get("endsAt") or c.get("fechaHoraFin") or ""
+        cita_id = c.get("id") or c.get("citaId") or c.get("appointmentId") or "N/A"
+        status_id = str(c.get("appointmentStatusId") or "").lower()
+
+        dt_start = None
+        fecha_display = ""
+        hora_display = ""
+
+        try:
+            if starts_at_raw:
+                clean_start = str(starts_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
+                dt_start = datetime.fromisoformat(clean_start)
+                if dt_start.tzinfo is None and now_colombia.tzinfo:
+                    dt_start = dt_start.replace(tzinfo=now_colombia.tzinfo)
+                fecha_display = dt_start.strftime("%d/%m/%Y")
+                hora_start_str = dt_start.strftime("%I:%M %p")
+
+                if ends_at_raw:
+                    clean_end = str(ends_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
+                    dt_end = datetime.fromisoformat(clean_end)
+                    if dt_end.tzinfo is None and now_colombia.tzinfo:
+                        dt_end = dt_end.replace(tzinfo=now_colombia.tzinfo)
+                    hora_end_str = dt_end.strftime("%I:%M %p")
+                    hora_display = f"{hora_start_str} - {hora_end_str}"
+                else:
+                    hora_display = hora_start_str
+        except Exception:
+            fecha_display = str(starts_at_raw)[:10]
+            hora_display = str(starts_at_raw)[11:16]
+
+        is_cancelled = bool(c.get("cancelledAt")) or status_id == "10000000-0000-0000-0000-000000000005" or "cancel" in estado.lower()
+        is_completed = status_id == "10000000-0000-0000-0000-000000000004" or "complet" in estado.lower()
+        is_noshow = status_id == "10000000-0000-0000-0000-000000000006" or "no_asist" in estado.lower() or "no asist" in estado.lower()
+
+        if is_noshow:
+            estado = "No Asistió"
+
+        if dt_start and not is_cancelled and not is_completed and not is_noshow:
+            if dt_start < (now_colombia - timedelta(minutes=45)):
+                estado = "No Asistió (Vencida)"
+                is_noshow = True
+
+        c_info = {
+            "id": cita_id,
+            "profesional": prof_nom,
+            "servicio": serv_nom,
+            "estado": estado,
+            "fecha": fecha_display,
+            "hora": hora_display,
+            "dt": dt_start,
+            "raw": c,
+            # Campos directos para compatibilidad con selector y cancelador
+            "startsAt": starts_at_raw,
+            "endsAt": ends_at_raw,
+            "professionalName": prof_nom,
+            "serviceName": serv_nom,
+            "statusName": estado,
+            "patientId": c.get("patientId") or c.get("pacienteId"),
+            "professionalId": c.get("professionalId"),
+            "serviceId": c.get("serviceId"),
+            "appointmentStatusId": c.get("appointmentStatusId"),
+            "appointmentOriginId": c.get("appointmentOriginId"),
+            "reasonForVisit": c.get("reasonForVisit"),
+            "notes": c.get("notes"),
+        }
+
+        if is_cancelled or is_completed or is_noshow or (dt_start and dt_start < (now_colombia - timedelta(minutes=45))):
+            historial.append(c_info)
+        else:
+            proximas.append(c_info)
+
+    max_aware = datetime.max.replace(tzinfo=now_colombia.tzinfo) if now_colombia.tzinfo else datetime.max
+    min_aware = datetime.min.replace(tzinfo=now_colombia.tzinfo) if now_colombia.tzinfo else datetime.min
+    proximas.sort(key=lambda x: x["dt"] or max_aware)
+    historial.sort(key=lambda x: x["dt"] or min_aware, reverse=True)
+
+    return proximas, historial
+
+
 def _resolver_cita_por_selector(
     citas_activas: List[Dict[str, Any]],
     selector: Optional[str] = None,

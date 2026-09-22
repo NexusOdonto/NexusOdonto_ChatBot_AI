@@ -21,6 +21,7 @@ from app.agents.tools.agenda_helpers import (
     _parsear_fecha_hora_flexible,
     _validar_horario_cita,
     _resolver_cita_por_selector,
+    _filtrar_citas_proximas_activas,
     _generar_slots_desde_regla,
     _buscar_servicio_por_texto,
     _buscar_especialidad_por_texto,

@@ -11,7 +11,11 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
-from app.clients.evolution_client import is_bot_message_id, is_recent_bot_text
+from app.clients.evolution_client import (
+    is_bot_message_id,
+    is_recent_bot_text,
+    extract_evolution_message_id,
+)
 from app.services.semantic_cache import purgar_cache_semantico
 from app.services.chat.chat_orchestrator import (
     chat_orchestrator,
@@ -36,6 +40,10 @@ _MESSAGE_DEDUPE_TTL_SECONDS = 90
 _SEEN_MESSAGE_IDS: OrderedDict[str, float] = OrderedDict()
 _PATIENT_CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
+# Deduplicación por contenido reciente por usuario (TTL 4 segundos)
+_RECENT_USER_CONTENT: OrderedDict[str, float] = OrderedDict()
+_RECENT_USER_CONTENT_TTL = 4.0
+
 
 def _prune_seen_message_ids(now: float) -> None:
     while _SEEN_MESSAGE_IDS:
@@ -55,6 +63,27 @@ def _is_duplicate_message_id(message_id: str | None) -> bool:
         return True
     _SEEN_MESSAGE_IDS[message_id] = now
     _SEEN_MESSAGE_IDS.move_to_end(message_id)
+    return False
+
+
+def _is_duplicate_user_content(phone: str, text: str) -> bool:
+    """Retorna True si un usuario envió exactamente el mismo texto hace menos de 4 segundos."""
+    if not phone or not text:
+        return False
+    norm_text = " ".join(text.strip().lower().split())
+    if not norm_text:
+        return False
+    key = f"{phone}:{norm_text}"
+    now = time.monotonic()
+    while _RECENT_USER_CONTENT:
+        oldest_k, seen_at = next(iter(_RECENT_USER_CONTENT.items()))
+        if now - seen_at <= _RECENT_USER_CONTENT_TTL:
+            break
+        _RECENT_USER_CONTENT.popitem(last=False)
+    if key in _RECENT_USER_CONTENT:
+        return True
+    _RECENT_USER_CONTENT[key] = now
+    _RECENT_USER_CONTENT.move_to_end(key)
     return False
 
 
@@ -145,7 +174,10 @@ async def receive_whatsapp_message(request: Request):
             return {"status": "ignored", "reason": "self_message_human_registered"}
 
         # 2. Descartar entregas duplicadas
-        message_id = getattr(data.key, "id", None) if data.key else None
+        message_id = (
+            getattr(data.key, "id", None) if (data.key and getattr(data.key, "id", None))
+            else extract_evolution_message_id(raw_json)
+        )
         if _is_duplicate_message_id(message_id):
             logger.info(f"[Webhook] Mensaje duplicado ignorado (key.id={message_id})")
             return {"status": "ignored", "reason": "duplicate_message_id"}
@@ -216,6 +248,10 @@ async def receive_whatsapp_message(request: Request):
                 mensaje_texto = ext.text or ""
 
         if mensaje_texto:
+            if _is_duplicate_user_content(numero_paciente, mensaje_texto):
+                logger.info(f"[Webhook] Entrega duplicada de contenido en <4s ignorada para {numero_paciente}: '{mensaje_texto[:40]}'")
+                return {"status": "ignored", "reason": "duplicate_content_rapid_repeat"}
+
             logger.info(f"[Webhook] Mensaje de texto de {numero_paciente}: '{mensaje_texto}'")
 
             async def _on_debounce_flush(phone: str, text: str, name: str):

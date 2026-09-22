@@ -24,6 +24,7 @@ from app.agents.tools.agenda_helpers import (
     _parsear_fecha_hora_flexible,
     _validar_horario_cita,
     _resolver_cita_por_selector,
+    _filtrar_citas_proximas_activas,
     _buscar_servicio_por_texto,
     _buscar_especialidad_por_texto,
     _servicios_activos,
@@ -311,82 +312,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
                 "💡 ¿Te gustaría agendar una nueva cita? Con gusto te ayudo. 😊"
             )
 
-        try:
-            from zoneinfo import ZoneInfo
-            now_colombia = datetime.now(ZoneInfo("America/Bogota"))
-        except Exception:
-            now_colombia = datetime.now()
-
-        proximas = []
-        historial = []
-
-        for c in citas:
-            prof_nom = c.get("professionalName", "Especialista Odontológico")
-            serv_nom = c.get("serviceName", "Consulta Odontológica")
-            estado = c.get("statusName", "Programada")
-            starts_at_raw = c.get("startsAt") or c.get("fechaHoraInicio") or ""
-            ends_at_raw = c.get("endsAt") or c.get("fechaHoraFin") or ""
-            cita_id = c.get("id") or c.get("citaId") or c.get("appointmentId") or "N/A"
-            status_id = str(c.get("appointmentStatusId") or "").lower()
-
-            dt_start = None
-            fecha_display = ""
-            hora_display = ""
-
-            try:
-                if starts_at_raw:
-                    clean_start = str(starts_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
-                    dt_start = datetime.fromisoformat(clean_start)
-                    if dt_start.tzinfo is None and now_colombia.tzinfo:
-                        dt_start = dt_start.replace(tzinfo=now_colombia.tzinfo)
-                    fecha_display = dt_start.strftime("%d/%m/%Y")
-                    hora_start_str = dt_start.strftime("%I:%M %p")
-
-                    if ends_at_raw:
-                        clean_end = str(ends_at_raw).replace("Z", "").split(".")[0].replace(" ", "T")
-                        dt_end = datetime.fromisoformat(clean_end)
-                        if dt_end.tzinfo is None and now_colombia.tzinfo:
-                            dt_end = dt_end.replace(tzinfo=now_colombia.tzinfo)
-                        hora_end_str = dt_end.strftime("%I:%M %p")
-                        hora_display = f"{hora_start_str} - {hora_end_str}"
-                    else:
-                        hora_display = hora_start_str
-            except Exception:
-                fecha_display = str(starts_at_raw)[:10]
-                hora_display = str(starts_at_raw)[11:16]
-
-            is_cancelled = bool(c.get("cancelledAt")) or status_id == "10000000-0000-0000-0000-000000000005" or "cancel" in estado.lower()
-            is_completed = status_id == "10000000-0000-0000-0000-000000000004" or "complet" in estado.lower()
-            is_noshow = status_id == "10000000-0000-0000-0000-000000000006" or "no_asist" in estado.lower() or "no asist" in estado.lower()
-
-            if is_noshow:
-                estado = "No Asistió"
-
-            if dt_start and not is_cancelled and not is_completed and not is_noshow:
-                if dt_start < (now_colombia - timedelta(minutes=45)):
-                    estado = "No Asistió (Vencida)"
-                    is_noshow = True
-
-            c_info = {
-                "id": cita_id,
-                "profesional": prof_nom,
-                "servicio": serv_nom,
-                "estado": estado,
-                "fecha": fecha_display,
-                "hora": hora_display,
-                "dt": dt_start,
-                "raw": c,
-            }
-
-            if is_cancelled or is_completed or is_noshow or (dt_start and dt_start < (now_colombia - timedelta(minutes=45))):
-                historial.append(c_info)
-            else:
-                proximas.append(c_info)
-
-        max_aware = datetime.max.replace(tzinfo=now_colombia.tzinfo) if now_colombia.tzinfo else datetime.max
-        min_aware = datetime.min.replace(tzinfo=now_colombia.tzinfo) if now_colombia.tzinfo else datetime.min
-        proximas.sort(key=lambda x: x["dt"] or max_aware)
-        historial.sort(key=lambda x: x["dt"] or min_aware, reverse=True)
+        proximas, historial = _filtrar_citas_proximas_activas(citas)
 
         resumen = [f"📋 *Citas Registradas para la Cédula:* `{cedula}` 🦷✨\n"]
 
@@ -449,11 +375,11 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
                 "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
             )
 
-        citas_activas = [c for c in citas if str(c.get("statusName", "")).lower() != "cancelada"]
-        if not citas_activas:
+        proximas, _ = _filtrar_citas_proximas_activas(citas)
+        if not proximas:
             return f"Todas las citas registradas para la cédula *{cedula}* ya se encuentran canceladas o atendidas. 😊"
 
-        cita_encontrada, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
+        cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_encontrada:
             return msg_opciones or "No se pudo identificar la cita a cancelar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
 
@@ -527,11 +453,11 @@ async def _modificar_cita_impl(
                 "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
             )
 
-        citas_activas = [c for c in citas if str(c.get("statusName", "")).lower() != "cancelada"]
-        if not citas_activas:
+        proximas, _ = _filtrar_citas_proximas_activas(citas)
+        if not proximas:
             return f"No tienes citas activas para reprogramar con la cédula *{cedula}*. ¿Deseas agendar una nueva cita? 😊"
 
-        cita_encontrada, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
+        cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_encontrada:
             return msg_opciones or "No se pudo identificar la cita a reprogramar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
 
@@ -665,18 +591,15 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
                 "Si deseas agendar una nueva cita, ¡con gusto te ayudo! 😊"
             )
 
-        citas_activas = [
-            c for c in citas
-            if str(c.get("statusName", "")).lower() not in ("cancelada", "completed", "atendida")
-        ]
-        if not citas_activas:
+        proximas, _ = _filtrar_citas_proximas_activas(citas)
+        if not proximas:
             return f"No tienes citas pendientes por confirmar para la cédula *{cedula}*. Todas se encuentran completadas o canceladas. 😊"
 
-        cita_a_confirmar, msg_opciones = _resolver_cita_por_selector(citas_activas, cita_id)
+        cita_a_confirmar, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_a_confirmar:
             if msg_opciones:
                 return msg_opciones
-            cita_a_confirmar = citas_activas[0]
+            cita_a_confirmar = proximas[0]
 
         target_id = str(cita_a_confirmar.get("id") or cita_a_confirmar.get("citaId"))
         res = await dotnet_client.confirmar_estado_cita(target_id)
@@ -754,12 +677,11 @@ def agendar_cita_tool(
 
 @tool
 def consultar_cita_por_cedula_tool(cedula: str) -> str:
-    """
-    Consulta todas las citas programadas de un paciente usando su número de cédula o documento de identidad.
+    """Consulta todas las citas programadas de un paciente usando su número de cédula o documento de identidad.
     Muestra: nombre del paciente, cédula, doctor asignado, tratamiento, fecha, horario y estado de cada cita.
     
-    Usa esta herramienta ÚNICAMENTE cuando el usuario realice una consulta general sobre sus citas ("¿qué citas tengo?", "¿cuándo es mi cita?").
-    NUNCA uses esta herramienta si el usuario ya expresó la intención de cancelar o reprogramar su cita; en esos casos debes usar DIRECTAMENTE cancelar_cita_tool o modificar_cita_tool.
+    Usa esta herramienta ÚNICAMENTE cuando el usuario realice una consulta explícita sobre sus citas ("¿qué citas tengo?", "¿cuándo es mi cita?", "quiero ver mis citas", "consultar mis citas").
+    PROHIBICIÓN ESTRICTA: NUNCA uses esta herramienta si el usuario está en proceso de AGENDAR una cita nueva, cancelar o reprogramar, incluso si el usuario acaba de escribir únicamente su número de cédula. En esos casos debes continuar el flujo correspondiente y NO consultar sus citas anteriores.
     Si el usuario no ha proporcionado su cédula, pídesela antes de invocar esta herramienta.
     """
     return _run_sync(_consultar_cita_por_cedula_impl(cedula))
