@@ -262,6 +262,44 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 
     context_str += "\n\n[SEGURIDAD DE DATOS Y CONTEXTO DEL PACIENTE]\n" + "\n".join(user_info_lines)
 
+    raw_msgs = state.get("messages", [])
+    last_user_msg = ""
+    prev_ai_msg = ""
+    cedula_detectada = None
+
+    for m in reversed(raw_msgs):
+        if isinstance(m, HumanMessage) and not last_user_msg and m.content:
+            last_user_msg = str(m.content).strip()
+        elif isinstance(m, AIMessage) and not prev_ai_msg and m.content:
+            prev_ai_msg = str(m.content).strip().lower()
+        if isinstance(m, HumanMessage) and m.content and not cedula_detectada:
+            m_ced = re.search(r"\b(\d{7,12})\b", str(m.content))
+            if m_ced:
+                cedula_detectada = m_ced.group(1)
+
+    # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
+    if last_user_msg:
+        norm_user = last_user_msg.lower()
+        if re.match(r"^\d{7,12}$", last_user_msg) and any(w in prev_ai_msg for w in ["reprogramar", "modificar", "cambiar", "cambio"]):
+            context_str += (
+                f"\n\n[DIRECTIVA DE ACCIÓN INMEDIATA - REPROGRAMACIÓN DE CITA]\n"
+                f"El usuario respondió con su número de cédula '{last_user_msg}' para modificar/reprogramar su cita.\n"
+                f"DEBES INVOCAR OBLIGATORIAMENTE la herramienta: modificar_cita_tool(cedula='{last_user_msg}').\n"
+                "NO respondas con texto libre ni inventes citas pasadas. Llama a la herramienta para obtener sus citas reales."
+            )
+        elif any(w in norm_user for w in ["modificar", "reprogramar", "cambiar mi cita", "cambiar la cita"]) and cedula_detectada:
+            context_str += (
+                f"\n\n[DIRECTIVA DE ACCIÓN INMEDIATA - CÉDULA CONOCIDA: {cedula_detectada}]\n"
+                f"El usuario desea modificar o reprogramar su cita y su cédula ya está registrada en la conversación ({cedula_detectada}).\n"
+                f"ESTÁ TOTALMENTE PROHIBIDO pedir la cédula nuevamente. Invoca DE INMEDIATO: modificar_cita_tool(cedula='{cedula_detectada}')."
+            )
+        elif any(w in norm_user for w in ["cancelar", "anular"]) and "cita" in norm_user and cedula_detectada:
+            context_str += (
+                f"\n\n[DIRECTIVA DE ACCIÓN INMEDIATA - CANCELAR CON CÉDULA: {cedula_detectada}]\n"
+                f"El usuario desea cancelar su cita y su cédula ya es conocida ({cedula_detectada}).\n"
+                f"Invoca DE INMEDIATO: cancelar_cita_tool(cedula='{cedula_detectada}')."
+            )
+
     combined_system_message = SystemMessage(
         content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO TEMPORAL Y CLÍNICO]\n{context_str}"
     )
@@ -269,9 +307,13 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     chat_messages = []
     is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
 
-    for msg in state.get("messages", []):
-        if isinstance(msg, AIMessage) and msg.content and "[Consultando información" in msg.content:
-            continue
+    for msg in raw_msgs:
+        if isinstance(msg, AIMessage) and msg.content:
+            if "[Consultando información" in msg.content:
+                continue
+            # Filtrar tarjetas de citas obsoletas o contaminadas de sesiones pasadas
+            if any(obs in msg.content for obs in ["Cr 24 #35-12", "0a00dfec", "Tu Próxima Cita Programada", "Tus Citas en Nexus Odonto"]):
+                continue
         if isinstance(msg, SystemMessage):
             chat_messages.append(HumanMessage(content=f"[Contexto / Resumen de conversación previa]:\n{msg.content}"))
         elif is_gemini and isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and not msg.content:
