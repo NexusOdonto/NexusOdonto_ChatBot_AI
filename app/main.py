@@ -87,8 +87,8 @@ app.add_middleware(
 
 # Registro de rutas
 app.include_router(webhook_router, tags=["WhatsApp Webhook"])
+# handoff_router already has prefix="/api/v1" — do not mount twice (duplicate handlers)
 app.include_router(handoff_router, tags=["Agent Handoff & Messaging"])
-app.include_router(handoff_router, prefix="/api/v1", tags=["Agent Handoff & Messaging (v1)"])
 app.include_router(reminders_router, tags=["Recordatorios de Citas"])
 app.include_router(reminders_router, prefix="/api/v1", tags=["Recordatorios de Citas (v1)"])
 app.include_router(qr_router)
