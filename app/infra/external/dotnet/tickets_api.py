@@ -2,8 +2,10 @@
 
 import logging
 import asyncio
+import time
+import re
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import threading
 
 from app.infra.external.dotnet.http_transport import (
@@ -34,7 +36,7 @@ class DotNetTicketsApi:
 
     def __init__(self, transport: Optional[DotNetHttpTransport] = None):
         self.transport = transport or dotnet_transport
-        self._conversations_cache: Dict[str, str] = {}
+        self._conversations_cache: Dict[str, Tuple[str, float]] = {}
         self._conversations_locks: Dict[int, asyncio.Lock] = {}
         self._conversations_locks_guard = threading.Lock()
         self._reasons_cache: Optional[List[Dict[str, Any]]] = None
@@ -238,29 +240,50 @@ class DotNetTicketsApi:
             return response.json()
         return None
 
+    def _set_cached_conv(self, ident: str, raw_tid: str, clean_tid: str, conv_id: str, now: float) -> None:
+        val = (conv_id, now)
+        if ident:
+            self._conversations_cache[ident] = val
+        if raw_tid:
+            self._conversations_cache[raw_tid] = val
+        if clean_tid:
+            self._conversations_cache[clean_tid] = val
+
     async def obtener_o_crear_conversacion(
         self,
         chat_identifier: str,
         channel_id: Optional[str] = None,
         patient_id: Optional[str] = None,
     ) -> Optional[str]:
-        """Obtiene el ID de una conversación activa o crea una nueva en el backend .NET."""
+        """Obtiene el ID de una conversación activa o crea una nueva en el backend .NET.
+        Prioriza conversaciones en atención humana (Uso Manual) o escaladas para que los
+        mensajes entrantes del paciente no se desvíen a sesiones antiguas o cerradas.
+        """
         from app.services.whatsapp_identity import obtener_telefono_canonico
-        ident = obtener_telefono_canonico(str(chat_identifier or "")).strip()
+        raw_tid = str(chat_identifier or "").strip()
+        ident = obtener_telefono_canonico(raw_tid).strip()
         if not ident:
             return None
 
-        if ident in self._conversations_cache:
-            return self._conversations_cache[ident]
+        clean_tid = re.sub(r"\D", "", ident)
+        if len(clean_tid) > 10:
+            clean_tid = clean_tid[-10:]
+
+        now = time.monotonic()
+        # Verificar caché con TTL de 15 segundos para no retornar conversaciones obsoletas
+        cached = self._conversations_cache.get(ident) or self._conversations_cache.get(raw_tid)
+        if cached:
+            conv_id, cached_at = cached
+            if (now - cached_at) < 15.0:
+                return conv_id
 
         async with self._conversations_lock():
-            if ident in self._conversations_cache:
-                return self._conversations_cache[ident]
-
-            raw_tid = str(chat_identifier or "").strip()
-            clean_tid = re.sub(r"\D", "", ident)
-            if len(clean_tid) > 10:
-                clean_tid = clean_tid[-10:]
+            # Doble chequeo dentro del lock
+            cached = self._conversations_cache.get(ident) or self._conversations_cache.get(raw_tid)
+            if cached:
+                conv_id, cached_at = cached
+                if (now - cached_at) < 15.0:
+                    return conv_id
 
             resp = await self.transport.request("GET", "ChatbotConversations")
             if resp and resp.status_code == 200:
@@ -268,6 +291,8 @@ class DotNetTicketsApi:
                     items = resp.json()
                     if isinstance(items, dict):
                         items = items.get("items", [])
+
+                    matching_convs = []
                     for conv in items:
                         c_chat = str(conv.get("chatIdentifier", "")).strip()
                         c_canon = obtener_telefono_canonico(c_chat)
@@ -282,29 +307,55 @@ class DotNetTicketsApi:
                             or (clean_tid and c_digits and clean_tid == c_digits)
                         )
                         if matches:
-                            conv_id = str(conv.get("id"))
-                            conv_status = str(conv.get("conversationStatusId", "")).lower()
-                            is_human_or_escalated = conv_status in (
-                                self.STATUS_ESCALADA.lower(),
-                                self.STATUS_ATENDIDA_HUMANO.lower(),
-                            )
-                            if (conv.get("closedAt") or conv_status == self.STATUS_CERRADA.lower()) and not is_human_or_escalated:
-                                try:
-                                    payload_put = {
-                                        "conversationStatusId": self.STATUS_ACTIVA,
-                                        "patientId": conv.get("patientId") or patient_id,
-                                        "closedAt": None,
-                                    }
-                                    await self.transport.request("PUT", f"ChatbotConversations/{conv_id}", json=payload_put)
-                                    logger.info(f"[TicketsApi] Conversación {conv_id} reabierta como ACTIVA para {ident}")
-                                except Exception as e_put:
-                                    logger.warning(f"[TicketsApi] Error al reabrir conversación {conv_id}: {e_put}")
+                            matching_convs.append(conv)
 
-                            self._conversations_cache[ident] = conv_id
-                            self._conversations_cache[raw_tid] = conv_id
-                            if clean_tid:
-                                self._conversations_cache[clean_tid] = conv_id
-                            return conv_id
+                    if matching_convs:
+                        def _sort_key(c):
+                            return str(c.get("lastInteractionAt") or c.get("startedAt") or "")
+
+                        # 1. Prioridad: Conversación en atención humana (ATENDIDA_HUMANO) o ESCALADA
+                        human_escalated = [
+                            c for c in matching_convs
+                            if str(c.get("conversationStatusId", "")).lower() in (
+                                self.STATUS_ATENDIDA_HUMANO.lower(),
+                                self.STATUS_ESCALADA.lower(),
+                            ) and not c.get("closedAt")
+                        ]
+                        if human_escalated:
+                            human_escalated.sort(key=_sort_key, reverse=True)
+                            chosen_id = str(human_escalated[0]["id"])
+                            self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
+                            return chosen_id
+
+                        # 2. Prioridad: Conversación ACTIVA (abierta y sin cerrar)
+                        active_convs = [
+                            c for c in matching_convs
+                            if str(c.get("conversationStatusId", "")).lower() == self.STATUS_ACTIVA.lower()
+                            and not c.get("closedAt")
+                        ]
+                        if active_convs:
+                            active_convs.sort(key=_sort_key, reverse=True)
+                            chosen_id = str(active_convs[0]["id"])
+                            self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
+                            return chosen_id
+
+                        # 3. Si todas están cerradas, tomar la MÁS RECIENTE para reabrirla
+                        matching_convs.sort(key=_sort_key, reverse=True)
+                        most_recent = matching_convs[0]
+                        chosen_id = str(most_recent["id"])
+                        try:
+                            payload_put = {
+                                "conversationStatusId": self.STATUS_ACTIVA,
+                                "patientId": most_recent.get("patientId") or patient_id,
+                                "closedAt": None,
+                            }
+                            await self.transport.request("PUT", f"ChatbotConversations/{chosen_id}", json=payload_put)
+                            logger.info(f"[TicketsApi] Conversación {chosen_id} reabierta como ACTIVA para {ident}")
+                        except Exception as e_put:
+                            logger.warning(f"[TicketsApi] Error al reabrir conversación {chosen_id}: {e_put}")
+
+                        self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
+                        return chosen_id
                 except Exception as e:
                     logger.debug(f"[TicketsApi] Error parseando conversaciones: {e}")
 
@@ -329,7 +380,7 @@ class DotNetTicketsApi:
                     data = resp_post.json()
                     conv_id = str(data.get("id"))
                     if conv_id:
-                        self._conversations_cache[ident] = conv_id
+                        self._set_cached_conv(ident, raw_tid, clean_tid, conv_id, now)
                         return conv_id
                 except Exception as e:
                     logger.error(f"[TicketsApi] Error parseando creación de conversación: {e}")
@@ -380,7 +431,9 @@ class DotNetTicketsApi:
         rag_confidence: Optional[float] = None,
         patient_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Registra un mensaje asegurando que la conversación exista en base de datos."""
+        """Registra un mensaje asegurando que la conversación exista en base de datos.
+        No sobreescribe el estado de la conversación para no desarmar la atención de asesor humano.
+        """
         try:
             if not contenido or not str(contenido).strip():
                 return None
@@ -396,20 +449,6 @@ class DotNetTicketsApi:
                 contenido=contenido,
                 rag_confidence=rag_confidence,
             )
-
-            # Si el usuario escribió, asegurar que la conversación quede activa y con timestamp al día en recepción
-            if str(rol).upper().strip() in ("USUARIO", "USER", "HUMAN"):
-                try:
-                    payload_touch = {
-                        "conversationStatusId": self.STATUS_ACTIVA,
-                        "closedAt": None,
-                    }
-                    asyncio.create_task(
-                        self.transport.request("PUT", f"ChatbotConversations/{conv_id}", json=payload_touch)
-                    )
-                except Exception as e_touch:
-                    logger.debug(f"[TicketsApi] No se pudo refrescar timestamp de conversación {conv_id}: {e_touch}")
-
             return res
         except Exception as e:
             logger.error(f"[TicketsApi] Error registrando mensaje para {chat_identifier}: {e}")
@@ -418,9 +457,16 @@ class DotNetTicketsApi:
     def limpiar_cache_conversacion(self, chat_identifier: str) -> None:
         """Limpia el ID en caché cuando la conversación se reinicia."""
         from app.services.whatsapp_identity import obtener_telefono_canonico
-        ident = obtener_telefono_canonico(str(chat_identifier or "")).strip()
+        raw_tid = str(chat_identifier or "").strip()
+        ident = obtener_telefono_canonico(raw_tid).strip()
+        clean_tid = re.sub(r"\D", "", ident)
+        if len(clean_tid) > 10:
+            clean_tid = clean_tid[-10:]
+
         self._conversations_cache.pop(ident, None)
-        self._conversations_cache.pop(str(chat_identifier).strip(), None)
+        self._conversations_cache.pop(raw_tid, None)
+        if clean_tid:
+            self._conversations_cache.pop(clean_tid, None)
 
 
 tickets_api = DotNetTicketsApi()
