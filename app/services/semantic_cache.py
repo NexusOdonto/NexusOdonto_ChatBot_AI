@@ -94,6 +94,26 @@ def _get_fast_response(text: str) -> Optional[str]:
     return None
 
 
+def _should_skip_l2_embed(text: str) -> bool:
+    """Skip L2 Gemini embed for transactional text (no reply invented — just miss faster)."""
+    norm = _normalize_query_key(text)
+    if not norm:
+        return False
+    digits = re.sub(r"\D", "", text)
+    if 6 <= len(digits) <= 12 and re.fullmatch(r"[\d\s.\-]+", text.strip()):
+        return True
+    agenda_hints = (
+        "agendar",
+        "cita",
+        "reservar",
+        "disponibilidad",
+        "cancelar cita",
+        "modificar cita",
+        "reprogramar",
+    )
+    return any(h in norm for h in agenda_hints)
+
+
 def ensure_cache_collection(client: Optional[QdrantClient] = None) -> None:
     """Crea la colección de caché semántico en Qdrant si no existe o si cambió la dimensión."""
     if client is None:
