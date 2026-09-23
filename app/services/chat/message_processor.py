@@ -238,11 +238,18 @@ async def registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> 
             rol="ASESOR",
             contenido=mensaje_texto,
         )
+        # Mantener la conversación en atención humana (Uso Manual) para que el bot no interfiera
+        conv_id = await dotnet_client.obtener_o_crear_conversacion(numero_paciente)
+        if conv_id:
+            await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ATENDIDA_HUMANO)
         try:
             config = get_thread_config(numero_paciente)
             await get_graph().aupdate_state(
                 config,
-                {"messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")]},
+                {
+                    "messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")],
+                    "conversation_status": "ESCALADA",
+                },
             )
         except Exception:
             pass

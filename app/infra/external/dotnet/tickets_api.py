@@ -257,6 +257,11 @@ class DotNetTicketsApi:
             if ident in self._conversations_cache:
                 return self._conversations_cache[ident]
 
+            raw_tid = str(chat_identifier or "").strip()
+            clean_tid = re.sub(r"\D", "", ident)
+            if len(clean_tid) > 10:
+                clean_tid = clean_tid[-10:]
+
             resp = await self.transport.request("GET", "ChatbotConversations")
             if resp and resp.status_code == 200:
                 try:
@@ -264,7 +269,19 @@ class DotNetTicketsApi:
                     if isinstance(items, dict):
                         items = items.get("items", [])
                     for conv in items:
-                        if str(conv.get("chatIdentifier", "")).strip() == ident:
+                        c_chat = str(conv.get("chatIdentifier", "")).strip()
+                        c_canon = obtener_telefono_canonico(c_chat)
+                        c_digits = re.sub(r"\D", "", c_canon)
+                        if len(c_digits) > 10:
+                            c_digits = c_digits[-10:]
+
+                        matches = (
+                            c_chat == raw_tid
+                            or c_chat == ident
+                            or c_canon == ident
+                            or (clean_tid and c_digits and clean_tid == c_digits)
+                        )
+                        if matches:
                             conv_id = str(conv.get("id"))
                             conv_status = str(conv.get("conversationStatusId", "")).lower()
                             is_human_or_escalated = conv_status in (
@@ -284,6 +301,9 @@ class DotNetTicketsApi:
                                     logger.warning(f"[TicketsApi] Error al reabrir conversación {conv_id}: {e_put}")
 
                             self._conversations_cache[ident] = conv_id
+                            self._conversations_cache[raw_tid] = conv_id
+                            if clean_tid:
+                                self._conversations_cache[clean_tid] = conv_id
                             return conv_id
                 except Exception as e:
                     logger.debug(f"[TicketsApi] Error parseando conversaciones: {e}")
