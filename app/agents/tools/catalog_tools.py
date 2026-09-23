@@ -2,6 +2,7 @@
 Totalmente desacopladas, con validación de horarios y protección contra respuestas robóticas.
 """
 
+import asyncio
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -35,10 +36,13 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
         if not norm_query:
             return "Por favor, indica una especialidad o servicio válido."
 
-        servicios = await dotnet_client.obtener_servicios() or []
+        servicios, especialidades = await asyncio.gather(
+            dotnet_client.obtener_servicios(),
+            dotnet_client.obtener_especialidades(),
+        )
+        servicios = servicios or []
+        especialidades = especialidades or []
         servicio_encontrado = _buscar_servicio_por_texto(norm_query, servicios)
-
-        especialidades = await dotnet_client.obtener_especialidades() or []
         especialidad_encontrada = None
         esp_id = None
         esp_nombre = None
@@ -108,6 +112,15 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
         except Exception:
             pass
 
+        # Una sola consulta de citas del día (antes: por cada profesional)
+        fecha_target = str(fecha)[:10]
+        try:
+            citas_raw_shared = await dotnet_client.consultar_citas(fecha_target)
+            if not citas_raw_shared:
+                citas_raw_shared = await dotnet_client.consultar_citas("")
+        except Exception:
+            citas_raw_shared = None
+
         resultados = []
         for prof in profesionales:
             prof_id = _obtener_valor(prof, "id", "profesionalId", "professionalId")
@@ -154,10 +167,7 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
 
                 # Filtrar traslapes con citas existentes
                 try:
-                    fecha_target = str(fecha)[:10]
-                    citas_raw = await dotnet_client.consultar_citas(fecha_target)
-                    if not citas_raw:
-                        citas_raw = await dotnet_client.consultar_citas("")
+                    citas_raw = citas_raw_shared
                     if isinstance(citas_raw, dict):
                         citas_existentes = citas_raw.get("items", [])
                     elif isinstance(citas_raw, list):

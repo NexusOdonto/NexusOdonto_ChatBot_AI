@@ -55,10 +55,6 @@ _FAST_RESPONSES: Dict[str, str] = {
         "¡Con el mayor de los gustos! 😊 En *Nexus Odonto* siempre estamos listos para cuidar de tu salud bucal 🦷✨.\n\n"
         "Si necesitas algo más, solo escríbeme. ¡Que tengas un excelente día! 👋"
     ),
-    "agendar": (
-        "¡Con gusto te ayudo a *agendar tu cita* en *Nexus Odonto* 📅🦷!\n\n"
-        "Para continuar, por favor escríbeme tu *número de cédula* 🆔."
-    ),
 }
 
 # Mapeo de frases exactas / patrones hacia respuestas rápidas
@@ -73,7 +69,6 @@ _FAST_MATCH_PATTERNS = [
     (r"^(contacto|telefono|numero de telefono|whatsapp|linea telefonica|numero de contacto|canales de atencion)$", "contacto"),
     # Despedidas / Agradecimientos
     (r"^(gracias|muchas gracias|muchisimas gracias|mil gracias|chao|adios|hasta luego|vale gracias|ok gracias)$", "agradecimiento"),
-    (r"^(quiero agendar( una)? cita|agendar( una)? cita|sacar( una)? cita|apartar( una)? cita|programar( una)? cita|reservar( una)? cita|necesito agendar( una)? cita|deseo agendar( una)? cita|me gustaria agendar( una)? cita|me gustaría agendar( una)? cita|cita nueva|nueva cita)$", "agendar"),
 ]
 
 
@@ -246,14 +241,10 @@ async def buscar_en_cache(pregunta: str) -> Optional[str]:
     if len(query) < 4:
         return None
 
-    # Evitar embedding Gemini en miss de agenda/cédula (fast miss sin red)
-    try:
-        from app.services.chat.booking_fastpath import is_booking_skip_embed
-        if is_booking_skip_embed(query):
-            logger.info(f"[Semantic Cache] Skip L2 embed (agenda/cédula) query='{query[:40]}'")
-            return None
-    except Exception:
-        pass
+    # Miss-only: skip Gemini embed for pure digits / agenda keywords (no invented reply)
+    if _should_skip_l2_embed(query):
+        logger.info(f"[Semantic Cache] Skip L2 embed (agenda/cedula) query='{query[:40]}'")
+        return None
 
     # 3. Caché L2 Semántico en Qdrant
     try:

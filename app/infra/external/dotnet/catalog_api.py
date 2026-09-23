@@ -1,10 +1,31 @@
 """Endpoints de Catálogo, Servicios y Profesionales en la API .NET."""
 
+import asyncio
 import logging
+import time
 from typing import Optional, List, Dict, Any
 from app.infra.external.dotnet.http_transport import dotnet_transport, DotNetHttpTransport
 
 logger = logging.getLogger(__name__)
+
+_CATALOG_TTL_SECONDS = 60.0
+_catalog_cache = {}
+
+
+def _cache_get(key: str):
+    entry = _catalog_cache.get(key)
+    if not entry:
+        return None
+    value, ts = entry
+    if (time.monotonic() - ts) > _CATALOG_TTL_SECONDS:
+        return None
+    return value
+
+
+def _cache_set(key: str, value):
+    _catalog_cache[key] = (value, time.monotonic())
+    return value
+
 
 
 class DotNetCatalogApi:
@@ -13,46 +34,64 @@ class DotNetCatalogApi:
 
     async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de servicios activos de la clínica."""
+        cached = _cache_get("Services")
+        if cached is not None:
+            return cached
         response = await self.transport.request("GET", "Services")
         if response and response.status_code == 200:
             payload = response.json()
             if isinstance(payload, list):
-                return payload
+                return _cache_set("Services", payload)
             if isinstance(payload, dict):
-                return payload.get("items", [])
+                return _cache_set("Services", payload.get("items", []))
         return None
 
     async def obtener_especialidades(self) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de especialidades de la clínica."""
+        cached = _cache_get("Specialties")
+        if cached is not None:
+            return cached
         response = await self.transport.request("GET", "Specialties")
         if response and response.status_code == 200:
             payload = response.json()
             if isinstance(payload, list):
-                return payload
+                return _cache_set("Specialties", payload)
             if isinstance(payload, dict):
-                return payload.get("items", [])
+                return _cache_set("Specialties", payload.get("items", []))
         return None
 
     async def obtener_empleados(self) -> List[Dict[str, Any]]:
         """Obtiene la lista de empleados activos en el backend .NET."""
+        cached = _cache_get("Employees")
+        if cached is not None:
+            return cached
         response = await self.transport.request("GET", "Employees")
         if response and response.status_code == 200:
             payload = response.json()
-            return payload if isinstance(payload, list) else payload.get("items", [])
+            items = payload if isinstance(payload, list) else payload.get("items", [])
+            return _cache_set("Employees", items)
         return []
 
     async def obtener_personas(self) -> List[Dict[str, Any]]:
         """Obtiene el listado general de personas registradas."""
+        cached = _cache_get("Persons")
+        if cached is not None:
+            return cached
         response = await self.transport.request("GET", "Persons")
         if response and response.status_code == 200:
             payload = response.json()
-            return payload if isinstance(payload, list) else payload.get("items", [])
+            items = payload if isinstance(payload, list) else payload.get("items", [])
+            return _cache_set("Persons", items)
         return []
 
     async def obtener_profesionales(
         self, especialidad_id: Optional[Any] = None
     ) -> Optional[List[Dict[str, Any]]]:
         """Obtiene la lista de profesionales enriquecidos con su nombre completo."""
+        cache_key = f"Professionals:{especialidad_id or 'all'}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
         params: Dict[str, Any] = {}
         if especialidad_id is not None:
             params["especialidadId"] = str(especialidad_id)
@@ -63,12 +102,14 @@ class DotNetCatalogApi:
             payload = response.json()
             profs = payload if isinstance(payload, list) else payload.get("items", [])
             if not profs:
-                return []
+                return _cache_set(cache_key, [])
 
-            # Enriquecer con nombres reales consultando empleados y personas
+            # Enriquecer con nombres reales (Employees + Persons en paralelo, con caché)
             try:
-                empleados = await self.obtener_empleados()
-                personas = await self.obtener_personas()
+                empleados, personas = await asyncio.gather(
+                    self.obtener_empleados(),
+                    self.obtener_personas(),
+                )
                 emp_to_person = {e.get("id"): e.get("personId") for e in empleados if isinstance(e, dict)}
                 person_names = {
                     p.get("id"): f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
@@ -92,7 +133,7 @@ class DotNetCatalogApi:
             except Exception as enh_err:
                 logger.debug(f"[CatalogApi] No se pudieron enriquecer nombres de profesionales: {enh_err}")
 
-            return profs
+            return _cache_set(cache_key, profs)
         return None
 
     async def consultar_disponibilidad(

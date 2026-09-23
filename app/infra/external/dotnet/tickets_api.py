@@ -37,6 +37,8 @@ class DotNetTicketsApi:
     def __init__(self, transport: Optional[DotNetHttpTransport] = None):
         self.transport = transport or dotnet_transport
         self._conversations_cache: Dict[str, Tuple[str, float]] = {}
+        self._conversations_list_cache: Optional[Tuple[List[Dict[str, Any]], float]] = None
+        self._conversations_list_ttl: float = 10.0
         self._conversations_locks: Dict[int, asyncio.Lock] = {}
         self._conversations_locks_guard = threading.Lock()
         self._reasons_cache: Optional[List[Dict[str, Any]]] = None
@@ -231,6 +233,44 @@ class DotNetTicketsApi:
             return resp.json()
         return None
 
+
+    def peek_cached_conversation_id(self, chat_identifier: str) -> Optional[str]:
+        """Devuelve conversationId en caché local si aún es válido (<15s)."""
+        from app.services.whatsapp_identity import obtener_telefono_canonico
+        raw_tid = str(chat_identifier or "").strip()
+        ident = obtener_telefono_canonico(raw_tid).strip()
+        now = time.monotonic()
+        for key in (ident, raw_tid):
+            cached = self._conversations_cache.get(key)
+            if cached:
+                conv_id, cached_at = cached
+                if (now - cached_at) < 15.0:
+                    return conv_id
+        return None
+
+    async def _list_conversations(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """GET ChatbotConversations con TTL corto (evita duplicar el listado en el mismo turno)."""
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._conversations_list_cache is not None
+            and (now - self._conversations_list_cache[1]) < self._conversations_list_ttl
+        ):
+            return self._conversations_list_cache[0]
+        resp = await self.transport.request("GET", "ChatbotConversations")
+        items: List[Dict[str, Any]] = []
+        if resp and resp.status_code == 200:
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict):
+                    items = payload.get("items", []) or []
+                elif isinstance(payload, list):
+                    items = payload
+            except Exception as e:
+                logger.debug(f"[TicketsApi] Error parseando lista de conversaciones: {e}")
+        self._conversations_list_cache = (items, now)
+        return items
+
     async def obtener_contexto_conversacion(
         self, conversacion_chatbot_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -285,13 +325,9 @@ class DotNetTicketsApi:
                 if (now - cached_at) < 15.0:
                     return conv_id
 
-            resp = await self.transport.request("GET", "ChatbotConversations")
-            if resp and resp.status_code == 200:
+            items = await self._list_conversations()
+            if True:
                 try:
-                    items = resp.json()
-                    if isinstance(items, dict):
-                        items = items.get("items", [])
-
                     matching_convs = []
                     for conv in items:
                         c_chat = str(conv.get("chatIdentifier", "")).strip()

@@ -23,13 +23,6 @@ from app.services.audio_service import (
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
 from app.services.semantic_cache import buscar_en_cache
-from app.services.chat.booking_fastpath import (
-    try_booking_fastpath,
-    clear_booking_state,
-    set_booking_state,
-    is_agendar_intent,
-    get_booking_state,
-)
 from app.services.inactivity_service import inactivity_service
 from app.core.llm_factory import extract_text_content
 
@@ -123,13 +116,16 @@ async def reset_conversation(phone_number: str) -> None:
         logger.warning(f"[Reset] No se encontró checkpointer para {phone_number}")
 
     dotnet_client.limpiar_cache_conversacion(phone_number)
-    clear_booking_state(phone_number)
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     reset_msg = "🔄 Memoria reiniciada con éxito. ¡Hola! Soy el asistente virtual de Nexus Odonto. ¿En qué puedo colaborarte hoy?"
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
     asyncio.create_task(
         dotnet_client.registrar_mensaje(phone_number, "CHATBOT", reset_msg)
     )
+
+
+_ESCALATION_CACHE: dict[str, tuple[bool, float]] = {}
+_ESCALATION_CACHE_TTL = 8.0
 
 
 async def is_escalated(thread_id: str) -> bool:
@@ -153,37 +149,53 @@ async def is_escalated(thread_id: str) -> bool:
     except Exception:
         is_graph_escalated = False
 
+    from app.infra.external.dotnet.tickets_api import tickets_api
+
+    cache_key = clean_tid or raw_tid
+    now_mono = time.monotonic()
+
+    def _conv_is_escalated(c: dict) -> bool:
+        conv_status_id = str(c.get("conversationStatusId", "")).lower()
+        assigned_emp = (
+            c.get("assignedEmployeeId")
+            or c.get("employeeId")
+            or c.get("assignedUserId")
+        )
+        return (
+            conv_status_id in (dotnet_client.STATUS_ESCALADA.lower(), dotnet_client.STATUS_ATENDIDA_HUMANO.lower())
+            or bool(assigned_emp)
+        )
+
     dotnet_is_escalated = False
-    try:
-        convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
-        for c in convs:
-            c_chat = str(c.get("chatIdentifier", "")).strip()
-            c_canon = obtener_telefono_canonico(c_chat)
-            c_digits = re.sub(r"\D", "", c_canon)
-            if len(c_digits) > 10:
-                c_digits = c_digits[-10:]
-
-            matches = (
-                c_chat == raw_tid
-                or c_canon == canonical_tid
-                or (clean_tid and c_digits and clean_tid == c_digits)
-            )
-
-            if matches:
-                conv_status_id = str(c.get("conversationStatusId", "")).lower()
-                assigned_emp = (
-                    c.get("assignedEmployeeId")
-                    or c.get("employeeId")
-                    or c.get("assignedUserId")
-                )
-                if (
-                    conv_status_id in (dotnet_client.STATUS_ESCALADA.lower(), dotnet_client.STATUS_ATENDIDA_HUMANO.lower())
-                    or bool(assigned_emp)
-                ):
-                    dotnet_is_escalated = True
-                    break
-    except Exception as e:
-        logger.warning(f"[Processor] Error verificando estado en .NET para {thread_id}: {e}")
+    cached_esc = _ESCALATION_CACHE.get(cache_key)
+    if cached_esc and (now_mono - cached_esc[1]) < _ESCALATION_CACHE_TTL:
+        dotnet_is_escalated = cached_esc[0]
+    else:
+        try:
+            cached_id = tickets_api.peek_cached_conversation_id(thread_id)
+            if cached_id:
+                ctx = await tickets_api.obtener_contexto_conversacion(cached_id)
+                if isinstance(ctx, dict):
+                    dotnet_is_escalated = _conv_is_escalated(ctx)
+            else:
+                convs = await tickets_api._list_conversations() or []
+                for c in convs:
+                    c_chat = str(c.get("chatIdentifier", "")).strip()
+                    c_canon = obtener_telefono_canonico(c_chat)
+                    c_digits = re.sub(r"\D", "", c_canon)
+                    if len(c_digits) > 10:
+                        c_digits = c_digits[-10:]
+                    matches = (
+                        c_chat == raw_tid
+                        or c_canon == canonical_tid
+                        or (clean_tid and c_digits and clean_tid == c_digits)
+                    )
+                    if matches and _conv_is_escalated(c):
+                        dotnet_is_escalated = True
+                        break
+            _ESCALATION_CACHE[cache_key] = (dotnet_is_escalated, now_mono)
+        except Exception as e:
+            logger.warning(f"[Processor] Error verificando estado en .NET para {thread_id}: {e}")
 
     if is_graph_escalated or dotnet_is_escalated:
         if not is_graph_escalated and dotnet_is_escalated:
@@ -210,8 +222,6 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
     from app.api.routes.agent_handoff import desmarcar_reactivada
     desmarcar_reactivada(thread_id)
     desmarcar_reactivada(phone_number)
-    clear_booking_state(thread_id)
-    clear_booking_state(phone_number)
 
     conv_id = await dotnet_client.obtener_o_crear_conversacion(phone_number)
     if conv_id:
@@ -403,7 +413,6 @@ async def process_whatsapp_message(
                         if checkpointer:
                             await checkpointer.clear_thread(t)
                         dotnet_client.limpiar_cache_conversacion(t)
-                        clear_booking_state(t)
                     except Exception:
                         pass
 
@@ -457,7 +466,6 @@ async def process_whatsapp_message(
             for t in targets_clear:
                 try:
                     dotnet_client.limpiar_cache_conversacion(t)
-                    clear_booking_state(t)
                 except Exception:
                     pass
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
@@ -470,52 +478,6 @@ async def process_whatsapp_message(
             except Exception:
                 pass
 
-        # --- Booking fast-path (sin LLM) ---
-        last_bot_text = ""
-        try:
-            st = await get_graph().aget_state(config)
-            msgs = (st.values or {}).get("messages") or []
-            for m in reversed(msgs):
-                if isinstance(m, AIMessage) and getattr(m, "content", None):
-                    last_bot_text = extract_text_content(m.content)
-                    break
-        except Exception:
-            last_bot_text = ""
-
-        t_fp = time.perf_counter()
-        fp = try_booking_fastpath(numero_paciente, mensaje_texto, last_bot_text=last_bot_text)
-        spans["booking_fastpath"] = time.perf_counter() - t_fp
-        if fp:
-            respuesta_fp, _st = fp
-            t_send = time.perf_counter()
-            await evolution_client.enviar_mensaje(numero_paciente, respuesta_fp)
-            spans["send"] = time.perf_counter() - t_send
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=respuesta_fp,
-                )
-            )
-            try:
-                await get_graph().aupdate_state(
-                    config,
-                    {
-                        "messages": [
-                            HumanMessage(content=mensaje_texto),
-                            AIMessage(content=respuesta_fp),
-                        ]
-                    },
-                )
-            except Exception:
-                pass
-            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
-            spans["total"] = time.perf_counter() - t_total
-            logger.info(
-                f"[Latency] phone={numero_paciente} path=booking_fastpath "
-                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
-            )
-            return
 
         # Caché semántico (⚡ 0 tokens)
         t_cache = time.perf_counter()
@@ -523,8 +485,6 @@ async def process_whatsapp_message(
         spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
             logger.info(f"[Semantic Cache] Respondiendo a {numero_paciente} desde caché.")
-            if is_agendar_intent(mensaje_texto):
-                set_booking_state(numero_paciente, step="awaiting_cedula", cedula=None, nombre=None)
             t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, cached_response)
             spans["send"] = time.perf_counter() - t_send
@@ -551,17 +511,13 @@ async def process_whatsapp_message(
             return
 
         # Contexto del paciente: Cero asunción (Habeas Data)
-        booking = get_booking_state(numero_paciente) or {}
-        nombre_booking = (booking.get("nombre") or "").strip()
-        cedula_booking = booking.get("cedula")
         user_context = {
-            "nombre": nombre_booking,
-            "primer_nombre": nombre_booking.split()[0] if nombre_booking else "",
-            "cedula": cedula_booking,
+            "nombre": "",
+            "primer_nombre": "",
+            "cedula": None,
             "is_registered": False,
             "phone": numero_paciente,
             "push_name": push_name.strip() if push_name else "",
-            "booking_step": booking.get("step"),
         }
 
         invoke_input = {

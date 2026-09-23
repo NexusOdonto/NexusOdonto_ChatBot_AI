@@ -1,5 +1,6 @@
 """Endpoints de Citas y Agendamiento en la API .NET."""
 
+import asyncio
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -85,8 +86,12 @@ class DotNetAppointmentsApi:
 
         # Enriquecer citas con nombres de profesionales, servicios y estados
         try:
-            profs = await catalog_api.obtener_profesionales() or []
-            servs = await catalog_api.obtener_servicios() or []
+            profs, servs = await asyncio.gather(
+                catalog_api.obtener_profesionales(),
+                catalog_api.obtener_servicios(),
+            )
+            profs = profs or []
+            servs = servs or []
             prof_map = {str(p.get("id")).lower(): (p.get("name") or p.get("nombre")) for p in profs if isinstance(p, dict)}
             serv_map = {str(s.get("id")).lower(): (s.get("name") or s.get("nombre")) for s in servs if isinstance(s, dict)}
 
