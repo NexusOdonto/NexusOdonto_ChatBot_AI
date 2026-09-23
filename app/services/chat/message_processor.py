@@ -415,14 +415,32 @@ async def process_whatsapp_message(
                 segundos_inactivo = await checkpointer.obtener_segundos_inactividad(numero_paciente)
                 if segundos_inactivo is not None and segundos_inactivo > settings.session_ttl_seconds:
                     session_expired = True
+                elif segundos_inactivo is None and last_active is None:
+                    # Sin fila en conversation_sessions tras restart/sweep: los checkpoints
+                    # huérfanos en Postgres seguirían cargando memoria antigua si no purgamos.
+                    session_expired = True
             except Exception:
                 pass
 
         if session_expired:
             logger.info(f"[TTL Purge] Sesión de 15m expirada para {numero_paciente}. Purgando memoria...")
+            from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
+            canon = obtener_telefono_canonico(numero_paciente)
+            targets_clear = {numero_paciente, canon}
+            dest = obtener_destino_envio(numero_paciente)
+            if dest:
+                targets_clear.add(dest)
             if checkpointer:
-                await checkpointer.clear_thread(numero_paciente)
-            dotnet_client.limpiar_cache_conversacion(numero_paciente)
+                for t in targets_clear:
+                    try:
+                        await checkpointer.clear_thread(t)
+                    except Exception:
+                        pass
+            for t in targets_clear:
+                try:
+                    dotnet_client.limpiar_cache_conversacion(t)
+                except Exception:
+                    pass
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
             inactivity_service.cancel(numero_paciente)
 
