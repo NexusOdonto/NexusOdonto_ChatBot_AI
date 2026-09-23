@@ -23,6 +23,13 @@ from app.services.audio_service import (
     MENSAJE_ERROR_PROCESANDO_AUDIO,
 )
 from app.services.semantic_cache import buscar_en_cache
+from app.services.chat.booking_fastpath import (
+    try_booking_fastpath,
+    clear_booking_state,
+    set_booking_state,
+    is_agendar_intent,
+    get_booking_state,
+)
 from app.services.inactivity_service import inactivity_service
 from app.core.llm_factory import extract_text_content
 
@@ -116,6 +123,7 @@ async def reset_conversation(phone_number: str) -> None:
         logger.warning(f"[Reset] No se encontró checkpointer para {phone_number}")
 
     dotnet_client.limpiar_cache_conversacion(phone_number)
+    clear_booking_state(phone_number)
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     reset_msg = "🔄 Memoria reiniciada con éxito. ¡Hola! Soy el asistente virtual de Nexus Odonto. ¿En qué puedo colaborarte hoy?"
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
@@ -202,6 +210,8 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
     from app.api.routes.agent_handoff import desmarcar_reactivada
     desmarcar_reactivada(thread_id)
     desmarcar_reactivada(phone_number)
+    clear_booking_state(thread_id)
+    clear_booking_state(phone_number)
 
     conv_id = await dotnet_client.obtener_o_crear_conversacion(phone_number)
     if conv_id:
@@ -338,6 +348,8 @@ async def process_whatsapp_message(
     registrar_usuario_db: bool = False,
 ) -> None:
     """Procesa el mensaje consolidado del paciente a través del grafo LangGraph."""
+    spans: dict[str, float] = {}
+    t_total = time.perf_counter()
     try:
         # Notificar en vivo a WhatsApp que el bot está redactando la respuesta
         asyncio.create_task(evolution_client.enviar_presencia(numero_paciente, "composing"))
@@ -361,18 +373,23 @@ async def process_whatsapp_message(
                 "No logro comprender tu mensaje 🤔. Por favor escribe con palabras claras lo que necesitas "
                 "(por ejemplo: agendar una cita, consultar precios o ver servicios y horarios) y con gusto te ayudo. 😊🦷"
             )
+            t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, resp_gibberish)
+            spans["send"] = time.perf_counter() - t_send
             asyncio.create_task(
                 dotnet_client.registrar_mensaje(
                     chat_identifier=numero_paciente,
                     rol="CHATBOT",
                     contenido=resp_gibberish,
-                    rag_confidence=1.0,
                 )
             )
             return
 
-        if await is_escalated(numero_paciente):
+        t_esc = time.perf_counter()
+        escalated = await is_escalated(numero_paciente)
+        spans["escalate_check"] = time.perf_counter() - t_esc
+
+        if escalated:
             if is_resume_request(mensaje_texto):
                 checkpointer = get_checkpointer_instance()
                 from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
@@ -386,6 +403,7 @@ async def process_whatsapp_message(
                         if checkpointer:
                             await checkpointer.clear_thread(t)
                         dotnet_client.limpiar_cache_conversacion(t)
+                        clear_booking_state(t)
                     except Exception:
                         pass
 
@@ -439,6 +457,7 @@ async def process_whatsapp_message(
             for t in targets_clear:
                 try:
                     dotnet_client.limpiar_cache_conversacion(t)
+                    clear_booking_state(t)
                 except Exception:
                     pass
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
@@ -451,17 +470,69 @@ async def process_whatsapp_message(
             except Exception:
                 pass
 
+        # --- Booking fast-path (sin LLM) ---
+        last_bot_text = ""
+        try:
+            st = await get_graph().aget_state(config)
+            msgs = (st.values or {}).get("messages") or []
+            for m in reversed(msgs):
+                if isinstance(m, AIMessage) and getattr(m, "content", None):
+                    last_bot_text = extract_text_content(m.content)
+                    break
+        except Exception:
+            last_bot_text = ""
+
+        t_fp = time.perf_counter()
+        fp = try_booking_fastpath(numero_paciente, mensaje_texto, last_bot_text=last_bot_text)
+        spans["booking_fastpath"] = time.perf_counter() - t_fp
+        if fp:
+            respuesta_fp, _st = fp
+            t_send = time.perf_counter()
+            await evolution_client.enviar_mensaje(numero_paciente, respuesta_fp)
+            spans["send"] = time.perf_counter() - t_send
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=respuesta_fp,
+                )
+            )
+            try:
+                await get_graph().aupdate_state(
+                    config,
+                    {
+                        "messages": [
+                            HumanMessage(content=mensaje_texto),
+                            AIMessage(content=respuesta_fp),
+                        ]
+                    },
+                )
+            except Exception:
+                pass
+            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+            spans["total"] = time.perf_counter() - t_total
+            logger.info(
+                f"[Latency] phone={numero_paciente} path=booking_fastpath "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+            )
+            return
+
         # Caché semántico (⚡ 0 tokens)
+        t_cache = time.perf_counter()
         cached_response = await buscar_en_cache(mensaje_texto)
+        spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
             logger.info(f"[Semantic Cache] Respondiendo a {numero_paciente} desde caché.")
+            if is_agendar_intent(mensaje_texto):
+                set_booking_state(numero_paciente, step="awaiting_cedula", cedula=None, nombre=None)
+            t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, cached_response)
+            spans["send"] = time.perf_counter() - t_send
             asyncio.create_task(
                 dotnet_client.registrar_mensaje(
                     chat_identifier=numero_paciente,
                     rol="CHATBOT",
                     contenido=cached_response,
-                    rag_confidence=1.0,
                 )
             )
             try:
@@ -472,26 +543,38 @@ async def process_whatsapp_message(
             except Exception:
                 pass
             inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+            spans["total"] = time.perf_counter() - t_total
+            logger.info(
+                f"[Latency] phone={numero_paciente} path=cache "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+            )
             return
 
         # Contexto del paciente: Cero asunción (Habeas Data)
+        booking = get_booking_state(numero_paciente) or {}
+        nombre_booking = (booking.get("nombre") or "").strip()
+        cedula_booking = booking.get("cedula")
         user_context = {
-            "nombre": "",
-            "primer_nombre": "",
-            "cedula": None,
+            "nombre": nombre_booking,
+            "primer_nombre": nombre_booking.split()[0] if nombre_booking else "",
+            "cedula": cedula_booking,
             "is_registered": False,
             "phone": numero_paciente,
             "push_name": push_name.strip() if push_name else "",
+            "booking_step": booking.get("step"),
         }
 
         invoke_input = {
             "messages": [HumanMessage(content=mensaje_texto)],
             "conversation_status": "ACTIVA",
-            "rag_confidence": 1.0,
             "user_context": user_context,
         }
 
+        t_graph = time.perf_counter()
         result = await get_graph().ainvoke(invoke_input, config)
+        spans["graph_total"] = time.perf_counter() - t_graph
+
+        rag_conf = result.get("rag_confidence")
 
         if result.get("conversation_status") == "ESCALADA":
             already_sent_by_graph = bool(result.get("emergency_detected"))
@@ -501,22 +584,30 @@ async def process_whatsapp_message(
                     last_msg = messages[-1]
                     if isinstance(last_msg, AIMessage) and last_msg.content:
                         resp_urg = extract_text_content(last_msg.content)
+                        t_send = time.perf_counter()
                         await evolution_client.enviar_mensaje(numero_paciente, resp_urg)
+                        spans["send"] = time.perf_counter() - t_send
                         asyncio.create_task(
                             dotnet_client.registrar_mensaje(
                                 chat_identifier=numero_paciente,
                                 rol="CHATBOT",
                                 contenido=resp_urg,
-                                rag_confidence=result.get("rag_confidence", 1.0),
+                                rag_confidence=rag_conf,
                             )
                         )
                 await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             else:
                 config = get_thread_config(numero_paciente)
                 await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+            spans["total"] = time.perf_counter() - t_total
+            logger.info(
+                f"[Latency] phone={numero_paciente} path=escalated "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+            )
             return
 
-        if result.get("rag_confidence", 1.0) < settings.rag_min_confidence:
+        # Solo escalar por baja confianza RAG cuando hubo score real de tool RAG
+        if rag_conf is not None and rag_conf < settings.rag_min_confidence:
             if not await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
                 await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
                 asyncio.create_task(
@@ -540,17 +631,24 @@ async def process_whatsapp_message(
         if not respuesta_texto:
             respuesta_texto = MENSAJE_FALLBACK_PACIENTE
 
+        t_send = time.perf_counter()
         await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
+        spans["send"] = time.perf_counter() - t_send
         asyncio.create_task(
             dotnet_client.registrar_mensaje(
                 chat_identifier=numero_paciente,
                 rol="CHATBOT",
                 contenido=respuesta_texto,
-                rag_confidence=result.get("rag_confidence", 1.0),
+                rag_confidence=rag_conf,
             )
         )
 
         inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+        spans["total"] = time.perf_counter() - t_total
+        logger.info(
+            f"[Latency] phone={numero_paciente} path=graph "
+            + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+        )
 
     except Exception as exc:
         logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)

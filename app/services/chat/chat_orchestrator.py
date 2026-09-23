@@ -1,4 +1,4 @@
-"""Orquestador de mensajes entrantes de chat: Anti-Spam, Debouncing (2.0s) y Filtro de Galimatías."""
+"""Orquestador de mensajes entrantes de chat: Anti-Spam, Debouncing (0.5s) y Filtro de Galimatías."""
 
 import time
 import re
@@ -17,7 +17,7 @@ SPAM_WINDOW_SECONDS = 5.0
 SPAM_MAX_BURST = 3
 SPAM_PENALTY_SECONDS = 15.0
 SPAM_WARN_COOLDOWN = 30.0
-DEBOUNCE_WAIT_SECONDS = 2.0
+DEBOUNCE_WAIT_SECONDS = 0.5
 
 _SPAM_TIMESTAMPS: Dict[str, List[float]] = {}
 _SPAM_BLOCKED_UNTIL: Dict[str, float] = {}
@@ -164,11 +164,13 @@ class ChatOrchestrator:
                 return True
 
         async def _run_user_worker():
+            t_debounce = time.perf_counter()
             try:
                 await asyncio.sleep(DEBOUNCE_WAIT_SECONDS)
             except asyncio.CancelledError:
                 # Si se canceló para reiniciar debounce, otro worker será creado por enqueue.
                 return
+            debounce_elapsed = time.perf_counter() - t_debounce
 
             _USER_DEBOUNCE_TASKS.pop(phone, None)
             if _USER_PROCESSING.get(phone, False):
@@ -199,6 +201,10 @@ class ChatOrchestrator:
                         _USER_LAST_PROCESSED[phone] = (texto_consolidado, now_mono)
                         logger.info(
                             f"[Debounce Flush] Mensajes agrupados ({len(mensajes)}) para {phone}: '{texto_consolidado}'"
+                        )
+                        logger.info(
+                            f"[Latency] phone={phone} debounce_wait={debounce_elapsed:.3f}s "
+                            f"(configured={DEBOUNCE_WAIT_SECONDS})"
                         )
                         await cb(phone, texto_consolidado, name)
 

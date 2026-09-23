@@ -1,3 +1,5 @@
+import logging
+import time
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -21,6 +23,8 @@ from app.graph.nodes import (
 )
 from app.graph.state import AgentState
 from langgraph.checkpoint.base import BaseCheckpointSaver
+
+logger = logging.getLogger(__name__)
 
 
 graph = None
@@ -66,20 +70,28 @@ def create_graph(checkpointer: BaseCheckpointSaver) -> None:
 	builder.add_node("summarize_conversation", summarize_conversation_node)
 	builder.add_node("chatbot", chatbot_node)
 	# Ejecuta las llamadas a herramientas que el LLM solicite.
-	builder.add_node(
-		"tools",
-		ToolNode([
-			clinical_knowledge_tool,
-			consultar_disponibilidad_tool,
-			agendar_cita_tool,
-			consultar_cita_por_cedula_tool,
-			cancelar_cita_tool,
-			modificar_cita_tool,
-			consultar_doctores_tool,
-			consultar_servicios_y_precios_tool,
-			confirmar_cita_tool,
-		]),
-	)
+	_tool_node = ToolNode([
+		clinical_knowledge_tool,
+		consultar_disponibilidad_tool,
+		agendar_cita_tool,
+		consultar_cita_por_cedula_tool,
+		cancelar_cita_tool,
+		modificar_cita_tool,
+		consultar_doctores_tool,
+		consultar_servicios_y_precios_tool,
+		confirmar_cita_tool,
+	])
+
+	async def tools_node_with_timing(state, config=None):
+		t0 = time.perf_counter()
+		if config is None:
+			result = await _tool_node.ainvoke(state)
+		else:
+			result = await _tool_node.ainvoke(state, config)
+		logger.info(f"[Latency] tools={time.perf_counter() - t0:.3f}s")
+		return result
+
+	builder.add_node("tools", tools_node_with_timing)
 
 	builder.add_edge(START, "emergency_check")
 	builder.add_conditional_edges(

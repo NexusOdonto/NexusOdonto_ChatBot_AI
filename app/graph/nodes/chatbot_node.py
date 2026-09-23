@@ -5,6 +5,7 @@ e invoca el modelo de lenguaje de forma resiliente con soporte multi-proveedor.
 
 import logging
 import re
+import time
 from functools import lru_cache
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -326,9 +327,13 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 
     messages = [combined_system_message, *chat_messages]
 
+    t_llm = time.perf_counter()
     response = await get_llm_with_tools().ainvoke(messages)
+    llm_elapsed = time.perf_counter() - t_llm
+    logger.info(f"[Latency] llm_turn={llm_elapsed:.3f}s")
 
-    confidence = state.get("rag_confidence", 1.0)
+    # Solo propagar confianza si una tool RAG escribió [RAG_SCORE:...]; nunca default 1.0
+    confidence = state.get("rag_confidence")
     for message in reversed(state.get("messages", [])):
         if isinstance(message, ToolMessage) and isinstance(message.content, str):
             match = re.search(r"\[RAG_SCORE:([0-9.]+)\]", message.content)
@@ -336,4 +341,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 confidence = float(match.group(1))
                 break
 
-    return {"messages": [response], "rag_confidence": confidence}
+    out = {"messages": [response]}
+    if confidence is not None:
+        out["rag_confidence"] = confidence
+    return out
