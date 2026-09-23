@@ -21,6 +21,9 @@ router = APIRouter(prefix="/api/v1", tags=["Agent Handoff & Messaging"])
 # Registro en memoria de conversaciones explícitamente reactivadas por el asesor
 RESUMED_RECENTLY: Dict[str, float] = {}
 RESUMED_WINDOW_SECONDS = 7200  # 2 horas de gracia tras la devolución al bot
+# Evita enviar dos veces el aviso WhatsApp si front + .NET llaman /resume casi a la vez
+_RESUME_NOTIFY_SENT: Dict[str, float] = {}
+_RESUME_NOTIFY_DEDUP_SECONDS = 60
 
 
 def marcar_conversacion_reactivada(ident: str) -> None:
@@ -145,18 +148,36 @@ async def resume_conversation(request: ResumeConversationRequest):
         except Exception as net_err:
             logger.warning(f"[Handoff] Error sincronizando estado ACTIVA y tickets en .NET: {net_err}")
 
-        # Mensaje de notificación amigable al paciente
-        mensaje_retorno = (
-            "🤖 *Nexus Odonto Asistente Virtual*\n\n"
-            "La atención con nuestro asesor ha finalizado. Mi sistema ha sido reactivado. "
-            "¿Hay algo más en lo que pueda colaborarte hoy? 🦷✨"
+        # Mensaje de notificación amigable al paciente (una sola vez por ventana)
+        notify_keys = set()
+        for t in targets:
+            clean = re.sub(r"\D", "", str(t))
+            if len(clean) >= 10:
+                notify_keys.add(clean[-10:])
+            notify_keys.add(str(t).strip())
+        now = time.time()
+        already_notified = any(
+            k in _RESUME_NOTIFY_SENT and (now - _RESUME_NOTIFY_SENT[k]) < _RESUME_NOTIFY_DEDUP_SECONDS
+            for k in notify_keys
         )
-        await evolution_client.enviar_mensaje(phone_number, mensaje_retorno)
-        
-        # Persistir mensaje de notificación en Oracle DB
-        asyncio.create_task(
-            dotnet_client.registrar_mensaje(phone_number, "CHATBOT", mensaje_retorno)
-        )
+        if already_notified:
+            logger.info(
+                f"[Handoff] Aviso WhatsApp omitido (dedupe {_RESUME_NOTIFY_DEDUP_SECONDS}s) para {phone_number}"
+            )
+        else:
+            for k in notify_keys:
+                _RESUME_NOTIFY_SENT[k] = now
+            mensaje_retorno = (
+                "🤖 *Nexus Odonto Asistente Virtual*\n\n"
+                "La atención con nuestro asesor ha finalizado. Mi sistema ha sido reactivado. "
+                "¿Hay algo más en lo que pueda colaborarte hoy? 🦷✨"
+            )
+            await evolution_client.enviar_mensaje(phone_number, mensaje_retorno)
+
+            # Persistir mensaje de notificación en Oracle DB
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(phone_number, "CHATBOT", mensaje_retorno)
+            )
 
         return {
             "status": "success",
