@@ -73,15 +73,15 @@ class DotNetCatalogApi:
         return []
 
     async def obtener_personas(self) -> List[Dict[str, Any]]:
-        """Obtiene el listado general de personas registradas."""
-        cached = _cache_get("Persons")
-        if cached is not None:
-            return cached
+        """Obtiene el listado general de personas registradas.
+
+        NOT cached: person identity (cédula) must never be served from a stale list,
+        or the chatbot can miss an existing patient and orphan appointments.
+        """
         response = await self.transport.request("GET", "Persons")
         if response and response.status_code == 200:
             payload = response.json()
-            items = payload if isinstance(payload, list) else payload.get("items", [])
-            return _cache_set("Persons", items)
+            return payload if isinstance(payload, list) else payload.get("items", [])
         return []
 
     async def obtener_profesionales(

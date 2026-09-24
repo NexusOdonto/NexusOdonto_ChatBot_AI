@@ -66,44 +66,34 @@ class AppointmentService:
             logger.warning(f"[AppointmentService] Cédula inválida al asegurar paciente: {cedula} ({err_msg})")
             return None
 
-        # 1. Buscar si el paciente ya existe en .NET
-        pacientes = await self.pat_api.buscar_pacientes(clean_doc)
-        if pacientes:
-            for p in pacientes:
-                doc = str(p.get("documentNumber") or p.get("numeroDocumento") or "")
-                if "".join(c for c in doc if c.isdigit()) == clean_doc:
-                    pid = str(p.get("id") or "")
-                    if conversacion_id and pid:
-                        await self.pat_api.vincular_paciente(conversacion_id, pid)
-                    return pid
+        # 1. Canonical resolve by cédula ONLY (never by name).
+        resolved = await self.pat_api.resolver_paciente_por_documento(clean_doc)
+        if resolved:
+            pid = str(resolved.get("patientId") or resolved.get("id") or "")
+            if pid:
+                if conversacion_id:
+                    await self.pat_api.vincular_paciente(conversacion_id, pid)
+                return pid
 
-        # 2. Buscar si la persona existe pero no como paciente
-        persona = await self.pat_api.buscar_persona_por_documento(clean_doc)
-        if persona:
-            person_id = str(persona.get("id") or "")
-            if person_id:
-                nuevo_p = await self.pat_api.crear_paciente_para_persona(person_id)
-                if nuevo_p:
-                    pid = str(nuevo_p.get("id") or "")
-                    if conversacion_id and pid:
-                        await self.pat_api.vincular_paciente(conversacion_id, pid)
-                    return pid
-
-        # 3. Crear paciente desde cero con datos básicos
-        partes = nombre_completo.strip().split()
-        first_name = partes[0] if partes else "Paciente"
-        last_name = " ".join(partes[1:]) if len(partes) > 1 else "Nexus"
-
+        # 2. Create once (API find-or-create will reuse if cédula already exists).
         nuevo_paciente = await self.pat_api.crear_paciente_basico(
             cedula=clean_doc,
             nombre=nombre_completo,
             telefono_whatsapp=telefono,
         )
         if nuevo_paciente:
-            pid = str(nuevo_paciente.get("id") or "")
-            if conversacion_id and pid:
+            pid = str(nuevo_paciente.get("patientId") or nuevo_paciente.get("id") or "")
+            if pid and conversacion_id:
                 await self.pat_api.vincular_paciente(conversacion_id, pid)
-            return pid
+            return pid or None
+
+        # 3. Final resolve after race/legacy 409
+        retry = await self.pat_api.resolver_paciente_por_documento(clean_doc)
+        if retry:
+            pid = str(retry.get("patientId") or retry.get("id") or "")
+            if pid and conversacion_id:
+                await self.pat_api.vincular_paciente(conversacion_id, pid)
+            return pid or None
 
         return None
 

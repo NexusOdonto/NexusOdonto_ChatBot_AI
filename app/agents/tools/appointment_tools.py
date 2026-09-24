@@ -15,6 +15,7 @@ from langchain_core.tools import tool, InjectedToolArg
 from langchain_core.runnables import RunnableConfig
 
 from app.clients.dotnet_client import dotnet_client
+from app.infra.external.dotnet.patients_api import patients_api
 from app.agents.tools.agenda_helpers import (
     _normalizar_texto,
     _obtener_valor,
@@ -89,8 +90,8 @@ async def _agendar_cita_impl(
         if error_cedula:
             return error_cedula
 
-        # 1. Resolver paciente por cédula
-        persona = await dotnet_client.buscar_persona_por_documento(cedula)
+        # 1. Resolver paciente SOLO por cédula (nunca por nombre).
+        # Misma cédula → mismo patientId aunque el nombre varíe ("Alejandro" vs nombre completo).
         paciente_id = None
         cuenta_nueva = False
         nombre_clean = (nombre_paciente or "").strip()
@@ -103,36 +104,38 @@ async def _agendar_cita_impl(
             or any(p in n_lower for p in ["paciente", "nexus", "nexusodonto", "desconocido", "anonimo", "anónimo", "n/a", "none", "usuario", "cliente"])
         )
 
-        if persona:
-            person_id = persona.get("id")
-            nombre_bd = f"{persona.get('firstName', '')} {persona.get('lastName', '')}".strip()
-            # Si en BD hay un nombre real previo (no placeholder), lo usamos; de lo contrario preferimos el nuevo provisto
+        resolved = await patients_api.resolver_paciente_por_documento(cedula)
+        if resolved and (resolved.get("patientId") or resolved.get("id")):
+            paciente_id = resolved.get("patientId") or resolved.get("id")
+            nombre_bd = f"{resolved.get('firstName', '')} {resolved.get('lastName', '')}".strip()
             bd_lower = nombre_bd.lower()
             if nombre_bd and not any(p in bd_lower for p in ["paciente", "nexus"]):
-                nombre_display = nombre_bd
+                # Prefer stored canonical name; keep longer incoming name for display if richer.
+                if not es_placeholder and len(nombre_clean) > len(nombre_bd) + 2:
+                    nombre_display = nombre_clean
+                    # Enrich display name on the canonical person (idempotent onboard by cédula).
+                    try:
+                        await dotnet_client.crear_paciente_basico(
+                            cedula=cedula,
+                            nombre=nombre_clean,
+                            telefono_whatsapp=thread_id,
+                        )
+                    except Exception as enrich_err:
+                        logger.debug(f"[Agenda] No se pudo enriquecer nombre para {cedula}: {enrich_err}")
+                else:
+                    nombre_display = nombre_bd
             elif not es_placeholder:
                 nombre_display = nombre_clean
-
-            if person_id:
-                paciente = await dotnet_client.buscar_paciente_por_person_id(str(person_id))
-                if paciente:
-                    paciente_id = paciente.get("id")
-                else:
-                    logger.info(f"[Agenda] Persona {person_id} existe pero no tiene registro en Patients. Creando paciente...")
-                    nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(person_id))
-                    if nuevo_pac:
-                        paciente_id = nuevo_pac.get("id")
-                        cuenta_nueva = True
+            logger.info(f"[Agenda] Paciente reutilizado por cédula {cedula} → patientId={paciente_id}")
 
         if not paciente_id:
-            # Si el paciente no existe previamente en la base de datos, el nombre real es ESTRICTAMENTE OBLIGATORIO
             if es_placeholder:
                 return (
                     "Para poder registrar tu cita en el sistema y crear tu ficha clínica, necesito obligatoriamente tu *nombre completo* (nombre y apellido) 👤.\n\n"
                     "¿Me podrías indicar cómo te llamas por favor? 😊"
                 )
 
-            logger.info(f"[Agenda] Paciente con cédula {cedula} no encontrado. Creando perfil básico con nombre: '{nombre_display}'...")
+            logger.info(f"[Agenda] Cédula {cedula} no encontrada. Creando una sola vez con nombre: '{nombre_display}'...")
             resultado_registro = await dotnet_client.crear_paciente_basico(
                 cedula=cedula,
                 nombre=nombre_display,
@@ -140,17 +143,18 @@ async def _agendar_cita_impl(
             )
             if resultado_registro:
                 paciente_id = resultado_registro.get("patientId") or resultado_registro.get("id")
-                cuenta_nueva = True
-                logger.info(f"[Agenda] Paciente creado exitosamente con ID: {paciente_id}")
+                cuenta_nueva = not bool(resultado_registro.get("alreadyExisted"))
+                logger.info(
+                    f"[Agenda] Paciente resuelto ID={paciente_id} "
+                    f"alreadyExisted={resultado_registro.get('alreadyExisted')}"
+                )
             else:
-                logger.info(f"[Agenda] Onboarding básico no retornó ID. Buscando persona para vincular paciente...")
-                persona_reintento = await dotnet_client.buscar_persona_por_documento(cedula.strip())
-                if persona_reintento and persona_reintento.get("id"):
-                    nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(persona_reintento["id"]))
-                    if nuevo_pac:
-                        paciente_id = nuevo_pac.get("id")
-                        cuenta_nueva = True
-                        logger.info(f"[Agenda] Paciente vinculado tras resolución de conflicto con ID: {paciente_id}")
+                # Último intento: resolución canónica por documento (cubre 409 legacy / races).
+                retry = await patients_api.resolver_paciente_por_documento(cedula)
+                if retry:
+                    paciente_id = retry.get("patientId") or retry.get("id")
+                    cuenta_nueva = False
+                    logger.info(f"[Agenda] Paciente recuperado tras reintento por cédula → {paciente_id}")
 
             if not paciente_id:
                 return (

@@ -152,6 +152,9 @@ class DotNetClient:
     async def buscar_persona_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
         return await self.patients.buscar_persona_por_documento(document_number)
 
+    async def resolver_paciente_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
+        return await self.patients.resolver_paciente_por_documento(document_number)
+
     async def crear_paciente_para_persona(
         self,
         person_id: str,
