@@ -13,6 +13,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
 from app.core.config import settings
+from app.core.llm_concurrency import (
+    GraphDeadlineExceeded,
+    LLMCallTimeoutError,
+    graph_queue_wait_total,
+    run_with_graph_deadline,
+)
 from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
 from app.session.postgres_checkpointer import get_checkpointer_instance
@@ -533,17 +539,27 @@ async def process_whatsapp_message(
 
         t_graph = time.perf_counter()
         try:
-            result = await asyncio.wait_for(
+            # Deadline extendible: la espera del semáforo LLM no consume el presupuesto.
+            result = await run_with_graph_deadline(
                 get_graph().ainvoke(invoke_input, config),
-                timeout=float(settings.graph_timeout_seconds),
+                timeout_seconds=float(settings.graph_timeout_seconds),
             )
-        except asyncio.TimeoutError:
+        except (GraphDeadlineExceeded, LLMCallTimeoutError) as timeout_exc:
             spans["graph_total"] = time.perf_counter() - t_graph
+            spans["queue_wait_total"] = graph_queue_wait_total()
             spans["total"] = time.perf_counter() - t_total
+            kind = (
+                "graph_timeout"
+                if isinstance(timeout_exc, GraphDeadlineExceeded)
+                else "llm_call_timeout"
+            )
             logger.warning(
-                f"[Latency] graph_timeout phone={numero_paciente} "
+                f"[Latency] {kind} phone={numero_paciente} "
                 f"limit={settings.graph_timeout_seconds}s "
-                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+                f"llm_call_limit={settings.llm_call_timeout_seconds}s "
+                f"queue_wait_excluded={spans['queue_wait_total']:.3f}s "
+                f"err={timeout_exc!s} "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items() if k != "queue_wait_total")
             )
             await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_GRAPH_TIMEOUT)
             asyncio.create_task(
@@ -555,6 +571,7 @@ async def process_whatsapp_message(
             )
             return
         spans["graph_total"] = time.perf_counter() - t_graph
+        spans["queue_wait_total"] = graph_queue_wait_total()
 
         rag_conf = result.get("rag_confidence")
 
@@ -632,6 +649,25 @@ async def process_whatsapp_message(
             + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
         )
 
+    except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError):
+        # Defensa: timeouts no deben caer en el copy genérico de intermitencias.
+        logger.warning(
+            f"[Processor] Timeout fuera del bloque graph para {numero_paciente}; "
+            "enviando MENSAJE_GRAPH_TIMEOUT"
+        )
+        try:
+            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_GRAPH_TIMEOUT)
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=MENSAJE_GRAPH_TIMEOUT,
+                )
+            )
+        except Exception:
+            pass
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
         logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
         try:
