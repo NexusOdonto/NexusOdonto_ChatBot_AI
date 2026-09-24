@@ -36,6 +36,32 @@ from app.agents.tools.agenda_helpers import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_WEB_PORTAL_URL = "https://nexusodonto.chatcampuslands.com/login"
+# Machine-readable flag for the post-LLM safety net (do not invent digits).
+_PRIMERA_VEZ_PORTAL_FLAG = "[primera_vez_portal]"
+
+
+def _web_portal_url() -> str:
+    return os.getenv("WEB_PORTAL_URL", _DEFAULT_WEB_PORTAL_URL).strip() or _DEFAULT_WEB_PORTAL_URL
+
+
+def _bloque_portal_paciente(es_primera_vez: bool) -> str:
+    """Portal reminder. First-time: credentials RULE without leaking cédula/password digits."""
+    web_url = _web_portal_url()
+    if es_primera_vez:
+        return (
+            f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
+            f"🔗 {web_url}\n"
+            f"Tu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
+            f"(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
+            f"el bot no puede modificar contraseñas.\n"
+            f"{_PRIMERA_VEZ_PORTAL_FLAG}"
+        )
+    return (
+        f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
+        f"🔗 {web_url}"
+    )
+
 
 async def _agendar_cita_impl(
     cedula: str,
@@ -66,6 +92,7 @@ async def _agendar_cita_impl(
         # 1. Resolver paciente por cédula
         persona = await dotnet_client.buscar_persona_por_documento(cedula)
         paciente_id = None
+        cuenta_nueva = False
         nombre_clean = (nombre_paciente or "").strip()
         nombre_display = nombre_clean
 
@@ -95,6 +122,7 @@ async def _agendar_cita_impl(
                     nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(person_id))
                     if nuevo_pac:
                         paciente_id = nuevo_pac.get("id")
+                        cuenta_nueva = True
 
         if not paciente_id:
             # Si el paciente no existe previamente en la base de datos, el nombre real es ESTRICTAMENTE OBLIGATORIO
@@ -112,6 +140,7 @@ async def _agendar_cita_impl(
             )
             if resultado_registro:
                 paciente_id = resultado_registro.get("patientId") or resultado_registro.get("id")
+                cuenta_nueva = True
                 logger.info(f"[Agenda] Paciente creado exitosamente con ID: {paciente_id}")
             else:
                 logger.info(f"[Agenda] Onboarding básico no retornó ID. Buscando persona para vincular paciente...")
@@ -120,6 +149,7 @@ async def _agendar_cita_impl(
                     nuevo_pac = await dotnet_client.crear_paciente_para_persona(str(persona_reintento["id"]))
                     if nuevo_pac:
                         paciente_id = nuevo_pac.get("id")
+                        cuenta_nueva = True
                         logger.info(f"[Agenda] Paciente vinculado tras resolución de conflicto con ID: {paciente_id}")
 
             if not paciente_id:
@@ -127,6 +157,15 @@ async def _agendar_cita_impl(
                     "⚠️ No pude registrar tus datos en el sistema. "
                     "Por favor comunícate con recepción al *+57 324 6030217* para que te atiendan. 😊"
                 )
+
+        # First-time = new account OR no prior appointments for this patient
+        es_primera_vez = cuenta_nueva
+        if not es_primera_vez and paciente_id:
+            try:
+                citas_previas = await dotnet_client.obtener_citas_paciente(str(paciente_id)) or []
+                es_primera_vez = len(citas_previas) == 0
+            except Exception as exc:
+                logger.warning(f"[Agenda] No se pudo consultar citas previas de {paciente_id}: {exc}")
 
         # 2. Resolver profesional
         profs = await dotnet_client.obtener_profesionales() or []
@@ -233,7 +272,6 @@ async def _agendar_cita_impl(
             hora_fin_str = _formatear_hora_ampm(ends_dt.strftime("%H:%M"))
             fecha_str = starts_dt.strftime("%d/%m/%Y")
 
-            web_url = os.getenv("WEB_PORTAL_URL", "https://nexusodonto.chatcampuslands.com/login")
             return (
                 f"¡Cita Confirmada con Éxito! 🎉🦷✨\n\n"
                 f"📋 *Resumen de tu Cita:*\n"
@@ -246,10 +284,7 @@ async def _agendar_cita_impl(
                 f"• ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
                 f"• 🆔 *Código de Cita:* `{cita_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
-                f"🔗 {web_url}\n"
-                f"Ingresa con tu cédula *{cedula}* (usuario y contraseña temporal inicial). "
-                f"Al entrar, cámbiala por tu seguridad; el bot no puede modificar contraseñas.\n\n"
+                f"{_bloque_portal_paciente(es_primera_vez)}\n\n"
                 f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
                 f"📞 *Atención:* +57 324 6030217\n\n"
                 f"¡Te esperamos en Nexus Odonto! 😊✨"
@@ -342,6 +377,10 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
                 "💡 *¿Necesitas gestionar alguna de tus citas activas?*\n"
                 "Dime si deseas *reprogramarla*, *cancelarla* o *confirmar tu asistencia*. 😊"
             )
+            resumen.append("")
+            resumen.append(_bloque_portal_paciente(es_primera_vez=False))
+        elif historial:
+            resumen.append(_bloque_portal_paciente(es_primera_vez=False))
         else:
             resumen.append(
                 "💡 No tienes citas programadas pendientes. ¿Te gustaría agendar una nueva cita? Con gusto te colaboro. 😊"
@@ -406,7 +445,8 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
                 f"• 🦷 *Tratamiento:* {serv_nom}\n"
                 f"• 📅 *Fecha y Hora:* {fecha_display}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Tu cita ha sido cancelada. Si deseas reagendar en otro horario, con gusto te ayudo. 😊\n"
+                f"Tu cita ha sido cancelada. Si deseas reagendar en otro horario, con gusto te ayudo. 😊\n\n"
+                f"{_bloque_portal_paciente(es_primera_vez=False)}\n\n"
                 f"📞 *Atención:* +57 324 6030217"
             )
         else:
@@ -587,6 +627,7 @@ async def _modificar_cita_impl(
                 f"• 📅 *Nueva Fecha:* {fecha_display}\n"
                 f"• ⏰ *Nuevo Horario:* {hora_display}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"{_bloque_portal_paciente(es_primera_vez=False)}\n\n"
                 f"Por favor llega 10 minutos antes de tu hora programada. ¡Hasta pronto! 😊\n"
                 f"📞 *Atención:* +57 324 6030217"
             )
@@ -674,7 +715,7 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         except Exception:
             pass
 
-        web_url = os.getenv("WEB_PORTAL_URL", "https://nexusodonto.chatcampuslands.com/login")
+        # Confirm attendance: no portal block (portal only on agendar/modificar/cancelar/consultar).
         return (
             f"¡Excelente! Tu cita ha sido *confirmada exitosamente* en nuestro sistema 🎉✅\n\n"
             f"📋 *Resumen de tu Cita Confirmada:*\n"
@@ -685,8 +726,6 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
             f"• ⏰ *Horario:* {hora_display}\n"
             f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n\n"
             f"💡 *Recomendación:* Llega 10 a 15 minutos antes de tu turno.\n\n"
-            f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
-            f"🔗 {web_url}\n\n"
             f"¡El equipo de Nexus Odonto te espera con gusto! ¿Hay algo más en lo que te pueda colaborar hoy? 😊🦷"
         )
     except Exception as exc:

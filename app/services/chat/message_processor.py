@@ -42,48 +42,121 @@ MENSAJE_FALLBACK_PACIENTE = (
 )
 
 _DEFAULT_WEB_PORTAL_URL = "https://nexusodonto.chatcampuslands.com/login"
+_PRIMERA_VEZ_PORTAL_FLAG = "[primera_vez_portal]"
 _PORTAL_HINT_MARKERS = (
     "plataforma virtual",
     "portal del paciente",
     "plataforma web",
     "nexusodonto.chatcampuslands.com",
 )
-_BOOKING_SUCCESS_TOOLS = frozenset({"agendar_cita_tool", "confirmar_cita_tool"})
-_BOOKING_SUCCESS_MARKERS = (
-    "cita confirmada",
+_CREDENTIALS_HINT_MARKERS = (
+    "usuario es tu número de cédula",
+    "contraseña también es tu número de cédula",
+)
+# Portal ONLY after these tools succeed THIS turn — never mid-booking / ask-cédula / slots.
+_PORTAL_ELIGIBLE_TOOLS = frozenset(
+    {
+        "agendar_cita_tool",
+        "modificar_cita_tool",
+        "cancelar_cita_tool",
+        "consultar_cita_por_cedula_tool",
+    }
+)
+_MUTATION_SUCCESS_MARKERS = (
+    "cita confirmada con éxito",
     "confirmada con éxito",
-    "confirmada exitosamente",
-    "agendada con éxito",
-    "éxito",
+    "reprogramada exitosamente",
+    "cancelada exitosamente",
+)
+# Consult list with real appointments — not "no tienes citas" empty results.
+_CONSULT_LIST_MARKERS = (
+    "próximas citas programadas",
+    "citas registradas para la cédula",
+    "historial reciente",
 )
 
 
+def _tool_messages_this_turn(messages: list) -> list:
+    """Only ToolMessages after the latest HumanMessage (current turn)."""
+    if not messages:
+        return []
+    start = 0
+    for i, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            start = i + 1
+    return [m for m in messages[start:] if isinstance(m, ToolMessage)]
+
+
+def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
+    """
+    Returns (should_remind_portal, is_primera_vez).
+    Primera vez = flag from agendar success (new account / first booking).
+    """
+    should_remind = False
+    is_primera_vez = False
+    for msg in tool_msgs:
+        tool_name = (getattr(msg, "name", None) or "").strip()
+        if tool_name not in _PORTAL_ELIGIBLE_TOOLS:
+            continue
+        content = str(msg.content or "")
+        content_low = content.lower()
+        if tool_name == "consultar_cita_por_cedula_tool":
+            if any(m in content_low for m in _CONSULT_LIST_MARKERS):
+                should_remind = True
+            continue
+        if any(m in content_low for m in _MUTATION_SUCCESS_MARKERS):
+            should_remind = True
+            if _PRIMERA_VEZ_PORTAL_FLAG in content_low or "usuario es tu número de cédula" in content_low:
+                is_primera_vez = True
+    return should_remind, is_primera_vez
+
+
 def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str:
-    """If booking/confirm just succeeded and the LLM omitted the portal, append it."""
+    """
+    Reinject portal ONLY if this turn had a successful agendar/modificar/cancelar
+    or a consult that listed appointments. Never append from older turns.
+    First-time credentials tip (rule only, no digits) when flagged by agendar.
+    """
     text = (respuesta or "").strip()
     if not text:
         return respuesta
 
-    booked = False
-    for msg in reversed(messages or []):
-        if not isinstance(msg, ToolMessage):
-            continue
-        tool_name = (getattr(msg, "name", None) or "").strip()
-        if tool_name not in _BOOKING_SUCCESS_TOOLS:
-            continue
-        content_low = str(msg.content or "").lower()
-        if any(marker in content_low for marker in _BOOKING_SUCCESS_MARKERS):
-            booked = True
-        break
+    # Never leak the machine flag to WhatsApp
+    text = text.replace(_PRIMERA_VEZ_PORTAL_FLAG, "").replace(_PRIMERA_VEZ_PORTAL_FLAG.upper(), "")
+    text = text.strip()
 
-    if not booked:
-        return respuesta
+    should_remind, is_primera_vez = _portal_eligibility_from_tools(
+        _tool_messages_this_turn(messages)
+    )
+    if not should_remind:
+        return text
 
     low = text.lower()
-    if any(marker in low for marker in _PORTAL_HINT_MARKERS):
-        return respuesta
-
+    has_portal = any(marker in low for marker in _PORTAL_HINT_MARKERS)
+    has_creds = any(marker in low for marker in _CREDENTIALS_HINT_MARKERS)
     web_url = os.getenv("WEB_PORTAL_URL", _DEFAULT_WEB_PORTAL_URL).strip() or _DEFAULT_WEB_PORTAL_URL
+
+    if is_primera_vez and (not has_portal or not has_creds):
+        # Drop a bare portal block if present without credentials tip, then append full tip.
+        tip = (
+            "\n\n🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
+            f"🔗 {web_url}\n"
+            "Tu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
+            "(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
+            "el bot no puede modificar contraseñas."
+        )
+        if has_portal and not has_creds:
+            # Append credentials rule only
+            tip = (
+                "\n\nTu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
+                "(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
+                "el bot no puede modificar contraseñas."
+            )
+        return text.rstrip() + tip
+
+    if has_portal:
+        return text
+
     reminder = (
         "\n\n🌐 Recuerda que puedes consultar tu cita en la *plataforma virtual* "
         f"(portal del paciente):\n🔗 {web_url}"
@@ -679,7 +752,7 @@ async def process_whatsapp_message(
         if not respuesta_texto:
             respuesta_texto = MENSAJE_FALLBACK_PACIENTE
         else:
-            # LLM often rewrites booking success and drops the portal URL — reinject if needed.
+            # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
             respuesta_texto = _ensure_portal_reminder_after_booking(
                 respuesta_texto, mensajes_resultado
             )
