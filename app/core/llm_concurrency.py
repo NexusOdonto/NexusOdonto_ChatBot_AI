@@ -51,9 +51,10 @@ def _llm_semaphore() -> asyncio.Semaphore:
     with _semaphores_guard:
         sem = _semaphores.get(key)
         if sem is None:
-            limit = max(1, int(getattr(settings, "llm_max_concurrent", 5) or 5))
+            limit = max(1, int(getattr(settings, "llm_max_concurrent", 8) or 8))
             sem = asyncio.Semaphore(limit)
             _semaphores[key] = sem
+            logger.info(f"[LLM] concurrency semaphore bound limit={limit}")
         return sem
 
 
@@ -112,7 +113,7 @@ async def with_llm_slot(awaitable: Awaitable[T], *, label: str = "llm") -> T:
     if waited >= threshold:
         logger.info(
             f"[Latency] queue_wait={waited:.3f}s label={label} "
-            f"max_concurrent={getattr(settings, 'llm_max_concurrent', 5)} "
+            f"max_concurrent={getattr(settings, 'llm_max_concurrent', 8)} "
             f"queue_wait_total={float(_graph_queue_wait_total.get() or 0.0):.3f}s"
         )
     try:

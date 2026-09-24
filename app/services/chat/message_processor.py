@@ -40,6 +40,7 @@ MENSAJE_FALLBACK_PACIENTE = (
     "Por favor, intenta nuevamente en unos momentos. ¡Disculpa las molestias!"
 )
 
+# Kept for logs/docs only — never send this to WhatsApp (users want real replies, not retry spam).
 MENSAJE_GRAPH_TIMEOUT = (
     "Estoy atendiendo varias consultas ahora mismo y esta está tardando más de lo normal. "
     "Por favor reenvía tu mensaje en un momento y con gusto te ayudo. 🙏"
@@ -539,35 +540,33 @@ async def process_whatsapp_message(
 
         t_graph = time.perf_counter()
         try:
-            # Deadline extendible: la espera del semáforo LLM no consume el presupuesto.
-            result = await run_with_graph_deadline(
-                get_graph().ainvoke(invoke_input, config),
-                timeout_seconds=float(settings.graph_timeout_seconds),
-            )
+            timeout_s = float(settings.graph_timeout_seconds or 0)
+            if timeout_s > 0:
+                # High silent safety net; queue wait excluded from budget.
+                result = await run_with_graph_deadline(
+                    get_graph().ainvoke(invoke_input, config),
+                    timeout_seconds=timeout_s,
+                )
+            else:
+                result = await get_graph().ainvoke(invoke_input, config)
         except (GraphDeadlineExceeded, LLMCallTimeoutError) as timeout_exc:
+            # Do NOT WhatsApp a retry/error copy — users need the real reply path,
+            # not "reenvía". Log only; safety net should be high enough this is rare.
             spans["graph_total"] = time.perf_counter() - t_graph
             spans["queue_wait_total"] = graph_queue_wait_total()
             spans["total"] = time.perf_counter() - t_total
             kind = (
-                "graph_timeout"
+                "graph_timeout_silent"
                 if isinstance(timeout_exc, GraphDeadlineExceeded)
-                else "llm_call_timeout"
+                else "llm_call_timeout_silent"
             )
             logger.warning(
                 f"[Latency] {kind} phone={numero_paciente} "
                 f"limit={settings.graph_timeout_seconds}s "
                 f"llm_call_limit={settings.llm_call_timeout_seconds}s "
                 f"queue_wait_excluded={spans['queue_wait_total']:.3f}s "
-                f"err={timeout_exc!s} "
+                f"err={timeout_exc!s} (no WhatsApp timeout message) "
                 + " ".join(f"{k}={v:.3f}s" for k, v in spans.items() if k != "queue_wait_total")
-            )
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_GRAPH_TIMEOUT)
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=MENSAJE_GRAPH_TIMEOUT,
-                )
             )
             return
         spans["graph_total"] = time.perf_counter() - t_graph
@@ -649,23 +648,12 @@ async def process_whatsapp_message(
             + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
         )
 
-    except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError):
-        # Defensa: timeouts no deben caer en el copy genérico de intermitencias.
+    except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError) as timeout_exc:
+        # Silent: never WhatsApp timeout/retry spam.
         logger.warning(
-            f"[Processor] Timeout fuera del bloque graph para {numero_paciente}; "
-            "enviando MENSAJE_GRAPH_TIMEOUT"
+            f"[Processor] Timeout silencioso para {numero_paciente}: {timeout_exc!s} "
+            "(sin mensaje de reintento al usuario)"
         )
-        try:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_GRAPH_TIMEOUT)
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=MENSAJE_GRAPH_TIMEOUT,
-                )
-            )
-        except Exception:
-            pass
     except asyncio.CancelledError:
         raise
     except Exception as exc:

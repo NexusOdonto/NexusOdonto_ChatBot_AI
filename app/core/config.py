@@ -76,16 +76,16 @@ class Settings(BaseSettings):
     session_store: str = "memory"
     session_ttl_seconds: int = 900  # 15 minutos de inactividad antes de expirar la sesión
     session_cleanup_interval_seconds: int = 300
-    # Presupuesto de trabajo del grafo (NO incluye espera en cola del semáforo LLM).
-    # Citas/agenda: varios ciclos LLM→tools; un solo llm_turn puede ir a ~30s bajo carga.
+    # Safety net only: high enough that real cite/agenda replies finish under load.
+    # 0 = disabled. Queue wait is excluded via extendable deadline. Never used for
+    # user-facing "reenvía" spam — timeouts only log.
     graph_timeout_seconds: int = Field(
-        default=120,
+        default=300,
         validation_alias=AliasChoices("GRAPH_TIMEOUT_SECONDS"),
     )
-    # Tope de llamadas concurrentes a LLM/embeddings (Gemini). El resto espera en cola.
-    # 5 en paralelo satura Gemini (llm_call ~45s hang); 4 equilibra throughput vs latencia.
+    # More parallel Gemini slots so concurrent phones don't queue for tens of seconds.
     llm_max_concurrent: int = Field(
-        default=4,
+        default=8,
         validation_alias=AliasChoices("LLM_MAX_CONCURRENT"),
     )
     # Loguear queue_wait cuando un chat espera el semáforo más de N segundos.
@@ -93,10 +93,9 @@ class Settings(BaseSettings):
         default=2.0,
         validation_alias=AliasChoices("LLM_QUEUE_WAIT_LOG_SECONDS"),
     )
-    # Tope por llamada LLM tras adquirir slot (0 = sin tope extra). Evita un Gemini colgado.
-    # Bajo carga un solo turno puede ir a ~30s; 60s deja margen sin confundirse con el grafo.
+    # 0 = no per-call kill (preferred). A mid-flight cancel only delays real replies.
     llm_call_timeout_seconds: float = Field(
-        default=60.0,
+        default=0.0,
         validation_alias=AliasChoices("LLM_CALL_TIMEOUT_SECONDS"),
     )
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
