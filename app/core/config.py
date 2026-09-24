@@ -24,7 +24,8 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     )
-    gemini_model: str = "gemini-flash-latest"
+    # Prefer flash-lite for chat+tools latency; override via GEMINI_MODEL in .env.
+    gemini_model: str = "gemini-3.5-flash-lite"
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),

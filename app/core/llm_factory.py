@@ -56,16 +56,19 @@ def get_chat_llm(
                 "GEMINI_API_KEY no está configurada. Para usar Google Gemini, define "
                 "GEMINI_API_KEY en tu archivo .env o cambia LLM_PROVIDER='openai'."
             )
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        from app.core.fast_gemini import FastGeminiChat
 
         target_model = model or settings.gemini_model
-        logger.debug(f"[LLM Factory] Instanciando ChatGoogleGenerativeAI (modelo: {target_model})")
-        return ChatGoogleGenerativeAI(
+        logger.info(
+            f"[LLM Factory] FastGeminiChat model={target_model} "
+            f"max_output_tokens={max_tokens} temperature={temperature}"
+        )
+        return FastGeminiChat(
             model=target_model,
             google_api_key=settings.gemini_api_key,
             temperature=temperature,
-            max_output_tokens=max_tokens,
-            max_retries=0,
+            max_output_tokens=max_tokens or 512,
+            timeout=90.0,
         )
 
     # Proveedor por defecto: OpenAI
@@ -90,10 +93,10 @@ def get_evaluator_llm(provider: Optional[str] = None) -> BaseChatModel:
     """Retorna un modelo ligero y rápido para tareas de clasificación, triage y compresión."""
     active_provider = (provider or settings.llm_provider or "openai").lower().strip()
     if active_provider == "gemini":
-        target = settings.gemini_model if "flash" in settings.gemini_model else "gemini-1.5-flash"
-        return get_chat_llm(model=target, temperature=0.0, provider="gemini")
+        target = settings.gemini_model if "flash" in settings.gemini_model else "gemini-3.5-flash-lite"
+        return get_chat_llm(model=target, temperature=0.0, max_tokens=32, provider="gemini")
     else:
-        return get_chat_llm(model="gpt-4o-mini", temperature=0.0, provider="openai")
+        return get_chat_llm(model="gpt-4o-mini", temperature=0.0, max_tokens=32, provider="openai")
 
 
 def get_embeddings_model(provider: Optional[str] = None) -> Embeddings:

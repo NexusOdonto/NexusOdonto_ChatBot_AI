@@ -56,6 +56,14 @@ _FAST_RESPONSES: Dict[str, str] = {
         "¡Con el mayor de los gustos! 😊 En *Nexus Odonto* siempre estamos listos para cuidar de tu salud bucal 🦷✨.\n\n"
         "Si necesitas algo más, solo escríbeme. ¡Que tengas un excelente día! 👋"
     ),
+    # Safe booking step-1 only: ask for cédula/nombre. Never invents appointments or assumes IDs.
+    "agendar_inicio": (
+        "¡Con gusto te ayudo a agendar tu cita en *Nexus Odonto*! 🦷✨\n\n"
+        "Para continuar, indícame por favor:\n"
+        "• Tu *número de cédula* 🆔\n"
+        "• Tu *nombre completo* (nombre y apellido) 👤\n\n"
+        "Con esos datos seguimos con el tratamiento y los horarios disponibles. 😊"
+    ),
 }
 
 # Mapeo de frases exactas / patrones hacia respuestas rápidas
@@ -70,6 +78,14 @@ _FAST_MATCH_PATTERNS = [
     (r"^(contacto|telefono|numero de telefono|whatsapp|linea telefonica|numero de contacto|canales de atencion)$", "contacto"),
     # Despedidas / Agradecimientos
     (r"^(gracias|muchas gracias|muchisimas gracias|mil gracias|chao|adios|hasta luego|vale gracias|ok gracias)$", "agradecimiento"),
+    # Inicio de agendamiento (solo pedir datos; sin inventar citas ni tratar el texto como cédula)
+    (
+        r"^(quiero|deseo|necesito|quisiera|me gustaria)?\s*"
+        r"(una\s+|sacar\s+|apartar\s+|programar\s+)?"
+        r"(cita|agendar|agendar\s+(una\s+)?cita|apartar\s+(una\s+)?cita|"
+        r"programar\s+(una\s+)?cita|reservar\s+(una\s+)?cita)$",
+        "agendar_inicio",
+    ),
 ]
 
 
@@ -103,16 +119,31 @@ def _should_skip_l2_embed(text: str) -> bool:
     digits = re.sub(r"\D", "", text)
     if 6 <= len(digits) <= 12 and re.fullmatch(r"[\d\s.\-]+", text.strip()):
         return True
-    agenda_hints = (
+    skip_hints = (
         "agendar",
         "cita",
         "reservar",
         "disponibilidad",
-        "cancelar cita",
-        "modificar cita",
+        "cancelar",
+        "modificar",
         "reprogramar",
+        "confirmar",
+        "precio",
+        "precios",
+        "vale",
+        "cuesta",
+        "cuanto",
+        "servicio",
+        "servicios",
+        "tratamiento",
+        "limpieza",
+        "profilaxis",
+        "doctor",
+        "doctores",
+        "horario",
+        "cedula",
     )
-    return any(h in norm for h in agenda_hints)
+    return any(h in norm for h in skip_hints)
 
 
 def ensure_cache_collection(client: Optional[QdrantClient] = None) -> None:
