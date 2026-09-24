@@ -32,6 +32,122 @@ def _normalizar_texto(texto: str) -> str:
     )
 
 
+_PROF_TITLE_TOKENS = frozenset(
+    {"dr", "dra", "doctor", "doctora", "odontologo", "odontologa", "doc"}
+)
+_ANY_PROF_TOKENS = frozenset(
+    {
+        "",
+        "none",
+        "null",
+        "n/a",
+        "na",
+        "cualquiera",
+        "disponible",
+        "sin preferencia",
+        "indiferente",
+        "el que este",
+        "el que este disponible",
+        "quien este disponible",
+    }
+)
+
+
+def _prof_display_name(prof: Dict[str, Any]) -> str:
+    """Best-effort display name from enriched or raw professional dict."""
+    for key in ("name", "nombre", "nombreCompleto", "fullName"):
+        val = prof.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    first = str(prof.get("firstName") or "").strip()
+    last = str(prof.get("lastName") or "").strip()
+    combined = f"{first} {last}".strip()
+    return combined
+
+
+def _prof_name_tokens(texto: str) -> List[str]:
+    norm = _normalizar_texto(texto)
+    # Drop titles / punctuation so "Dra. Ana Sofía" → ana, sofia
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", norm)
+    return [t for t in cleaned.split() if t and t not in _PROF_TITLE_TOKENS]
+
+
+def _score_profesional_nombre(query: str, prof: Dict[str, Any]) -> float:
+    """Token overlap score in [0,1]. Prefers multi-token matches (Ana Sofía)."""
+    q_tokens = _prof_name_tokens(query)
+    if not q_tokens:
+        return 0.0
+    name_tokens = _prof_name_tokens(_prof_display_name(prof))
+    if not name_tokens:
+        return 0.0
+    name_set = set(name_tokens)
+    hits = sum(1 for t in q_tokens if t in name_set)
+    return hits / len(q_tokens)
+
+
+def _resolver_profesional(
+    profesional_ref: Any,
+    profs: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Resolve professional by UUID or name. Never silently picks the first dentist
+    when the user/LLM named someone (that caused Laura Gómez as default/cabecera).
+
+    Returns (prof_dict_or_None, error_message_or_None).
+    """
+    if not profs:
+        return None, "No hay odontólogos activos registrados en este momento."
+
+    raw = str(profesional_ref or "").strip()
+    norm = _normalizar_texto(raw)
+    if norm in _ANY_PROF_TOKENS:
+        return None, (
+            "Para agendar necesito el *nombre o ID* del odontólogo que prefieres "
+            "(ej: *Dra. Ana Sofía*). ¿Con quién te gustaría la cita? 😊"
+        )
+
+    # 1) Exact UUID match
+    for p in profs:
+        if str(p.get("id") or "").lower() == raw.lower():
+            return p, None
+
+    # 2) Best name score (require full query-token coverage for multi-token names)
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for p in profs:
+        score = _score_profesional_nombre(raw, p)
+        if score > 0:
+            scored.append((score, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    q_tokens = _prof_name_tokens(raw)
+    if scored:
+        best_score, best = scored[0]
+        # Single token (e.g. "ana"): accept ≥0.99 only if unique top score
+        # Multi-token ("ana sofia"): require all tokens matched
+        min_needed = 1.0 if len(q_tokens) >= 2 else 0.99
+        if best_score >= min_needed:
+            ties = [p for s, p in scored if s >= best_score - 1e-9]
+            if len(ties) == 1:
+                return best, None
+            names = ", ".join(_prof_display_name(p) or str(p.get("id")) for p in ties[:4])
+            return None, (
+                f"Encontré varios especialistas parecidos a *{raw}*: {names}. "
+                "¿Cuál prefieres exactamente?"
+            )
+
+    opciones = []
+    for p in profs[:6]:
+        label = _prof_display_name(p)
+        if label:
+            opciones.append(f"• {label}")
+    lista = "\n".join(opciones) if opciones else "• (consulta con recepción)"
+    return None, (
+        f"No encontré al odontólogo *{raw}* en el equipo activo.\n\n"
+        f"Especialistas disponibles:\n{lista}\n\n"
+        "¿Con quién te agendo? (Indica el nombre completo, ej: *Ana Sofía*)."
+    )
+
+
 def _obtener_valor(obj: Dict[str, Any], *keys: str) -> Any:
     """Busca un valor en un diccionario de forma insensible a mayúsculas y minúsculas."""
     if not isinstance(obj, dict):

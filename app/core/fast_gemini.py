@@ -148,6 +148,21 @@ class FastGeminiChat(BaseChatModel):
     def _llm_type(self) -> str:
         return "fast-gemini-rest"
 
+    def _tools(self) -> list:
+        """Safe read of PrivateAttr — avoids ModelPrivateAttr-not-iterable on bare instances."""
+        priv = getattr(self, "__pydantic_private__", None)
+        if isinstance(priv, dict):
+            val = priv.get("_bound_tools")
+            if isinstance(val, list):
+                return val
+        try:
+            val = object.__getattribute__(self, "_bound_tools")
+            if isinstance(val, list):
+                return val
+        except Exception:
+            pass
+        return []
+
     def bind_tools(self, tools: Sequence[BaseTool], **kwargs: Any) -> "FastGeminiChat":
         clone = FastGeminiChat(
             model=self.model,
@@ -156,7 +171,12 @@ class FastGeminiChat(BaseChatModel):
             google_api_key=self.google_api_key,
             timeout=self.timeout,
         )
-        object.__setattr__(clone, "_bound_tools", list(tools))
+        # Write into pydantic private store so _tools() always sees a real list.
+        priv = getattr(clone, "__pydantic_private__", None)
+        if not isinstance(priv, dict):
+            object.__setattr__(clone, "__pydantic_private__", {})
+            priv = clone.__pydantic_private__
+        priv["_bound_tools"] = list(tools)
         return clone
 
     def _build_body(self, messages: Sequence[BaseMessage]) -> dict[str, Any]:
@@ -171,9 +191,10 @@ class FastGeminiChat(BaseChatModel):
         }
         if system_instruction:
             body["systemInstruction"] = system_instruction
-        if self._bound_tools:
+        bound = self._tools()
+        if bound:
             body["tools"] = [
-                {"functionDeclarations": [_tool_to_declaration(t) for t in self._bound_tools]}
+                {"functionDeclarations": [_tool_to_declaration(t) for t in bound]}
             ]
         return body
 
@@ -181,7 +202,7 @@ class FastGeminiChat(BaseChatModel):
         usage = data.get("usageMetadata") or {}
         logger.info(
             f"[FastGemini] t={elapsed:.3f}s model={model} "
-            f"tools={len(self._bound_tools)} usage={usage}"
+            f"tools={len(self._tools())} usage={usage}"
         )
         cands = data.get("candidates") or []
         if not cands:

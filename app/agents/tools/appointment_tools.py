@@ -24,6 +24,8 @@ from app.agents.tools.agenda_helpers import (
     _parsear_fecha_hora_flexible,
     _validar_horario_cita,
     _resolver_cita_por_selector,
+    _resolver_profesional,
+    _prof_display_name,
     _filtrar_citas_proximas_activas,
     _buscar_servicio_por_texto,
     _buscar_especialidad_por_texto,
@@ -171,23 +173,21 @@ async def _agendar_cita_impl(
             except Exception as exc:
                 logger.warning(f"[Agenda] No se pudo consultar citas previas de {paciente_id}: {exc}")
 
-        # 2. Resolver profesional
+        # 2. Resolver profesional (nunca caer al primero/cabecera si el paciente nombró a alguien)
         profs = await dotnet_client.obtener_profesionales() or []
-        resolved_prof = None
-        for p in profs:
-            if str(p.get("id")).lower() == str(profesional_id).lower():
-                resolved_prof = p
-                break
-            p_name = _normalizar_texto(p.get("name") or "")
-            norm_target = _normalizar_texto(str(profesional_id))
-            if norm_target and (norm_target in p_name or p_name in norm_target):
-                resolved_prof = p
-                break
-        if not resolved_prof and profs:
-            resolved_prof = profs[0]
+        resolved_prof, prof_err = _resolver_profesional(profesional_id, profs)
+        if prof_err or not resolved_prof:
+            return prof_err or (
+                "No pude identificar al odontólogo solicitado. "
+                "¿Me confirmas el nombre (ej: *Dra. Ana Sofía*)?"
+            )
 
-        resolved_prof_id = resolved_prof.get("id") if resolved_prof else profesional_id
-        prof_nombre_display = resolved_prof.get("name") if resolved_prof else "Especialista Odontológico"
+        resolved_prof_id = resolved_prof.get("id")
+        prof_nombre_display = _prof_display_name(resolved_prof) or "Especialista Odontológico"
+        logger.info(
+            f"[Agenda] Profesional resuelto ref={profesional_id!r} → "
+            f"id={resolved_prof_id} name={prof_nombre_display}"
+        )
 
         # 3. Resolver servicio y duración
         servs = await dotnet_client.obtener_servicios() or []
@@ -577,13 +577,14 @@ async def _modificar_cita_impl(
         resolved_prof_id = cita_encontrada.get("professionalId")
         if nuevo_profesional_id and str(nuevo_profesional_id).strip():
             profs = await dotnet_client.obtener_profesionales() or []
-            for p in profs:
-                p_name = _normalizar_texto(p.get("name") or "")
-                norm_target = _normalizar_texto(str(nuevo_profesional_id))
-                if str(p.get("id")).lower() == str(nuevo_profesional_id).lower() or (norm_target and norm_target in p_name):
-                    resolved_prof_id = str(p.get("id"))
-                    prof_nombre_display = p.get("name", prof_nombre_display)
-                    break
+            resolved_new, prof_err = _resolver_profesional(nuevo_profesional_id, profs)
+            if prof_err or not resolved_new:
+                return prof_err or (
+                    "No pude identificar al nuevo odontólogo. "
+                    "Indica el nombre exacto (ej: *Dra. Ana Sofía*)."
+                )
+            resolved_prof_id = str(resolved_new.get("id"))
+            prof_nombre_display = _prof_display_name(resolved_new) or prof_nombre_display
 
         horario_valido, msg_horario = _validar_horario_cita(starts_dt, duracion_min, prof_nombre_display)
         if not horario_valido and msg_horario:
