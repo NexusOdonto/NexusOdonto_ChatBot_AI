@@ -436,7 +436,11 @@ def _generar_slots_desde_regla(
     lunch_end_str: Optional[str] = None,
     duracion_min: int = 60,
 ) -> list[str]:
-    """Genera slots bloqueando estrictamente la franja institucional de almuerzo (12:00 a 14:00)."""
+    """Genera slots bloqueando estrictamente la franja institucional de almuerzo (12:00 a 14:00).
+
+    Usa la duración real del servicio (mín. 30) y limita EndTime al cierre clínico 17:00.
+    Solo ofrece inicios donde inicio + duración cabe antes del fin de la franja.
+    """
     try:
         sh, sm = map(int, str(start_time_str).split(":")[:2])
         eh, em = map(int, str(end_time_str).split(":")[:2])
@@ -446,6 +450,9 @@ def _generar_slots_desde_regla(
 
         cur = sh * 60 + sm
         end = eh * 60 + em
+        # Tope clínico de tarde: evita slots por EndTime del profesional > 17:00
+        clinic_close_min = 17 * 60
+        end = min(end, clinic_close_min)
 
         # Asegurar bloqueo institucional de 12:00 a 14:00 (720 min a 840 min)
         lstart = min(720, lsh * 60 + lsm)
@@ -453,7 +460,7 @@ def _generar_slots_desde_regla(
 
         slots = []
         step_min = 30
-        dur_min = max(30, min(duracion_min, 60))
+        dur_min = max(30, int(duracion_min or 30))
         while cur + dur_min <= end:
             if not (cur < lend and (cur + dur_min) > lstart):
                 h = cur // 60
@@ -524,7 +531,7 @@ def _validar_horario_cita(
     duracion_min: int = 30,
     prof_nombre: str = "el especialista",
 ) -> Tuple[bool, Optional[str]]:
-    """Valida que la fecha y hora cumpla las políticas clínicas y de almuerzo."""
+    """Valida que inicio + duración quepa en jornada (sin cruzar almuerzo ni pasar el cierre)."""
     if dt.weekday() == 6:
         return (
             False,
@@ -532,34 +539,58 @@ def _validar_horario_cita(
             "Nuestra jornada de atención es de Lunes a Sábado. ¿Te gustaría agendar para el próximo día hábil o consultar horarios disponibles? 😊",
         )
 
-    if dt.weekday() == 5:
-        if dt.hour < 8 or dt.hour >= 12 or (dt.hour == 11 and dt.minute > 30 and duracion_min > 30):
+    dur = max(30, int(duracion_min or 30))
+    start_t = dt.time()
+    end_dt = dt + timedelta(minutes=dur)
+    end_t = end_dt.time()
+    ends_next_day = end_dt.date() > dt.date()
+    es_sabado = dt.weekday() == 5
+    cierre = time(12, 0) if es_sabado else time(17, 0)
+    almuerzo_ini = time(12, 0)
+    almuerzo_fin = time(14, 0)
+    hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
+
+    msg_sabado = (
+        "⚠️ Los sábados nuestro consultorio atiende únicamente en jornada continua de *8:00 AM a 12:00 PM* ⏰.\n\n"
+        "¿Te gustaría agendar el sábado en la mañana o para el lunes en la tarde? 😊"
+    )
+    msg_fuera = (
+        f"⚠️ El horario solicitado (*{hora_sol}*) se encuentra fuera de nuestra jornada de atención ⏰.\n\n"
+        "Nuestros horarios de consulta son:\n"
+        "• ☀️ *Mañana:* 8:00 AM a 12:00 PM\n"
+        "• 🌤️ *Tarde:* 2:00 PM a 5:00 PM\n"
+        "• 📅 *Sábados:* 8:00 AM a 12:00 PM\n\n"
+        "¿Deseas consultar los turnos disponibles dentro de este horario? 😊"
+    )
+    msg_duracion = (
+        f"⚠️ El horario solicitado (*{hora_sol}*) no cabe con la duración del tratamiento "
+        f"(*{dur} min*) dentro de nuestra jornada de atención ⏰.\n\n"
+        "Por favor consulta la disponibilidad para ver los turnos en los que sí alcanza "
+        "a completarse el servicio. 😊"
+    )
+
+    if es_sabado:
+        if start_t < time(8, 0) or start_t >= cierre:
+            return (False, msg_sabado)
+        if ends_next_day or end_t > cierre:
+            return (False, msg_sabado)
+    else:
+        if almuerzo_ini <= start_t < almuerzo_fin:
             return (
                 False,
-                "⚠️ Los sábados nuestro consultorio atiende únicamente en jornada continua de *8:00 AM a 12:00 PM* ⏰.\n\n"
-                "¿Te gustaría agendar el sábado en la mañana o para el lunes en la tarde? 😊",
+                f"⚠️ El horario solicitado (*{hora_sol}*) coincide con el receso de almuerzo de nuestros especialistas (12:00 PM a 2:00 PM) 🍽️.\n\n"
+                f"En la jornada de la tarde disponemos de turnos con {prof_nombre} a partir de las *2:00 PM* o *2:30 PM*.\n\n"
+                "¿Te gustaría que te reserve a las *2:00 PM*? 😊",
             )
-
-    if 12 <= dt.hour < 14:
-        hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
-        return (
-            False,
-            f"⚠️ El horario solicitado (*{hora_sol}*) coincide con el receso de almuerzo de nuestros especialistas (12:00 PM a 2:00 PM) 🍽️.\n\n"
-            f"En la jornada de la tarde disponemos de turnos con {prof_nombre} a partir de las *2:00 PM* o *2:30 PM*.\n\n"
-            "¿Te gustaría que te reserve a las *2:00 PM*? 😊",
-        )
-
-    if dt.hour < 8 or dt.hour >= 17 or (dt.hour == 16 and dt.minute > 30 and duracion_min > 30):
-        hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
-        return (
-            False,
-            f"⚠️ El horario solicitado (*{hora_sol}*) se encuentra fuera de nuestra jornada de atención ⏰.\n\n"
-            "Nuestros horarios de consulta son:\n"
-            "• ☀️ *Mañana:* 8:00 AM a 12:00 PM\n"
-            "• 🌤️ *Tarde:* 2:00 PM a 5:00 PM\n"
-            "• 📅 *Sábados:* 8:00 AM a 12:00 PM\n\n"
-            "¿Deseas consultar los turnos disponibles dentro de este horario? 😊",
-        )
+        en_manana = time(8, 0) <= start_t < time(12, 0)
+        en_tarde = time(14, 0) <= start_t < time(17, 0)
+        if not (en_manana or en_tarde):
+            return (False, msg_fuera)
+        # No cabe si termina después del cierre o si el bloque cruza el almuerzo
+        if ends_next_day or end_t > cierre:
+            return (False, msg_duracion)
+        if start_t < almuerzo_fin and end_t > almuerzo_ini:
+            return (False, msg_duracion)
 
     try:
         from zoneinfo import ZoneInfo
@@ -570,7 +601,6 @@ def _validar_horario_cita(
     if dt.date() == now_bogota.date():
         dt_check = dt.replace(tzinfo=now_bogota.tzinfo) if dt.tzinfo is None and now_bogota.tzinfo else dt
         if dt_check < now_bogota + timedelta(minutes=15):
-            hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
             return (
                 False,
                 f"⚠️ Para poder prepararte adecuadamente y garantizar que alcances a llegar al consultorio, "
