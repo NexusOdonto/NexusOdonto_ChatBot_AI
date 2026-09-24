@@ -19,7 +19,6 @@ from app.agents.tools.agenda_helpers import (
     _normalizar_texto,
     _obtener_valor,
     _validar_cedula,
-    _run_sync,
     _formatear_hora_ampm,
     _parsear_fecha_hora_flexible,
     _validar_horario_cita,
@@ -693,10 +692,10 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         return "Lo siento, ocurrió un problema al confirmar la cita. Por favor intenta de nuevo o comunícate con recepción."
 
 
-# ─── Herramientas LangChain Expuestas al LLM ──────────────────────────────────
+# ─── Herramientas LangChain Expuestas al LLM (async — sin _run_sync/t.join) ────
 
 @tool
-def agendar_cita_tool(
+async def agendar_cita_tool(
     cedula: str,
     nombre_paciente: str,
     profesional_id: str,
@@ -720,11 +719,13 @@ def agendar_cita_tool(
     El número de WhatsApp del paciente se usa automáticamente como teléfono de contacto.
     Si el paciente no existe en el sistema, se creará automáticamente con los datos básicos.
     """
-    return _run_sync(_agendar_cita_impl(cedula, nombre_paciente, profesional_id, servicio_id, fecha_hora_inicio, motivo_consulta, config))
+    return await _agendar_cita_impl(
+        cedula, nombre_paciente, profesional_id, servicio_id, fecha_hora_inicio, motivo_consulta, config
+    )
 
 
 @tool
-def consultar_cita_por_cedula_tool(cedula: str) -> str:
+async def consultar_cita_por_cedula_tool(cedula: str) -> str:
     """Consulta todas las citas programadas de un paciente usando su número de cédula o documento de identidad.
     Muestra: nombre del paciente, cédula, doctor asignado, tratamiento, fecha, horario y estado de cada cita.
     
@@ -732,11 +733,11 @@ def consultar_cita_por_cedula_tool(cedula: str) -> str:
     PROHIBICIÓN ESTRICTA: NUNCA uses esta herramienta si el usuario está en proceso de AGENDAR una cita nueva, cancelar o reprogramar, incluso si el usuario acaba de escribir únicamente su número de cédula. En esos casos debes continuar el flujo correspondiente y NO consultar sus citas anteriores.
     Si el usuario no ha proporcionado su cédula, pídesela antes de invocar esta herramienta.
     """
-    return _run_sync(_consultar_cita_por_cedula_impl(cedula))
+    return await _consultar_cita_por_cedula_impl(cedula)
 
 
 @tool
-def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
+async def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     """
     Cancela una cita activa de un paciente verificando su cédula.
     Si el paciente tiene una única cita activa, el sistema la cancelará automáticamente de inmediato.
@@ -748,11 +749,11 @@ def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     
     Usa esta herramienta DE INMEDIATO tan pronto el usuario manifieste que desea cancelar su cita y proporcione su número de cédula. NO llames a consultar_cita_por_cedula_tool antes.
     """
-    return _run_sync(_cancelar_cita_impl(cedula, cita_id))
+    return await _cancelar_cita_impl(cedula, cita_id)
 
 
 @tool
-def modificar_cita_tool(
+async def modificar_cita_tool(
     cedula: str,
     nueva_fecha_hora: Optional[str] = None,
     cita_id: Optional[str] = None,
@@ -772,12 +773,11 @@ def modificar_cita_tool(
     Si la cédula ya fue mencionada en el chat, NO se la vuelvas a pedir, invoca esta herramienta de una vez.
     NO uses consultar_cita_por_cedula_tool para reprogramar citas.
     """
-    return _run_sync(_modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id))
-
+    return await _modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id)
 
 
 @tool
-def confirmar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
+async def confirmar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     """
     Confirma formalmente la asistencia del paciente a una cita activa o recordatorio en el sistema Nexus Odonto.
     Actualiza el estado de la cita en la base de datos a CONFIRMADA (verde).
@@ -789,4 +789,4 @@ def confirmar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     Usa esta herramienta cuando el paciente responda a un recordatorio diciendo 'Confirmo', 'Sí confirmo', 'Confirmo mi cita',
     'Confirmo mi asistencia', 'Allá estaré', o cuando solicite explícitamente confirmar su cita.
     """
-    return _run_sync(_confirmar_cita_impl(cedula, cita_id))
+    return await _confirmar_cita_impl(cedula, cita_id)

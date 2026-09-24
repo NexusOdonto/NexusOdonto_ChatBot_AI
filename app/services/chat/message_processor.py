@@ -34,6 +34,11 @@ MENSAJE_FALLBACK_PACIENTE = (
     "Por favor, intenta nuevamente en unos momentos. ¡Disculpa las molestias!"
 )
 
+MENSAJE_GRAPH_TIMEOUT = (
+    "Estoy atendiendo varias consultas ahora mismo y esta está tardando más de lo normal. "
+    "Por favor reenvía tu mensaje en un momento y con gusto te ayudo. 🙏"
+)
+
 MENSAJE_ESCALAMIENTO = (
     "Entiendo. Un asesor de la clínica revisará tu solicitud y te contactará pronto."
 )
@@ -527,7 +532,28 @@ async def process_whatsapp_message(
         }
 
         t_graph = time.perf_counter()
-        result = await get_graph().ainvoke(invoke_input, config)
+        try:
+            result = await asyncio.wait_for(
+                get_graph().ainvoke(invoke_input, config),
+                timeout=float(settings.graph_timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            spans["graph_total"] = time.perf_counter() - t_graph
+            spans["total"] = time.perf_counter() - t_total
+            logger.warning(
+                f"[Latency] graph_timeout phone={numero_paciente} "
+                f"limit={settings.graph_timeout_seconds}s "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+            )
+            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_GRAPH_TIMEOUT)
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=MENSAJE_GRAPH_TIMEOUT,
+                )
+            )
+            return
         spans["graph_total"] = time.perf_counter() - t_graph
 
         rag_conf = result.get("rag_confidence")

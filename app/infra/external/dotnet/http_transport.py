@@ -1,5 +1,6 @@
 """Transporte HTTP base para la API .NET de Nexus Odonto.
 Encapsula la autenticación JWT automática, reintentos con backoff y manejo del error 401.
+Usa un httpx.AsyncClient compartido (connection pool) cerrado en shutdown.
 """
 
 import os
@@ -46,9 +47,38 @@ class DotNetHttpTransport:
         self._jwt_token: Optional[str] = None
         self._auth_locks: Dict[int, asyncio.Lock] = {}
         self._auth_locks_guard = threading.Lock()
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_locks: Dict[int, asyncio.Lock] = {}
+        self._client_locks_guard = threading.Lock()
 
     def _auth_lock(self) -> asyncio.Lock:
         return loop_safe_asyncio_lock(self._auth_locks, self._auth_locks_guard)
+
+    def _client_lock(self) -> asyncio.Lock:
+        return loop_safe_asyncio_lock(self._client_locks, self._client_locks_guard)
+
+    async def get_client(self) -> httpx.AsyncClient:
+        """Cliente httpx compartido con pool de conexiones (reutilizado entre requests)."""
+        async with self._client_lock():
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    timeout=self.timeout,
+                    limits=httpx.Limits(
+                        max_connections=20,
+                        max_keepalive_connections=10,
+                        keepalive_expiry=30.0,
+                    ),
+                )
+                logger.info("[.NET Transport] AsyncClient pool inicializado")
+            return self._client
+
+    async def aclose(self) -> None:
+        """Cierra el cliente compartido (llamar en shutdown de FastAPI)."""
+        async with self._client_lock():
+            if self._client is not None and not self._client.is_closed:
+                await self._client.aclose()
+                logger.info("[.NET Transport] AsyncClient pool cerrado")
+            self._client = None
 
     @property
     def auth_url(self) -> str:
@@ -72,22 +102,22 @@ class DotNetHttpTransport:
                 login_endpoint = f"{self.auth_url}/login"
                 payload = {"loginId": self.auth_login, "password": self.auth_password}
                 try:
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        headers = {
-                            "Content-Type": "application/json; charset=utf-8",
-                            "Accept": "application/json",
-                        }
-                        if self.secret_token:
-                            headers["X-Internal-Secret"] = self.secret_token
+                    client = await self.get_client()
+                    headers = {
+                        "Content-Type": "application/json; charset=utf-8",
+                        "Accept": "application/json",
+                    }
+                    if self.secret_token:
+                        headers["X-Internal-Secret"] = self.secret_token
 
-                        response = await client.post(login_endpoint, json=payload, headers=headers)
-                        if response.status_code == 200:
-                            data = response.json()
-                            token = data.get("token")
-                            if token:
-                                self._jwt_token = token
-                                logger.info("[.NET Transport] Sesión autenticada exitosamente con backend .NET (JWT)")
-                                return self._jwt_token
+                    response = await client.post(login_endpoint, json=payload, headers=headers)
+                    if response.status_code == 200:
+                        data = response.json()
+                        token = data.get("token")
+                        if token:
+                            self._jwt_token = token
+                            logger.info("[.NET Transport] Sesión autenticada exitosamente con backend .NET (JWT)")
+                            return self._jwt_token
                 except Exception as e:
                     logger.warning(f"[.NET Transport] Error autenticando con .NET: {e}")
 
@@ -111,19 +141,19 @@ class DotNetHttpTransport:
         """Ejecuta una petición HTTP con manejo automático de reintentos en 401 (token expirado)."""
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
         headers = await self.get_headers()
+        client = await self.get_client()
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
+        try:
+            response = await client.request(method, url, params=params, json=json, headers=headers)
+            if response.status_code == 401:
+                logger.info("[.NET Transport] Token JWT expirado (401). Renovando sesión...")
+                self._jwt_token = None
+                headers = await self.get_headers(force_refresh=True)
                 response = await client.request(method, url, params=params, json=json, headers=headers)
-                if response.status_code == 401:
-                    logger.info("[.NET Transport] Token JWT expirado (401). Renovando sesión...")
-                    self._jwt_token = None
-                    headers = await self.get_headers(force_refresh=True)
-                    response = await client.request(method, url, params=params, json=json, headers=headers)
-                return response
-            except Exception as e:
-                logger.error(f"[.NET Transport] Error en {method} {url}: {e}")
-                return None
+            return response
+        except Exception as e:
+            logger.error(f"[.NET Transport] Error en {method} {url}: {e}")
+            return None
 
 
 # Instancia única reutilizable

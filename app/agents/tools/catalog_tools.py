@@ -12,7 +12,6 @@ from app.clients.dotnet_client import dotnet_client
 from app.agents.tools.agenda_helpers import (
     _normalizar_texto,
     _obtener_valor,
-    _run_sync,
     _formatear_hora_ampm,
     _generar_slots_desde_regla,
     _buscar_servicio_por_texto,
@@ -395,33 +394,33 @@ async def _consultar_servicios_impl() -> str:
         return "En este momento no podemos acceder al catálogo de servicios. Por favor intenta de nuevo más tarde."
 
 
-# ─── Herramientas LangChain ──────────────────────────────────────────────────
+# ─── Herramientas LangChain (async nativas — ToolNode.ainvoke sin _run_sync/t.join) ─
 
 @tool
-def consultar_disponibilidad_tool(especialidad: str, fecha: str) -> str:
+async def consultar_disponibilidad_tool(especialidad: str, fecha: str) -> str:
     """
     Consulta los horarios disponibles para un servicio odontológico (o especialidad) en una fecha (YYYY-MM-DD).
     IMPORTANTE: Usa SOLO nombres de servicios activos del catálogo (consultar_servicios_y_precios_tool).
     No inventes ni ofrezcas ejemplos de tratamientos que no hayan salido de esa herramienta.
     Si el paciente nombra una especialidad (p. ej. ortodoncia), esta herramienta listará los servicios activos relacionados.
     """
-    return _run_sync(_consultar_disponibilidad_impl(especialidad, fecha))
+    return await _consultar_disponibilidad_impl(especialidad, fecha)
 
 
 @tool
-def consultar_doctores_tool(especialidad: Optional[str] = None) -> str:
+async def consultar_doctores_tool(especialidad: Optional[str] = None) -> str:
     """
     Consulta la lista de doctores, odontólogos o profesionales disponibles en la clínica Nexus Odonto, opcionalmente filtrados por especialidad.
     Usa esta herramienta cuando el paciente pregunte quiénes son los doctores, qué odontólogos atienden o qué profesionales hay disponibles.
     """
-    return _run_sync(_consultar_doctores_impl(especialidad))
+    return await _consultar_doctores_impl(especialidad)
 
 
 @tool
-def consultar_servicios_y_precios_tool() -> str:
+async def consultar_servicios_y_precios_tool() -> str:
     """
     Consulta la lista oficial y actual de servicios activos de Nexus Odonto (nombres, precios y duraciones).
     Usa esta herramienta como fuente de verdad para responder de forma cálida, conversacional y humana al paciente.
     NUNCA inventes precios ni servicios que no existan en este catálogo.
     """
-    return _run_sync(_consultar_servicios_impl())
+    return await _consultar_servicios_impl()

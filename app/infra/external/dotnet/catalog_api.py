@@ -8,7 +8,7 @@ from app.infra.external.dotnet.http_transport import dotnet_transport, DotNetHtt
 
 logger = logging.getLogger(__name__)
 
-_CATALOG_TTL_SECONDS = 60.0
+_CATALOG_TTL_SECONDS = 180.0  # 3 min — catálogos estáticos (services/specialties/professionals)
 _catalog_cache = {}
 
 

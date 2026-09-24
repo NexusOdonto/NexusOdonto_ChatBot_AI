@@ -10,6 +10,7 @@ from qdrant_client.http import models
 
 from app.agents.tools.qdrant_tool import get_embeddings, get_qdrant_client
 from app.core.config import settings
+from app.core.llm_concurrency import with_llm_slot
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +273,10 @@ async def buscar_en_cache(pregunta: str) -> Optional[str]:
         ensure_cache_collection(client)
 
         embeddings = get_embeddings()
-        vector_pregunta = await embeddings.aembed_query(query)
+        vector_pregunta = await with_llm_slot(
+            embeddings.aembed_query(query),
+            label="embed_cache_lookup",
+        )
 
         col_name = settings.semantic_cache_collection
         search_results = client.search(
@@ -325,7 +329,10 @@ async def guardar_en_cache(pregunta: str, respuesta: str, categoria: str = "gene
         ensure_cache_collection(client)
 
         embeddings = get_embeddings()
-        vector_pregunta = await embeddings.aembed_query(pregunta.strip())
+        vector_pregunta = await with_llm_slot(
+            embeddings.aembed_query(pregunta.strip()),
+            label="embed_cache_store",
+        )
 
         point_id = str(uuid.uuid4())
         col_name = settings.semantic_cache_collection

@@ -155,3 +155,8 @@ async def shutdown() -> None:
     await inactivity_service.stop_all()
     if checkpoint_store is not None:
         await checkpoint_store.stop()
+    try:
+        from app.infra.external.dotnet.http_transport import dotnet_transport
+        await dotnet_transport.aclose()
+    except Exception as e:
+        logger.warning(f"Error cerrando httpx pool .NET: {e}")

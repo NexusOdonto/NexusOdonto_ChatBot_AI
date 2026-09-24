@@ -289,6 +289,16 @@ class DotNetTicketsApi:
         if clean_tid:
             self._conversations_cache[clean_tid] = val
 
+    def _peek_fresh_cached(
+        self, ident: str, raw_tid: str, now: float
+    ) -> Optional[str]:
+        cached = self._conversations_cache.get(ident) or self._conversations_cache.get(raw_tid)
+        if cached:
+            conv_id, cached_at = cached
+            if (now - cached_at) < 15.0:
+                return conv_id
+        return None
+
     async def obtener_o_crear_conversacion(
         self,
         chat_identifier: str,
@@ -296,8 +306,9 @@ class DotNetTicketsApi:
         patient_id: Optional[str] = None,
     ) -> Optional[str]:
         """Obtiene el ID de una conversación activa o crea una nueva en el backend .NET.
-        Prioriza conversaciones en atención humana (Uso Manual) o escaladas para que los
-        mensajes entrantes del paciente no se desvíen a sesiones antiguas o cerradas.
+
+        El lock solo protege el caché local / claim de create; list/create/PUT HTTP
+        corren fuera del lock para que 5 chats no se serialicen en un único candado.
         """
         from app.services.whatsapp_identity import obtener_telefono_canonico
         raw_tid = str(chat_identifier or "").strip()
@@ -310,118 +321,136 @@ class DotNetTicketsApi:
             clean_tid = clean_tid[-10:]
 
         now = time.monotonic()
-        # Verificar caché con TTL de 15 segundos para no retornar conversaciones obsoletas
-        cached = self._conversations_cache.get(ident) or self._conversations_cache.get(raw_tid)
-        if cached:
-            conv_id, cached_at = cached
-            if (now - cached_at) < 15.0:
-                return conv_id
+        hit = self._peek_fresh_cached(ident, raw_tid, now)
+        if hit:
+            return hit
 
-        async with self._conversations_lock():
-            # Doble chequeo dentro del lock
-            cached = self._conversations_cache.get(ident) or self._conversations_cache.get(raw_tid)
-            if cached:
-                conv_id, cached_at = cached
-                if (now - cached_at) < 15.0:
-                    return conv_id
+        # HTTP list fuera del lock
+        items = await self._list_conversations()
+        try:
+            matching_convs = []
+            for conv in items:
+                c_chat = str(conv.get("chatIdentifier", "")).strip()
+                c_canon = obtener_telefono_canonico(c_chat)
+                c_digits = re.sub(r"\D", "", c_canon)
+                if len(c_digits) > 10:
+                    c_digits = c_digits[-10:]
 
-            items = await self._list_conversations()
-            if True:
-                try:
-                    matching_convs = []
-                    for conv in items:
-                        c_chat = str(conv.get("chatIdentifier", "")).strip()
-                        c_canon = obtener_telefono_canonico(c_chat)
-                        c_digits = re.sub(r"\D", "", c_canon)
-                        if len(c_digits) > 10:
-                            c_digits = c_digits[-10:]
+                matches = (
+                    c_chat == raw_tid
+                    or c_chat == ident
+                    or c_canon == ident
+                    or (clean_tid and c_digits and clean_tid == c_digits)
+                )
+                if matches:
+                    matching_convs.append(conv)
 
-                        matches = (
-                            c_chat == raw_tid
-                            or c_chat == ident
-                            or c_canon == ident
-                            or (clean_tid and c_digits and clean_tid == c_digits)
-                        )
-                        if matches:
-                            matching_convs.append(conv)
+            if matching_convs:
+                def _sort_key(c):
+                    return str(c.get("lastInteractionAt") or c.get("startedAt") or "")
 
-                    if matching_convs:
-                        def _sort_key(c):
-                            return str(c.get("lastInteractionAt") or c.get("startedAt") or "")
-
-                        # 1. Prioridad: Conversación en atención humana (ATENDIDA_HUMANO) o ESCALADA
-                        human_escalated = [
-                            c for c in matching_convs
-                            if str(c.get("conversationStatusId", "")).lower() in (
-                                self.STATUS_ATENDIDA_HUMANO.lower(),
-                                self.STATUS_ESCALADA.lower(),
-                            ) and not c.get("closedAt")
-                        ]
-                        if human_escalated:
-                            human_escalated.sort(key=_sort_key, reverse=True)
-                            chosen_id = str(human_escalated[0]["id"])
-                            self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
-                            return chosen_id
-
-                        # 2. Prioridad: Conversación ACTIVA (abierta y sin cerrar)
-                        active_convs = [
-                            c for c in matching_convs
-                            if str(c.get("conversationStatusId", "")).lower() == self.STATUS_ACTIVA.lower()
-                            and not c.get("closedAt")
-                        ]
-                        if active_convs:
-                            active_convs.sort(key=_sort_key, reverse=True)
-                            chosen_id = str(active_convs[0]["id"])
-                            self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
-                            return chosen_id
-
-                        # 3. Si todas están cerradas, tomar la MÁS RECIENTE para reabrirla
-                        matching_convs.sort(key=_sort_key, reverse=True)
-                        most_recent = matching_convs[0]
-                        chosen_id = str(most_recent["id"])
-                        try:
-                            payload_put = {
-                                "conversationStatusId": self.STATUS_ACTIVA,
-                                "patientId": most_recent.get("patientId") or patient_id,
-                                "closedAt": None,
-                            }
-                            await self.transport.request("PUT", f"ChatbotConversations/{chosen_id}", json=payload_put)
-                            logger.info(f"[TicketsApi] Conversación {chosen_id} reabierta como ACTIVA para {ident}")
-                        except Exception as e_put:
-                            logger.warning(f"[TicketsApi] Error al reabrir conversación {chosen_id}: {e_put}")
-
+                # 1. Prioridad: Conversación en atención humana (ATENDIDA_HUMANO) o ESCALADA
+                human_escalated = [
+                    c for c in matching_convs
+                    if str(c.get("conversationStatusId", "")).lower() in (
+                        self.STATUS_ATENDIDA_HUMANO.lower(),
+                        self.STATUS_ESCALADA.lower(),
+                    ) and not c.get("closedAt")
+                ]
+                if human_escalated:
+                    human_escalated.sort(key=_sort_key, reverse=True)
+                    chosen_id = str(human_escalated[0]["id"])
+                    async with self._conversations_lock():
+                        now = time.monotonic()
+                        hit = self._peek_fresh_cached(ident, raw_tid, now)
+                        if hit:
+                            return hit
                         self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
-                        return chosen_id
-                except Exception as e:
-                    logger.debug(f"[TicketsApi] Error parseando conversaciones: {e}")
+                    return chosen_id
 
-            if not patient_id:
-                try:
-                    persona = await patients_api.buscar_persona_por_telefono(ident)
-                    if persona and persona.get("id"):
-                        paciente = await patients_api.buscar_paciente_por_person_id(str(persona["id"]))
-                        if paciente and paciente.get("id"):
-                            patient_id = str(paciente["id"])
-                except Exception as pat_err:
-                    logger.debug(f"[TicketsApi] No se pudo autovincular paciente: {pat_err}")
+                # 2. Prioridad: Conversación ACTIVA (abierta y sin cerrar)
+                active_convs = [
+                    c for c in matching_convs
+                    if str(c.get("conversationStatusId", "")).lower() == self.STATUS_ACTIVA.lower()
+                    and not c.get("closedAt")
+                ]
+                if active_convs:
+                    active_convs.sort(key=_sort_key, reverse=True)
+                    chosen_id = str(active_convs[0]["id"])
+                    async with self._conversations_lock():
+                        now = time.monotonic()
+                        hit = self._peek_fresh_cached(ident, raw_tid, now)
+                        if hit:
+                            return hit
+                        self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
+                    return chosen_id
 
-            payload = {
-                "chatIdentifier": ident,
-                "chatChannelId": channel_id or self.CHANNEL_WHATSAPP,
-                "patientId": patient_id,
-            }
-            resp_post = await self.transport.request("POST", "ChatbotConversations", json=payload)
-            if resp_post and resp_post.status_code in (200, 201):
+                # 3. Si todas están cerradas, tomar la MÁS RECIENTE para reabrirla
+                matching_convs.sort(key=_sort_key, reverse=True)
+                most_recent = matching_convs[0]
+                chosen_id = str(most_recent["id"])
                 try:
-                    data = resp_post.json()
-                    conv_id = str(data.get("id"))
-                    if conv_id:
+                    payload_put = {
+                        "conversationStatusId": self.STATUS_ACTIVA,
+                        "patientId": most_recent.get("patientId") or patient_id,
+                        "closedAt": None,
+                    }
+                    # PUT fuera del lock
+                    await self.transport.request("PUT", f"ChatbotConversations/{chosen_id}", json=payload_put)
+                    logger.info(f"[TicketsApi] Conversación {chosen_id} reabierta como ACTIVA para {ident}")
+                except Exception as e_put:
+                    logger.warning(f"[TicketsApi] Error al reabrir conversación {chosen_id}: {e_put}")
+
+                async with self._conversations_lock():
+                    now = time.monotonic()
+                    hit = self._peek_fresh_cached(ident, raw_tid, now)
+                    if hit:
+                        return hit
+                    self._set_cached_conv(ident, raw_tid, clean_tid, chosen_id, now)
+                return chosen_id
+        except Exception as e:
+            logger.debug(f"[TicketsApi] Error parseando conversaciones: {e}")
+
+        # Autovincular paciente — HTTP fuera del lock
+        if not patient_id:
+            try:
+                persona = await patients_api.buscar_persona_por_telefono(ident)
+                if persona and persona.get("id"):
+                    paciente = await patients_api.buscar_paciente_por_person_id(str(persona["id"]))
+                    if paciente and paciente.get("id"):
+                        patient_id = str(paciente["id"])
+            except Exception as pat_err:
+                logger.debug(f"[TicketsApi] No se pudo autovincular paciente: {pat_err}")
+
+        # Claim de create: solo actualizar caché bajo lock; POST fuera
+        async with self._conversations_lock():
+            now = time.monotonic()
+            hit = self._peek_fresh_cached(ident, raw_tid, now)
+            if hit:
+                return hit
+
+        payload = {
+            "chatIdentifier": ident,
+            "chatChannelId": channel_id or self.CHANNEL_WHATSAPP,
+            "patientId": patient_id,
+        }
+        resp_post = await self.transport.request("POST", "ChatbotConversations", json=payload)
+        if resp_post and resp_post.status_code in (200, 201):
+            try:
+                data = resp_post.json()
+                conv_id = str(data.get("id"))
+                if conv_id:
+                    async with self._conversations_lock():
+                        now = time.monotonic()
+                        hit = self._peek_fresh_cached(ident, raw_tid, now)
+                        if hit:
+                            return hit
                         self._set_cached_conv(ident, raw_tid, clean_tid, conv_id, now)
-                        return conv_id
-                except Exception as e:
-                    logger.error(f"[TicketsApi] Error parseando creación de conversación: {e}")
+                    return conv_id
+            except Exception as e:
+                logger.error(f"[TicketsApi] Error parseando creación de conversación: {e}")
 
-            return None
+        return None
 
     async def guardar_mensaje_conversacion(
         self,

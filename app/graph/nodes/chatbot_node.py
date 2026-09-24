@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from app.core.llm_factory import get_chat_llm
 from app.core.config import settings
+from app.core.llm_concurrency import with_llm_slot
 from app.graph.state import AgentState
 
 from app.agents.tools.clinical_rag_tool import clinical_knowledge_tool
@@ -328,7 +329,10 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     messages = [combined_system_message, *chat_messages]
 
     t_llm = time.perf_counter()
-    response = await get_llm_with_tools().ainvoke(messages)
+    response = await with_llm_slot(
+        get_llm_with_tools().ainvoke(messages),
+        label="chatbot_ainvoke",
+    )
     llm_elapsed = time.perf_counter() - t_llm
     logger.info(f"[Latency] llm_turn={llm_elapsed:.3f}s")
 

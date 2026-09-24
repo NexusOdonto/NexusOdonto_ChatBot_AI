@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 900  # 15 minutos de inactividad antes de expirar la sesión
     session_cleanup_interval_seconds: int = 300
     graph_timeout_seconds: int = 60
+    # Tope de llamadas concurrentes a LLM/embeddings (Gemini). El resto espera en cola.
+    llm_max_concurrent: int = Field(
+        default=3,
+        validation_alias=AliasChoices("LLM_MAX_CONCURRENT"),
+    )
+    # Loguear queue_wait cuando un chat espera el semáforo más de N segundos.
+    llm_queue_wait_log_seconds: float = Field(
+        default=2.0,
+        validation_alias=AliasChoices("LLM_QUEUE_WAIT_LOG_SECONDS"),
+    )
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
     rag_min_confidence: float = 0.50
     rag_candidate_count: int = 4
