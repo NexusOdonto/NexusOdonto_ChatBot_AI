@@ -3,12 +3,13 @@ Ejecuta la orquestación del grafo LangGraph, control de TTL de sesión (15 min)
 caché semántico, escalamiento a asesores humanos y auditoría a .NET / Oracle.
 """
 
+import os
 import time
 import re
 import asyncio
 import logging
 from typing import Any, Optional
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.clients.evolution_client import evolution_client
 from app.clients.dotnet_client import dotnet_client
@@ -39,6 +40,55 @@ MENSAJE_FALLBACK_PACIENTE = (
     "En este momento presentamos intermitencias temporales en el servicio. "
     "Por favor, intenta nuevamente en unos momentos. ¡Disculpa las molestias!"
 )
+
+_DEFAULT_WEB_PORTAL_URL = "https://nexusodonto.chatcampuslands.com/login"
+_PORTAL_HINT_MARKERS = (
+    "plataforma virtual",
+    "portal del paciente",
+    "plataforma web",
+    "nexusodonto.chatcampuslands.com",
+)
+_BOOKING_SUCCESS_TOOLS = frozenset({"agendar_cita_tool", "confirmar_cita_tool"})
+_BOOKING_SUCCESS_MARKERS = (
+    "cita confirmada",
+    "confirmada con éxito",
+    "confirmada exitosamente",
+    "agendada con éxito",
+    "éxito",
+)
+
+
+def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str:
+    """If booking/confirm just succeeded and the LLM omitted the portal, append it."""
+    text = (respuesta or "").strip()
+    if not text:
+        return respuesta
+
+    booked = False
+    for msg in reversed(messages or []):
+        if not isinstance(msg, ToolMessage):
+            continue
+        tool_name = (getattr(msg, "name", None) or "").strip()
+        if tool_name not in _BOOKING_SUCCESS_TOOLS:
+            continue
+        content_low = str(msg.content or "").lower()
+        if any(marker in content_low for marker in _BOOKING_SUCCESS_MARKERS):
+            booked = True
+        break
+
+    if not booked:
+        return respuesta
+
+    low = text.lower()
+    if any(marker in low for marker in _PORTAL_HINT_MARKERS):
+        return respuesta
+
+    web_url = os.getenv("WEB_PORTAL_URL", _DEFAULT_WEB_PORTAL_URL).strip() or _DEFAULT_WEB_PORTAL_URL
+    reminder = (
+        "\n\n🌐 Recuerda que puedes consultar tu cita en la *plataforma virtual* "
+        f"(portal del paciente):\n🔗 {web_url}"
+    )
+    return text.rstrip() + reminder
 
 # Kept for logs/docs only — never send this to WhatsApp (users want real replies, not retry spam).
 MENSAJE_GRAPH_TIMEOUT = (
@@ -628,6 +678,11 @@ async def process_whatsapp_message(
 
         if not respuesta_texto:
             respuesta_texto = MENSAJE_FALLBACK_PACIENTE
+        else:
+            # LLM often rewrites booking success and drops the portal URL — reinject if needed.
+            respuesta_texto = _ensure_portal_reminder_after_booking(
+                respuesta_texto, mensajes_resultado
+            )
 
         t_send = time.perf_counter()
         await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)

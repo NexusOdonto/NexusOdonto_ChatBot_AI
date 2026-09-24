@@ -246,14 +246,13 @@ async def _agendar_cita_impl(
                 f"• ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
                 f"• 🆔 *Código de Cita:* `{cita_id}`\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🌐 *Consulta y gestiona tus citas en nuestra plataforma web:*\n"
+                f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
                 f"🔗 {web_url}\n"
-                f"• 👤 *Usuario:* `{cedula}`\n"
-                f"• 🔑 *Contraseña temporal:* `{cedula}`\n\n"
-                f"💡 *Nota de Seguridad:* Por tu seguridad, una vez ingreses a la plataforma web deberás cambiar esta contraseña inicial. Ten en cuenta que por políticas de seguridad el bot no puede modificar o cambiar contraseñas.\n\n"
+                f"Ingresa con tu cédula *{cedula}* (usuario y contraseña temporal inicial). "
+                f"Al entrar, cámbiala por tu seguridad; el bot no puede modificar contraseñas.\n\n"
                 f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
                 f"📞 *Atención:* +57 324 6030217\n\n"
-                f"¡Será un placer cuidar de tu sonrisa! 😊✨"
+                f"¡Te esperamos en Nexus Odonto! 😊✨"
             )
         else:
             err_msg = str((respuesta.get("error") if isinstance(respuesta, dict) else "") or "").lower()
@@ -675,6 +674,7 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         except Exception:
             pass
 
+        web_url = os.getenv("WEB_PORTAL_URL", "https://nexusodonto.chatcampuslands.com/login")
         return (
             f"¡Excelente! Tu cita ha sido *confirmada exitosamente* en nuestro sistema 🎉✅\n\n"
             f"📋 *Resumen de tu Cita Confirmada:*\n"
@@ -684,7 +684,9 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
             f"• 📅 *Fecha:* {fecha_display}\n"
             f"• ⏰ *Horario:* {hora_display}\n"
             f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n\n"
-            f"💡 *Recomendación:* Por favor llega 10 a 15 minutos antes de tu turno para prepararte con calma.\n\n"
+            f"💡 *Recomendación:* Llega 10 a 15 minutos antes de tu turno.\n\n"
+            f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
+            f"🔗 {web_url}\n\n"
             f"¡El equipo de Nexus Odonto te espera con gusto! ¿Hay algo más en lo que te pueda colaborar hoy? 😊🦷"
         )
     except Exception as exc:
