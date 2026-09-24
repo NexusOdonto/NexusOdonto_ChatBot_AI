@@ -65,7 +65,7 @@ def get_chat_llm(
             google_api_key=settings.gemini_api_key,
             temperature=temperature,
             max_output_tokens=max_tokens,
-            max_retries=1,
+            max_retries=0,
         )
 
     # Proveedor por defecto: OpenAI
