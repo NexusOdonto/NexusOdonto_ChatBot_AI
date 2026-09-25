@@ -57,7 +57,7 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
                     prioridad="CRITICO",
                 )
                 await dotnet_client.crear_notificacion(
-                    titulo=f"🚨 Emergencia Médica: {reason}",
+                    titulo=f"Emergencia odontológica: {reason}",
                     mensaje=f"Atención urgente solicitada por {thread_id}: {user_text}",
                     prioridad="CRITICO",
                     conversation_id=conv_id,

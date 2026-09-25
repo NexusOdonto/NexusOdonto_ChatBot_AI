@@ -45,11 +45,14 @@ def security_router(state: AgentState) -> str:
 	"""Router unificado que evalúa seguridad y longitud del historial.
 
 	Prioridades:
-	1. Si la conversación está BLOQUEADA o ESCALADA → finaliza sin responder.
-	2. Si el historial supera SUMMARY_THRESHOLD → comprime antes del chatbot.
-	3. En cualquier otro caso → pasa directo al chatbot.
+	1. Si la conversación está BLOQUEADA o ESCALADA → finaliza.
+	2. Si content_guard respondió (respeto / fuera de alcance) → finaliza (mensaje ya en state).
+	3. Si el historial supera SUMMARY_THRESHOLD → comprime antes del chatbot.
+	4. En cualquier otro caso → pasa directo al chatbot.
 	"""
 	if state.get("conversation_status") in ("BLOQUEADA", "ESCALADA"):
+		return END
+	if state.get("content_guard_triggered"):
 		return END
 	messages = state.get("messages", [])
 	if len(messages) > SUMMARY_THRESHOLD:

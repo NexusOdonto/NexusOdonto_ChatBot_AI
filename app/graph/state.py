@@ -16,6 +16,9 @@ class AgentState(TypedDict):
 	conversation_summary: NotRequired[Optional[str]]
 	emergency_detected: NotRequired[bool]
 	emergency_reason: NotRequired[Optional[str]]
+	# Guard de respeto / fuera de alcance: el nodo de seguridad ya respondió este turno.
+	content_guard_triggered: NotRequired[bool]
+	content_guard_kind: NotRequired[Optional[str]]
 	# Contexto del paciente autenticado (personId, patientId, nombre, etc.)
 	# Se inyecta desde el flujo de registro/login cuando el usuario está autenticado.
 	user_context: NotRequired[Optional[dict]]
