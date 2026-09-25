@@ -322,6 +322,22 @@ class DotNetTicketsApi:
 
         # Preferir E.164 real para chatIdentifier; nunca truncar LID a 10 dígitos "teléfono"
         phone_e164 = telefono_para_almacenar(canon)
+        if not phone_e164 and es_identificador_lid(canon):
+            # Antes de crear/usar LID: intentar resolver teléfono real vía Evolution
+            try:
+                from app.clients.evolution_client import evolution_client
+
+                resolved = await evolution_client.resolver_telefono_desde_lid(canon)
+                if resolved:
+                    phone_e164 = resolved
+                    logger.info(
+                        "[TicketsApi] Identidad LID resuelta antes de obtener/crear conv: %s → %s",
+                        canon,
+                        phone_e164,
+                    )
+            except Exception as resolve_err:
+                logger.debug("[TicketsApi] Resolve LID previo a create falló: %s", resolve_err)
+
         if phone_e164:
             ident = phone_e164
         elif es_identificador_lid(canon):

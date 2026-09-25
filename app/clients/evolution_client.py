@@ -192,9 +192,9 @@ class EvolutionClient:
         return obtener_destino_envio(numero)
 
     async def resolver_telefono_desde_lid(self, lid_o_jid: str) -> Optional[str]:
-        """Busca en Evolution (mensajes) un remoteJidAlt @s.whatsapp.net para un LID.
+        """Resuelve LID → E.164 vía mensajes/chats Evolution (remoteJidAlt / senderPn).
 
-        Retorna E.164 (+57…) o None si WhatsApp nunca envió el teléfono real.
+        Nunca inventa +233 ni truncamientos. None si WhatsApp no envió teléfono real.
         """
         from app.services.whatsapp_identity import (
             es_identificador_lid,
@@ -208,48 +208,114 @@ class EvolutionClient:
             return telefono_para_almacenar(raw)
 
         lid_jid = raw if "@" in raw else f"{limpiar_digitos(raw)}@lid"
-        url = f"{self.base_url}/chat/findMessages/{self.instance_name}"
-        payload = {"where": {"key": {"remoteJid": lid_jid}}, "limit": 30}
+        digits = limpiar_digitos(lid_jid)
 
-        try:
-            async with httpx.AsyncClient(timeout=min(self.timeout, 12.0)) as client:
-                response = await client.post(url, json=payload, headers=self._get_headers())
-                if response.status_code not in (200, 201):
-                    return None
-                data = response.json()
-        except Exception as exc:
-            logger.debug("[Evolution API] resolver_telefono_desde_lid falló: %s", exc)
-            return None
-
-        msgs: list = []
-        if isinstance(data, list):
-            msgs = data
-        elif isinstance(data, dict):
-            block = data.get("messages") or data.get("data") or data
-            if isinstance(block, dict):
-                msgs = block.get("records") or block.get("rows") or block.get("items") or []
-            elif isinstance(block, list):
-                msgs = block
-
-        for item in msgs if isinstance(msgs, list) else []:
-            if not isinstance(item, dict):
-                continue
-            key = item.get("key") if isinstance(item.get("key"), dict) else {}
+        def _phone_from_blob(obj: Any) -> Optional[str]:
+            if not isinstance(obj, dict):
+                return None
+            key = obj.get("key") if isinstance(obj.get("key"), dict) else {}
             for cand in (
                 key.get("remoteJidAlt"),
                 key.get("senderPn"),
                 key.get("participantAlt"),
-                item.get("senderPn"),
+                obj.get("senderPn"),
+                obj.get("remoteJidAlt"),
             ):
                 phone = telefono_para_almacenar(str(cand or ""))
                 if phone:
-                    registrar_asociacion_lid(phone, lid_jid)
-                    logger.info(
-                        "[Evolution API] LID %s resuelto a teléfono %s vía findMessages",
-                        lid_jid,
-                        phone,
-                    )
                     return phone
+            # lastMessage anidado (findChats)
+            lm = obj.get("lastMessage")
+            if isinstance(lm, dict):
+                return _phone_from_blob(lm)
+            return None
+
+        async with httpx.AsyncClient(timeout=min(self.timeout, 12.0)) as client:
+            # 1) Mensajes históricos con remoteJidAlt
+            try:
+                url = f"{self.base_url}/chat/findMessages/{self.instance_name}"
+                resp = await client.post(
+                    url,
+                    json={"where": {"key": {"remoteJid": lid_jid}}, "limit": 40},
+                    headers=self._get_headers(),
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    msgs: list = []
+                    if isinstance(data, list):
+                        msgs = data
+                    elif isinstance(data, dict):
+                        block = data.get("messages") or data.get("data") or data
+                        if isinstance(block, dict):
+                            msgs = block.get("records") or block.get("rows") or block.get("items") or []
+                        elif isinstance(block, list):
+                            msgs = block
+                    for item in msgs if isinstance(msgs, list) else []:
+                        phone = _phone_from_blob(item)
+                        if phone:
+                            registrar_asociacion_lid(phone, lid_jid)
+                            logger.info(
+                                "[Evolution API] LID %s → %s vía findMessages",
+                                lid_jid,
+                                phone,
+                            )
+                            return phone
+            except Exception as exc:
+                logger.debug("[Evolution API] findMessages LID resolve falló: %s", exc)
+
+            # 2) Chat store (última key.remoteJidAlt)
+            try:
+                url = f"{self.base_url}/chat/findChats/{self.instance_name}"
+                resp = await client.post(
+                    url,
+                    json={"where": {"remoteJid": lid_jid}},
+                    headers=self._get_headers(),
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    items = data if isinstance(data, list) else (data.get("chats") or data.get("data") or [])
+                    for item in items if isinstance(items, list) else []:
+                        phone = _phone_from_blob(item)
+                        if phone:
+                            registrar_asociacion_lid(phone, lid_jid)
+                            logger.info(
+                                "[Evolution API] LID %s → %s vía findChats",
+                                lid_jid,
+                                phone,
+                            )
+                            return phone
+            except Exception as exc:
+                logger.debug("[Evolution API] findChats LID resolve falló: %s", exc)
+
+            # 3) whatsappNumbers: solo si Evolution devolvió @s.whatsapp.net real (no el propio LID)
+            try:
+                url = f"{self.base_url}/chat/whatsappNumbers/{self.instance_name}"
+                resp = await client.post(
+                    url,
+                    json={"numbers": [digits]},
+                    headers=self._get_headers(),
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    items = data if isinstance(data, list) else []
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        jid = str(item.get("jid") or item.get("number") or "")
+                        if es_identificador_lid(jid):
+                            continue
+                        phone = telefono_para_almacenar(jid)
+                        if phone and limpiar_digitos(phone) != digits:
+                            registrar_asociacion_lid(phone, lid_jid)
+                            logger.info(
+                                "[Evolution API] LID %s → %s vía whatsappNumbers",
+                                lid_jid,
+                                phone,
+                            )
+                            return phone
+            except Exception as exc:
+                logger.debug("[Evolution API] whatsappNumbers LID resolve falló: %s", exc)
+
         return None
 
     async def enviar_presencia(
