@@ -21,10 +21,6 @@ router = APIRouter(prefix="/api/v1", tags=["Agent Handoff & Messaging"])
 # Registro en memoria de conversaciones explícitamente reactivadas por el asesor
 RESUMED_RECENTLY: Dict[str, float] = {}
 RESUMED_WINDOW_SECONDS = 7200  # 2 horas de gracia tras la devolución al bot
-# Evita enviar dos veces el aviso WhatsApp si front + .NET llaman /resume casi a la vez
-_RESUME_NOTIFY_SENT: Dict[str, float] = {}
-_RESUME_NOTIFY_DEDUP_SECONDS = 120
-_resume_notify_lock = asyncio.Lock()
 
 
 def marcar_conversacion_reactivada(ident: str) -> None:
@@ -111,31 +107,7 @@ async def resume_conversation(request: ResumeConversationRequest):
             if full_jid not in targets:
                 targets.append(full_jid)
 
-        # Claim WhatsApp notify slot UP FRONT (before slow .NET sync) so concurrent
-        # resume calls from front + API cannot both send the patient notice.
-        notify_keys = set()
-        for t in targets:
-            clean = re.sub(r"\D", "", str(t))
-            if len(clean) >= 10:
-                notify_keys.add(clean[-10:])
-            notify_keys.add(str(t).strip().lower())
-        should_notify = False
-        async with _resume_notify_lock:
-            now = time.time()
-            already_notified = any(
-                k in _RESUME_NOTIFY_SENT and (now - _RESUME_NOTIFY_SENT[k]) < _RESUME_NOTIFY_DEDUP_SECONDS
-                for k in notify_keys
-            )
-            if already_notified:
-                logger.info(
-                    f"[Handoff] Aviso WhatsApp omitido (dedupe {_RESUME_NOTIFY_DEDUP_SECONDS}s) para {phone_number}"
-                )
-            else:
-                for k in notify_keys:
-                    _RESUME_NOTIFY_SENT[k] = now
-                should_notify = True
-
-        # 1. Limpieza y reactivación en PostgreSQL y LangGraph
+        # Resume reactivates bot state only — no WhatsApp handoff notices / chat bubbles.
         for t in targets:
             try:
                 marcar_conversacion_reactivada(t)
@@ -152,7 +124,7 @@ async def resume_conversation(request: ResumeConversationRequest):
             except Exception as t_err:
                 logger.warning(f"[Handoff] Error reactivando hilo {t}: {t_err}")
 
-        # 2. Sincronización en Backend .NET: Cambiar estado a ACTIVA y cerrar tickets abiertos
+        # Sincronización en Backend .NET: Cambiar estado a ACTIVA y cerrar tickets abiertos
         try:
             convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
             clean_digits_set = {
@@ -173,22 +145,11 @@ async def resume_conversation(request: ResumeConversationRequest):
         except Exception as net_err:
             logger.warning(f"[Handoff] Error sincronizando estado ACTIVA y tickets en .NET: {net_err}")
 
-        if should_notify:
-            mensaje_retorno = (
-                "🤖 *Nexus Odonto Asistente Virtual*\n\n"
-                "La atención con nuestro asesor ha finalizado. Mi sistema ha sido reactivado. "
-                "¿Hay algo más en lo que pueda colaborarte hoy? 🦷✨"
-            )
-            await evolution_client.enviar_mensaje(phone_number, mensaje_retorno)
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(phone_number, "CHATBOT", mensaje_retorno)
-            )
-
         return {
             "status": "success",
             "message": f"Conversación reactivada con éxito para {phone_number}",
             "conversation_status": "ACTIVA",
-            "whatsapp_notified": should_notify,
+            "whatsapp_notified": False,
         }
 
     except Exception as e:
