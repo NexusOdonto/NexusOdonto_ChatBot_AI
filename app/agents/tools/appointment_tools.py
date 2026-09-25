@@ -357,50 +357,45 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
 
         if citas is None:
             return (
-                f"❌ No encontré ningún paciente registrado con la cédula *{cedula}*.\n\n"
-                "Si acabas de agendar una cita, asegúrate de usar la misma cédula con la que te registraste.\n"
-                "¿Deseas verificar con otra cédula o necesitas ayuda? 😊"
+                f"No encontré un paciente con la cédula *{cedula}*.\n\n"
+                "Si acabas de agendar, revisa que sea la misma cédula. "
+                "¿Quieres intentar con otra o te ayudo en algo más?"
             )
 
         if not citas:
             return (
-                f"📋 *Consulta de Citas* 🦷✨\n\n"
-                f"🆔 *Cédula:* {cedula}\n\n"
-                "Actualmente no tienes citas registradas en nuestro sistema.\n\n"
-                "💡 ¿Te gustaría agendar una nueva cita? Con gusto te ayudo. 😊"
+                f"Con la cédula *{cedula}* no veo citas registradas por ahora.\n\n"
+                "¿Te gustaría agendar una?"
             )
 
         proximas, historial = _filtrar_citas_proximas_activas(citas)
 
-        resumen = [f"📋 *Citas Registradas para la Cédula:* `{cedula}` 🦷✨\n"]
+        resumen = [f"*Citas registradas para la cédula* `{cedula}`\n"]
 
         if proximas:
-            resumen.append("📅 *PRÓXIMAS CITAS PROGRAMADAS:*")
+            resumen.append("*Próximas citas programadas:*")
             for i, c in enumerate(proximas, 1):
-                icon_est = "🟢" if "confirm" in c["estado"].lower() else "🟡"
                 resumen.append(
-                    f"{i}️⃣ *Cita #{i}* {icon_est}\n"
-                    f"   • 🦷 *Tratamiento:* {c['servicio']}\n"
-                    f"   • 👨‍⚕️ *Especialista:* {c['profesional']}\n"
-                    f"   • 📅 *Fecha:* {c['fecha']}\n"
-                    f"   • ⏰ *Horario:* {c['hora']}\n"
-                    f"   • 📌 *Estado:* {c['estado']}"
+                    f"*Cita #{i}*\n"
+                    f"• *Tratamiento:* {c['servicio']}\n"
+                    f"• *Especialista:* {c['profesional']}\n"
+                    f"• *Fecha:* {c['fecha']}\n"
+                    f"• *Horario:* {c['hora']}\n"
+                    f"• *Estado:* {c['estado']}"
                 )
             resumen.append("")
 
         if historial:
-            resumen.append("📜 *HISTORIAL RECIENTE:*")
+            resumen.append("*Historial reciente:*")
             for c in historial[:3]:
-                icon_est = "🔴" if "cancel" in c["estado"].lower() else ("⚪" if "no asist" in c["estado"].lower() else "✅")
                 resumen.append(
-                    f"• {icon_est} *{c['fecha']}* — {c['servicio']} con {c['profesional']} ({c['estado']})"
+                    f"• *{c['fecha']}* — {c['servicio']} con {c['profesional']} ({c['estado']})"
                 )
             resumen.append("")
 
         if proximas:
             resumen.append(
-                "💡 *¿Necesitas gestionar alguna de tus citas activas?*\n"
-                "Dime si deseas *reprogramarla*, *cancelarla* o *confirmar tu asistencia*. 😊"
+                "Si quieres, te ayudo a *reprogramar*, *cancelar* o *confirmar* alguna de estas citas."
             )
             resumen.append("")
             resumen.append(_bloque_portal_paciente(es_primera_vez=False))
@@ -424,7 +419,7 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
         cita_id = (cita_id or "").strip()
 
         if not cedula:
-            return "Para cancelar tu cita, necesito tu *número de cédula* 🆔. ¿Me la puedes indicar? 😊"
+            return "Para cancelar, ¿me pasas tu *número de cédula*?"
         error_cedula = _validar_cedula(cedula)
         if error_cedula:
             return error_cedula
@@ -432,18 +427,17 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
         if not citas:
             return (
-                f"📋 *Consulta de Citas* 🦷✨\n\n"
-                f"No encontré citas activas registradas para la cédula *{cedula}*.\n\n"
-                "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
+                f"No veo citas activas con la cédula *{cedula}*. "
+                "¿Quieres agendar una?"
             )
 
         proximas, _ = _filtrar_citas_proximas_activas(citas)
         if not proximas:
-            return f"Todas las citas registradas para la cédula *{cedula}* ya se encuentran canceladas o atendidas. 😊"
+            return f"Con la cédula *{cedula}* las citas que aparecen ya están canceladas o atendidas."
 
         cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_encontrada:
-            return msg_opciones or "No se pudo identificar la cita a cancelar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
+            return msg_opciones or "No identifiqué cuál cita cancelar. ¿Me dices el número (ej: Cita 1)?"
 
         target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
         prof_nom = cita_encontrada.get("professionalName", "Especialista Odontológico")
@@ -462,17 +456,14 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
 
         if resultado.get("success"):
             return (
-                f"✅ *Cita Cancelada Exitosamente* 🦷\n\n"
-                f"📋 *Resumen de la Cita Cancelada:*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 🆔 *Cédula:* {cedula}\n"
-                f"• 👨‍⚕️ *Especialista:* {prof_nom}\n"
-                f"• 🦷 *Tratamiento:* {serv_nom}\n"
-                f"• 📅 *Fecha y Hora:* {fecha_display}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"Tu cita ha sido cancelada. Si deseas reagendar en otro horario, con gusto te ayudo. 😊\n\n"
+                f"Listo, tu cita quedó *cancelada exitosamente*.\n\n"
+                f"• *Especialista:* {prof_nom}\n"
+                f"• *Tratamiento:* {serv_nom}\n"
+                f"• *Fecha y hora:* {fecha_display}\n"
+                f"• *Cédula:* {cedula}\n\n"
+                f"Si quieres reagendar en otro horario, avísame.\n\n"
                 f"{_bloque_portal_paciente(es_primera_vez=False)}\n\n"
-                f"📞 *Atención:* +57 324 6030217"
+                f"Recepción: +57 324 6030217"
             )
         else:
             err = resultado.get("error", "")
@@ -507,13 +498,13 @@ async def _modificar_cita_impl(
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
         if not citas:
             return (
-                f"❌ No encontré ninguna cita activa registrada para la cédula *{cedula}*.\n\n"
-                "¿Deseas agendar una nueva cita? Con gusto te ayudo. 😊"
+                f"No encontré citas activas con la cédula *{cedula}*. "
+                "¿Quieres agendar una?"
             )
 
         proximas, _ = _filtrar_citas_proximas_activas(citas)
         if not proximas:
-            return f"No tienes citas activas para reprogramar con la cédula *{cedula}*. ¿Deseas agendar una nueva cita? 😊"
+            return f"Con la cédula *{cedula}* no hay citas activas para reprogramar. ¿Agendamos una nueva?"
 
         # Si el usuario aún no ha indicado la nueva fecha/horario, presentar la cita encontrada
         if not nueva_fecha_hora or nueva_fecha_hora.lower() in ("none", "null", "n/a", ""):
@@ -524,15 +515,12 @@ async def _modificar_cita_impl(
                 f = c.get("fecha")
                 h = c.get("hora")
                 return (
-                    f"📋 *Cita Activa Encontrada para Reprogramar:* 🦷✨\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• 🆔 *Cédula:* {cedula}\n"
-                    f"• 🦷 *Tratamiento:* {serv}\n"
-                    f"• 👨‍⚕️ *Especialista:* {prof}\n"
-                    f"• 📅 *Fecha Actual:* {f}\n"
-                    f"• ⏰ *Horario Actual:* {h}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"¿Para qué nueva fecha y horario te gustaría reprogramar tu turno? (Ej: *mañana a las 2:00 PM* o *YYYY-MM-DD HH:MM*) 😊"
+                    f"Encontré esta cita para reprogramar:\n"
+                    f"• *Tratamiento:* {serv}\n"
+                    f"• *Especialista:* {prof}\n"
+                    f"• *Fecha actual:* {f}\n"
+                    f"• *Horario actual:* {h}\n\n"
+                    f"¿Para qué día y hora te gustaría moverla? (ej: *mañana a las 2:00 PM*)"
                 )
 
             if cita_id:
@@ -543,15 +531,12 @@ async def _modificar_cita_impl(
                     f = cita_sel.get("fecha")
                     h = cita_sel.get("hora")
                     return (
-                        f"📋 *Cita Seleccionada para Reprogramar:* 🦷✨\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"• 🆔 *Cédula:* {cedula}\n"
-                        f"• 🦷 *Tratamiento:* {serv}\n"
-                        f"• 👨‍⚕️ *Especialista:* {prof}\n"
-                        f"• 📅 *Fecha Actual:* {f}\n"
-                        f"• ⏰ *Horario Actual:* {h}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"¿Para qué nueva fecha y horario te gustaría reprogramarla? 😊"
+                        f"Ok, esta es la cita:\n"
+                        f"• *Tratamiento:* {serv}\n"
+                        f"• *Especialista:* {prof}\n"
+                        f"• *Fecha actual:* {f}\n"
+                        f"• *Horario actual:* {h}\n\n"
+                        f"¿Para qué nueva fecha y horario la movemos?"
                     )
                 if msg_sel:
                     return msg_sel
@@ -560,12 +545,12 @@ async def _modificar_cita_impl(
             for i, c in enumerate(proximas, 1):
                 prof = c.get("profesional") or c.get("professionalName", "Especialista")
                 serv = c.get("servicio") or c.get("serviceName", "Consulta Odontológica")
-                opciones.append(f"{i}️⃣ *Cita #{i}:* {serv} con {prof} — 📅 {c['fecha']} a las {c['hora']}")
+                opciones.append(f"*{i}.* {serv} con {prof} — {c['fecha']} a las {c['hora']}")
 
             return (
-                f"📋 *Tus Citas Activas Programadas:* 🦷✨\n\n"
+                f"Tienes estas citas activas:\n\n"
                 + "\n".join(opciones)
-                + f"\n\n¿Cuál de estas citas deseas reprogramar? Indícame el número (ej: *1* o *2*) y la nueva fecha y horario deseado. 😊"
+                + f"\n\n¿Cuál reprogramamos? Dime el número (ej: *1*) y la nueva fecha/hora."
             )
 
         cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
@@ -645,17 +630,13 @@ async def _modificar_cita_impl(
             hora_display = f"{starts_dt.strftime('%I:%M %p')} - {ends_dt.strftime('%I:%M %p')}"
 
             return (
-                f"✅ *Cita Reprogramada Exitosamente* 🦷✨\n\n"
-                f"📋 *Nuevos Datos de tu Cita:*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 🆔 *Cédula:* {cedula}\n"
-                f"• 👨‍⚕️ *Especialista:* {prof_nombre_display}\n"
-                f"• 📅 *Nueva Fecha:* {fecha_display}\n"
-                f"• ⏰ *Nuevo Horario:* {hora_display}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"Perfecto, tu cita quedó *reprogramada exitosamente*.\n\n"
+                f"• *Especialista:* {prof_nombre_display}\n"
+                f"• *Nueva fecha:* {fecha_display}\n"
+                f"• *Nuevo horario:* {hora_display}\n"
+                f"• *Cédula:* {cedula}\n\n"
                 f"{_bloque_portal_paciente(es_primera_vez=False)}\n\n"
-                f"Por favor llega 10 minutos antes de tu hora programada. ¡Hasta pronto! 😊\n"
-                f"📞 *Atención:* +57 324 6030217"
+                f"Te pido llegar unos 10 minutos antes. Cualquier cosa, +57 324 6030217."
             )
         else:
             err_msg = str(resultado.get("error") or "").lower()
@@ -691,7 +672,7 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         cita_id = (cita_id or "").strip()
 
         if not cedula:
-            return "Para confirmar tu cita, por favor indícame tu *número de cédula* 🆔. 😊"
+            return "Para confirmar, ¿me pasas tu *número de cédula*?"
         error_cedula = _validar_cedula(cedula)
         if error_cedula:
             return error_cedula
@@ -699,14 +680,13 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         citas = await dotnet_client.buscar_citas_por_cedula(cedula)
         if not citas:
             return (
-                f"📋 *Consulta de Citas* 🦷✨\n\n"
-                f"No encontré citas registradas para la cédula *{cedula}*.\n\n"
-                "Si deseas agendar una nueva cita, ¡con gusto te ayudo! 😊"
+                f"No encontré citas con la cédula *{cedula}*. "
+                "Si quieres, te ayudo a agendar una."
             )
 
         proximas, _ = _filtrar_citas_proximas_activas(citas)
         if not proximas:
-            return f"No tienes citas pendientes por confirmar para la cédula *{cedula}*. Todas se encuentran completadas o canceladas. 😊"
+            return f"Con la cédula *{cedula}* no hay citas pendientes por confirmar."
 
         cita_a_confirmar, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_a_confirmar:
@@ -743,16 +723,15 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
 
         # Confirm attendance: no portal block (portal only on agendar/modificar/cancelar/consultar).
         return (
-            f"¡Excelente! Tu cita ha sido *confirmada exitosamente* en nuestro sistema 🎉✅\n\n"
-            f"📋 *Resumen de tu Cita Confirmada:*\n"
-            f"• 👤 *Cédula:* {cedula}\n"
-            f"• 👨‍⚕️ *Especialista:* {doctor}\n"
-            f"• 🦷 *Tratamiento:* {servicio}\n"
-            f"• 📅 *Fecha:* {fecha_display}\n"
-            f"• ⏰ *Horario:* {hora_display}\n"
-            f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n\n"
-            f"💡 *Recomendación:* Llega 10 a 15 minutos antes de tu turno.\n\n"
-            f"¡El equipo de Nexus Odonto te espera con gusto! ¿Hay algo más en lo que te pueda colaborar hoy? 😊🦷"
+            f"Listo, tu cita quedó *confirmada exitosamente*.\n\n"
+            f"• *Cédula:* {cedula}\n"
+            f"• *Especialista:* {doctor}\n"
+            f"• *Tratamiento:* {servicio}\n"
+            f"• *Fecha:* {fecha_display}\n"
+            f"• *Horario:* {hora_display}\n"
+            f"• *Sede:* Calle 100 # 15-20\n\n"
+            f"Te recomiendo llegar 10 a 15 minutos antes. "
+            f"¿Necesitas algo más?"
         )
     except Exception as exc:
         logger.error(f"Error al confirmar cita para cédula {cedula}: {exc}", exc_info=True)
