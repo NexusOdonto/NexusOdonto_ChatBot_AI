@@ -382,13 +382,8 @@ class DotNetTicketsApi:
                 if matches:
                     matching_convs.append(conv)
 
-            # Sin teléfono real: no reutilizar hilos @lid (evita resucitar basura en asesor)
-            if matching_convs and not phone_e164:
-                matching_convs = [
-                    c
-                    for c in matching_convs
-                    if telefono_para_almacenar(str(c.get("chatIdentifier") or ""))
-                ]
+            # LID-only: reutilizar hilos con el mismo @lid (asesor debe ver el chat).
+            # Si hay E.164, matching ya favorece teléfono; no descartar coincidencias LID.
 
             if matching_convs:
                 def _sort_key(c):
@@ -482,15 +477,15 @@ class DotNetTicketsApi:
             if hit:
                 return hit
 
-        # Nunca crear conversación solo con LID (sin E.164 real). El bot sigue
-        # respondiendo por Evolution; el hilo de asesor aparece cuando haya teléfono.
+        # Siempre crear hilo de asesor, incluso con LID temporal.
+        # Preferimos E.164 cuando Evolution resuelve remoteJidAlt/senderPn;
+        # si solo hay LID, se guarda el @lid y se repara a teléfono al resolver.
         if not phone_e164 and es_identificador_lid(ident):
-            logger.warning(
-                "[TicketsApi] Omitiendo create: identidad solo LID (%s). "
-                "Esperando remoteJidAlt / teléfono real.",
+            logger.info(
+                "[TicketsApi] Creando conversación con identidad LID temporal (%s). "
+                "Se actualizará a E.164 cuando Evolution resuelva remoteJidAlt/senderPn.",
                 ident,
             )
-            return None
 
         payload = {
             "chatIdentifier": ident,
