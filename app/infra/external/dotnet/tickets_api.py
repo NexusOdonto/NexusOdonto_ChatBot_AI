@@ -310,15 +310,32 @@ class DotNetTicketsApi:
         El lock solo protege el caché local / claim de create; list/create/PUT HTTP
         corren fuera del lock para que 5 chats no se serialicen en un único candado.
         """
-        from app.services.whatsapp_identity import obtener_telefono_canonico
+        from app.services.whatsapp_identity import (
+            es_identificador_lid,
+            obtener_telefono_canonico,
+            telefono_para_almacenar,
+        )
         raw_tid = str(chat_identifier or "").strip()
-        ident = obtener_telefono_canonico(raw_tid).strip()
-        if not ident:
+        canon = obtener_telefono_canonico(raw_tid).strip()
+        if not canon:
             return None
 
-        clean_tid = re.sub(r"\D", "", ident)
-        if len(clean_tid) > 10:
+        # Preferir E.164 real para chatIdentifier; nunca truncar LID a 10 dígitos "teléfono"
+        phone_e164 = telefono_para_almacenar(canon)
+        if phone_e164:
+            ident = phone_e164
+        elif es_identificador_lid(canon):
+            digits = re.sub(r"\D", "", canon)
+            ident = canon if "@" in canon else f"{digits}@lid"
+        else:
+            ident = canon
+
+        clean_tid = re.sub(r"\D", "", phone_e164 or "")
+        if phone_e164 and len(clean_tid) > 10:
             clean_tid = clean_tid[-10:]
+        elif not phone_e164:
+            # LID: no usar últimos 10 como clave de matching telefónico
+            clean_tid = ""
 
         now = time.monotonic()
         hit = self._peek_fresh_cached(ident, raw_tid, now)
@@ -332,14 +349,18 @@ class DotNetTicketsApi:
             for conv in items:
                 c_chat = str(conv.get("chatIdentifier", "")).strip()
                 c_canon = obtener_telefono_canonico(c_chat)
-                c_digits = re.sub(r"\D", "", c_canon)
-                if len(c_digits) > 10:
+                c_phone = telefono_para_almacenar(c_canon)
+                c_digits = re.sub(r"\D", "", c_phone or "")
+                if c_phone and len(c_digits) > 10:
                     c_digits = c_digits[-10:]
+                elif not c_phone:
+                    c_digits = ""
 
                 matches = (
                     c_chat == raw_tid
                     or c_chat == ident
-                    or c_canon == ident
+                    or c_canon == canon
+                    or (phone_e164 and c_phone and phone_e164 == c_phone)
                     or (clean_tid and c_digits and clean_tid == c_digits)
                 )
                 if matches:
@@ -359,7 +380,9 @@ class DotNetTicketsApi:
                 ]
                 if human_escalated:
                     human_escalated.sort(key=_sort_key, reverse=True)
-                    chosen_id = str(human_escalated[0]["id"])
+                    chosen = human_escalated[0]
+                    chosen_id = str(chosen["id"])
+                    await self._maybe_repair_chat_identifier(chosen, ident, phone_e164)
                     async with self._conversations_lock():
                         now = time.monotonic()
                         hit = self._peek_fresh_cached(ident, raw_tid, now)
@@ -376,7 +399,9 @@ class DotNetTicketsApi:
                 ]
                 if active_convs:
                     active_convs.sort(key=_sort_key, reverse=True)
-                    chosen_id = str(active_convs[0]["id"])
+                    chosen = active_convs[0]
+                    chosen_id = str(chosen["id"])
+                    await self._maybe_repair_chat_identifier(chosen, ident, phone_e164)
                     async with self._conversations_lock():
                         now = time.monotonic()
                         hit = self._peek_fresh_cached(ident, raw_tid, now)
@@ -395,7 +420,11 @@ class DotNetTicketsApi:
                         "patientId": most_recent.get("patientId") or patient_id,
                         "closedAt": None,
                     }
-                    # PUT fuera del lock
+                    if phone_e164 and (
+                        es_identificador_lid(str(most_recent.get("chatIdentifier") or ""))
+                        or not telefono_para_almacenar(str(most_recent.get("chatIdentifier") or ""))
+                    ):
+                        payload_put["chatIdentifier"] = phone_e164
                     await self.transport.request("PUT", f"ChatbotConversations/{chosen_id}", json=payload_put)
                     logger.info(f"[TicketsApi] Conversación {chosen_id} reabierta como ACTIVA para {ident}")
                 except Exception as e_put:
@@ -451,6 +480,40 @@ class DotNetTicketsApi:
                 logger.error(f"[TicketsApi] Error parseando creación de conversación: {e}")
 
         return None
+
+    async def _maybe_repair_chat_identifier(
+        self,
+        conv: dict,
+        ident: str,
+        phone_e164: Optional[str],
+    ) -> None:
+        """Si la conversación tiene LID/basura y ya resolvimos E.164, actualizar chatIdentifier."""
+        from app.services.whatsapp_identity import es_identificador_lid, telefono_para_almacenar
+
+        if not phone_e164:
+            return
+        current = str(conv.get("chatIdentifier") or "")
+        if telefono_para_almacenar(current) == phone_e164:
+            return
+        if not (es_identificador_lid(current) or not telefono_para_almacenar(current)):
+            return
+        try:
+            payload_put = {
+                "conversationStatusId": conv.get("conversationStatusId"),
+                "patientId": conv.get("patientId"),
+                "closedAt": conv.get("closedAt"),
+                "chatIdentifier": phone_e164,
+            }
+            await self.transport.request("PUT", f"ChatbotConversations/{conv['id']}", json=payload_put)
+            logger.info(
+                "[TicketsApi] chatIdentifier reparado conv=%s %s → %s",
+                conv.get("id"),
+                current,
+                phone_e164,
+            )
+            conv["chatIdentifier"] = phone_e164
+        except Exception as err:
+            logger.warning("[TicketsApi] No se pudo reparar chatIdentifier: %s", err)
 
     async def guardar_mensaje_conversacion(
         self,
@@ -521,12 +584,27 @@ class DotNetTicketsApi:
 
     def limpiar_cache_conversacion(self, chat_identifier: str) -> None:
         """Limpia el ID en caché cuando la conversación se reinicia."""
-        from app.services.whatsapp_identity import obtener_telefono_canonico
+        from app.services.whatsapp_identity import (
+            es_identificador_lid,
+            obtener_telefono_canonico,
+            telefono_para_almacenar,
+        )
         raw_tid = str(chat_identifier or "").strip()
-        ident = obtener_telefono_canonico(raw_tid).strip()
-        clean_tid = re.sub(r"\D", "", ident)
-        if len(clean_tid) > 10:
+        canon = obtener_telefono_canonico(raw_tid).strip()
+        phone_e164 = telefono_para_almacenar(canon) if canon else None
+        if phone_e164:
+            ident = phone_e164
+        elif canon and es_identificador_lid(canon):
+            digits = re.sub(r"\D", "", canon)
+            ident = canon if "@" in canon else f"{digits}@lid"
+        else:
+            ident = canon
+
+        clean_tid = re.sub(r"\D", "", phone_e164 or "")
+        if phone_e164 and len(clean_tid) > 10:
             clean_tid = clean_tid[-10:]
+        elif not phone_e164:
+            clean_tid = ""
 
         self._conversations_cache.pop(ident, None)
         self._conversations_cache.pop(raw_tid, None)

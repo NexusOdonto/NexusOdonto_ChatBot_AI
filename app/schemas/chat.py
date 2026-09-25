@@ -9,30 +9,20 @@ class ExtendedTextMessage(BaseChatModel):
 
 class MessageKey(BaseChatModel):
     remoteJid: Optional[str] = None
+    remoteJidAlt: Optional[str] = None
+    participant: Optional[str] = None
+    participantAlt: Optional[str] = None
+    senderPn: Optional[str] = None
+    addressingMode: Optional[str] = None
     fromMe: Optional[bool] = False
     id: Optional[str] = None
 
-class MessageDetail(BaseChatModel):
-    conversation: Optional[str] = None
-    extendedTextMessage: Optional[ExtendedTextMessage] = None
-    imageMessage: Optional[Dict[str, Any]] = None
-    audioMessage: Optional[Dict[str, Any]] = None
-    videoMessage: Optional[Dict[str, Any]] = None
-    ptvMessage: Optional[Dict[str, Any]] = None
-    documentMessage: Optional[Dict[str, Any]] = None
-    documentWithCaptionMessage: Optional[Dict[str, Any]] = None
-    stickerMessage: Optional[Dict[str, Any]] = None
-    contactMessage: Optional[Dict[str, Any]] = None
-    contactsArrayMessage: Optional[Dict[str, Any]] = None
-    locationMessage: Optional[Dict[str, Any]] = None
-    liveLocationMessage: Optional[Dict[str, Any]] = None
-    viewOnceMessage: Optional[Dict[str, Any]] = None
-    viewOnceMessageV2: Optional[Dict[str, Any]] = None
-    ephemeralMessage: Optional[Dict[str, Any]] = None
 
 class MessageData(BaseChatModel):
     key: Optional[MessageKey] = None
     pushName: Optional[str] = None
+    participant: Optional[str] = None
+    senderPn: Optional[str] = None
     messageType: Optional[str] = None
     message: Optional[Dict[str, Any]] = None
     base64: Optional[str] = None

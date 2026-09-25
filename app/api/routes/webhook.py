@@ -133,14 +133,15 @@ async def receive_whatsapp_message(request: Request):
                 return {"status": "ignored", "reason": "self_message_bot"}
 
             remote_jid_me = data.key.remoteJid if (data.key and data.key.remoteJid) else ""
-            participant_me = getattr(data.key, "participant", None) or getattr(data, "sender", None)
-            if "@lid" in str(remote_jid_me) and participant_me and "@s.whatsapp.net" in str(participant_me):
-                destinatario = str(participant_me)
-            else:
-                destinatario = remote_jid_me
-
-            from app.services.whatsapp_identity import obtener_telefono_canonico
-            destinatario = obtener_telefono_canonico(destinatario)
+            from app.services.whatsapp_identity import extraer_identidad_webhook, obtener_telefono_canonico
+            destinatario, _ = extraer_identidad_webhook(raw_json, data)
+            if not destinatario:
+                participant_me = getattr(data.key, "participant", None) or getattr(data.key, "remoteJidAlt", None)
+                if "@lid" in str(remote_jid_me) and participant_me and "@s.whatsapp.net" in str(participant_me):
+                    destinatario = str(participant_me)
+                else:
+                    destinatario = remote_jid_me
+                destinatario = obtener_telefono_canonico(destinatario)
 
             raw_msg_me = data.message or {}
             unwrapped_me = unwrap_message_dict(raw_msg_me)

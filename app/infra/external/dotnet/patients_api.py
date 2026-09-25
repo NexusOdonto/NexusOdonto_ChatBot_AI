@@ -105,9 +105,36 @@ class DotNetPatientsApi:
         first_name_val = parts[0] if parts else "Paciente"
         last_name_val = " ".join(parts[1:]) if len(parts) > 1 else "Nexus"
 
+        from app.services.whatsapp_identity import (
+            es_telefono_placeholder,
+            obtener_telefono_canonico,
+            telefono_para_almacenar,
+        )
+
+        # Teléfono = WhatsApp real (E.164). NUNCA inventar +573000000000.
+        resolved = obtener_telefono_canonico(str(tel or ""))
+        clean_phone = telefono_para_almacenar(resolved) or telefono_para_almacenar(str(tel or ""))
+        if clean_phone and es_telefono_placeholder(clean_phone):
+            clean_phone = None
+        if not clean_phone:
+            logger.warning(
+                "[PatientsApi] Sin teléfono WhatsApp real para cédula %s "
+                "(input=%r resolved=%r). Se omite phone; no se usa placeholder.",
+                cedula_clean,
+                tel,
+                resolved,
+            )
+
         # Prefer existing identity before attempting create.
         existing = await self.resolver_paciente_por_documento(doc_num)
         if existing and existing.get("patientId"):
+            person_id = existing.get("personId")
+            if clean_phone and person_id:
+                try:
+                    await self.actualizar_telefono_persona_si_placeholder(str(person_id), clean_phone)
+                except Exception as phone_err:
+                    logger.debug("[PatientsApi] No se pudo refrescar teléfono: %s", phone_err)
+
             # If a real/richer name was provided, still hit onboard so the API can
             # MaybeRefreshDisplayName (idempotent by cédula; never creates a duplicate).
             name_looks_real = (
@@ -151,16 +178,6 @@ class DotNetPatientsApi:
         except Exception:
             pass
 
-        from app.services.whatsapp_identity import obtener_telefono_canonico
-        resolved_phone = obtener_telefono_canonico(str(tel or ""))
-        clean_phone = "".join(ch for ch in resolved_phone if ch.isdigit())
-        if len(clean_phone) > 12:
-            clean_phone = ""
-        if not clean_phone:
-            clean_phone = "+573000000000"
-        elif not clean_phone.startswith("+"):
-            clean_phone = f"+{clean_phone}"
-
         onboard_payload = {
             "documentTypeId": doc_type_id,
             "documentNumber": cedula_clean,
@@ -168,7 +185,7 @@ class DotNetPatientsApi:
             "lastName": last_name_val,
             "dateOfBirth": "2000-01-01",
             "sexId": sex_id,
-            "phone": clean_phone,
+            "phone": clean_phone,  # None si no hay WA real — API no inventa placeholder
             "email": f"paciente_{cedula_clean}@nexusodonto.com",
             "address": "Consultorio Nexus Odonto",
             "emergencyContact": "Recepción Nexus",
@@ -260,25 +277,65 @@ class DotNetPatientsApi:
             logger.error(f"[PatientsApi] Error en login: {e}")
             return None
 
+    async def actualizar_telefono_persona_si_placeholder(self, person_id: str, phone_e164: str) -> bool:
+        """Actualiza Person.Phone solo si está vacío o es placeholder; no pisa un teléfono real editado."""
+        from app.services.whatsapp_identity import es_telefono_placeholder, telefono_para_almacenar
+
+        clean = telefono_para_almacenar(phone_e164)
+        if not clean or not person_id:
+            return False
+
+        resp = await self.transport.request("GET", f"Persons/{person_id}")
+        if not resp or resp.status_code != 200:
+            return False
+        persona = resp.json() if resp else None
+        if not isinstance(persona, dict):
+            return False
+
+        current = str(persona.get("phone") or "").strip()
+        if current and not es_telefono_placeholder(current):
+            return False
+
+        payload = {
+            "documentTypeId": persona.get("documentTypeId"),
+            "documentNumber": persona.get("documentNumber"),
+            "firstName": persona.get("firstName"),
+            "lastName": persona.get("lastName"),
+            "dateOfBirth": persona.get("dateOfBirth"),
+            "sexId": persona.get("sexId"),
+            "phone": clean,
+            "email": persona.get("email"),
+            "address": persona.get("address"),
+            "isActive": persona.get("isActive", True),
+        }
+        put = await self.transport.request("PUT", f"Persons/{person_id}", json=payload)
+        if put and put.status_code in (200, 204):
+            _invalidate_persons_cache()
+            logger.info("[PatientsApi] Teléfono placeholder reemplazado por WA real personId=%s phone=%s", person_id, clean)
+            return True
+        return False
+
     async def buscar_persona_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
         """Busca si existe una persona registrada con el teléfono dado con reglas de privacidad."""
-        from app.services.whatsapp_identity import obtener_telefono_canonico
+        from app.services.whatsapp_identity import (
+            es_identificador_lid,
+            es_telefono_placeholder,
+            obtener_telefono_canonico,
+            telefono_para_almacenar,
+        )
         raw_str = obtener_telefono_canonico(str(telefono or "")).strip()
-        if not raw_str or "@lid" in raw_str.lower():
+        if not raw_str or es_identificador_lid(raw_str):
             return None
 
-        tel_digits = "".join(c for c in raw_str if c.isdigit())
-        if not tel_digits or len(tel_digits) > 12:
+        e164 = telefono_para_almacenar(raw_str)
+        if not e164 or es_telefono_placeholder(e164):
             return None
 
+        tel_digits = "".join(c for c in e164 if c.isdigit())
         if tel_digits.startswith("57") and len(tel_digits) == 12:
             tel_digits = tel_digits[2:]
 
         if len(tel_digits) != 10 or not tel_digits.startswith("3"):
-            return None
-
-        DUMMY_PHONES = {"3000000000", "0000000000", "1111111111", "1234567890"}
-        if tel_digits in DUMMY_PHONES:
             return None
 
         personas = await catalog_api.obtener_personas()
@@ -289,11 +346,13 @@ class DotNetPatientsApi:
             if not isinstance(persona, dict):
                 continue
             phone = str(persona.get("phone") or "")
+            if es_telefono_placeholder(phone):
+                continue
             phone_digits = "".join(c for c in phone if c.isdigit())
             if phone_digits.startswith("57") and len(phone_digits) == 12:
                 phone_digits = phone_digits[2:]
 
-            if phone_digits in DUMMY_PHONES or len(phone_digits) != 10 or not phone_digits.startswith("3"):
+            if len(phone_digits) != 10 or not phone_digits.startswith("3"):
                 continue
 
             if tel_digits == phone_digits:
