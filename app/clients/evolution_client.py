@@ -191,6 +191,67 @@ class EvolutionClient:
         from app.services.whatsapp_identity import obtener_destino_envio
         return obtener_destino_envio(numero)
 
+    async def resolver_telefono_desde_lid(self, lid_o_jid: str) -> Optional[str]:
+        """Busca en Evolution (mensajes) un remoteJidAlt @s.whatsapp.net para un LID.
+
+        Retorna E.164 (+57…) o None si WhatsApp nunca envió el teléfono real.
+        """
+        from app.services.whatsapp_identity import (
+            es_identificador_lid,
+            limpiar_digitos,
+            registrar_asociacion_lid,
+            telefono_para_almacenar,
+        )
+
+        raw = str(lid_o_jid or "").strip()
+        if not raw or not es_identificador_lid(raw):
+            return telefono_para_almacenar(raw)
+
+        lid_jid = raw if "@" in raw else f"{limpiar_digitos(raw)}@lid"
+        url = f"{self.base_url}/chat/findMessages/{self.instance_name}"
+        payload = {"where": {"key": {"remoteJid": lid_jid}}, "limit": 30}
+
+        try:
+            async with httpx.AsyncClient(timeout=min(self.timeout, 12.0)) as client:
+                response = await client.post(url, json=payload, headers=self._get_headers())
+                if response.status_code not in (200, 201):
+                    return None
+                data = response.json()
+        except Exception as exc:
+            logger.debug("[Evolution API] resolver_telefono_desde_lid falló: %s", exc)
+            return None
+
+        msgs: list = []
+        if isinstance(data, list):
+            msgs = data
+        elif isinstance(data, dict):
+            block = data.get("messages") or data.get("data") or data
+            if isinstance(block, dict):
+                msgs = block.get("records") or block.get("rows") or block.get("items") or []
+            elif isinstance(block, list):
+                msgs = block
+
+        for item in msgs if isinstance(msgs, list) else []:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key") if isinstance(item.get("key"), dict) else {}
+            for cand in (
+                key.get("remoteJidAlt"),
+                key.get("senderPn"),
+                key.get("participantAlt"),
+                item.get("senderPn"),
+            ):
+                phone = telefono_para_almacenar(str(cand or ""))
+                if phone:
+                    registrar_asociacion_lid(phone, lid_jid)
+                    logger.info(
+                        "[Evolution API] LID %s resuelto a teléfono %s vía findMessages",
+                        lid_jid,
+                        phone,
+                    )
+                    return phone
+        return None
+
     async def enviar_presencia(
         self,
         numero: str,

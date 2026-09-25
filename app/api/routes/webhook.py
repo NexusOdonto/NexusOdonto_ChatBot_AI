@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 
 from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
 from app.clients.evolution_client import (
+    evolution_client,
     is_bot_message_id,
     is_recent_bot_text,
     extract_evolution_message_id,
@@ -187,8 +188,28 @@ async def receive_whatsapp_message(request: Request):
         if not remote_jid:
             return {"status": "ignored", "reason": "no_remote_jid"}
 
-        from app.services.whatsapp_identity import extraer_identidad_webhook
-        numero_paciente, _ = extraer_identidad_webhook(raw_json, data)
+        from app.services.whatsapp_identity import (
+            es_identificador_lid,
+            extraer_identidad_webhook,
+            telefono_para_almacenar,
+        )
+        numero_paciente, destino_envio = extraer_identidad_webhook(raw_json, data)
+        # Si Evolution mandó solo @lid, intentar recuperar el teléfono real (remoteJidAlt histórico)
+        if es_identificador_lid(numero_paciente):
+            try:
+                phone_e164 = await evolution_client.resolver_telefono_desde_lid(numero_paciente)
+                if phone_e164:
+                    from app.services.whatsapp_identity import registrar_asociacion_lid, jid_desde_telefono
+                    registrar_asociacion_lid(phone_e164, numero_paciente)
+                    numero_paciente = jid_desde_telefono(phone_e164)
+                    logger.info(
+                        "[Webhook] Identidad LID reparada → teléfono %s (dest=%s)",
+                        telefono_para_almacenar(numero_paciente),
+                        destino_envio,
+                    )
+            except Exception as resolve_err:
+                logger.debug("[Webhook] No se pudo resolver LID a teléfono: %s", resolve_err)
+
         push_name = str(getattr(data, "pushName", None) or "").strip()
 
         raw_message = data.message or {}
