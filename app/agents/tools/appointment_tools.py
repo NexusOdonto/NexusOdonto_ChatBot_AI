@@ -185,7 +185,8 @@ async def _agendar_cita_impl(
             if not paciente_id:
                 return (
                     "⚠️ No pude registrar tus datos en el sistema. "
-                    "Por favor comunícate con recepción al *+57 324 6030217* para que te atiendan. 😊"
+                    "Por favor comunícate con recepción al *+57 324 6030217* "
+                    "o acércate a *Calle 100 # 15-20* para que te atiendan. 😊"
                 )
 
         # First-time = new account OR no prior appointments for this patient

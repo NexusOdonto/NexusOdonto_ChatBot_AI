@@ -54,20 +54,31 @@ class DotNetPatientsApi:
         return False
 
     async def registrar_paciente(self, datos_onboard: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Registra o reutiliza paciente por cédula (find-or-create en .NET)."""
+        """Registra o reutiliza paciente por cédula (find-or-create / reactivate en .NET)."""
         response = await self.transport.request("POST", "Patients/onboard", json=datos_onboard)
         if response and response.status_code in (200, 201):
             _invalidate_persons_cache()
             return response.json()
         status = response.status_code if response else "Sin respuesta"
-        logger.warning(f"[PatientsApi] Error en onboarding de paciente (HTTP {status})")
-        # Legacy: if API still returns 409, resolve by document instead of failing.
-        if response is not None and response.status_code == 409:
+        body_preview = ""
+        if response is not None:
+            try:
+                body_preview = (response.text or "")[:400]
+            except Exception:
+                body_preview = ""
+        logger.warning(
+            f"[PatientsApi] Error en onboarding de paciente (HTTP {status}) "
+            f"doc={(datos_onboard or {}).get('documentNumber')!r} body={body_preview!r}"
+        )
+        # Legacy: if API still returns 409/400 for existing docs, resolve by document instead of failing.
+        if response is not None and response.status_code in (400, 403, 409):
             doc = str((datos_onboard or {}).get("documentNumber") or "").strip()
             if doc:
                 existing = await self.resolver_paciente_por_documento(doc)
                 if existing:
-                    logger.info(f"[PatientsApi] Onboard 409 → reutilizado patientId={existing.get('patientId')}")
+                    logger.info(
+                        f"[PatientsApi] Onboard {status} → reutilizado patientId={existing.get('patientId')}"
+                    )
                     return existing
         return None
 
