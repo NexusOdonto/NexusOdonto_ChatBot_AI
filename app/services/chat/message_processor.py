@@ -139,18 +139,18 @@ def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str
     if is_primera_vez and (not has_portal or not has_creds):
         # Drop a bare portal block if present without credentials tip, then append full tip.
         tip = (
-            "\n\n🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
-            f"🔗 {web_url}\n"
+            "\n\nTambién puedes ver tu cita en la *plataforma virtual*:\n"
+            f"{web_url}\n"
             "Tu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
-            "(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
-            "el bot no puede modificar contraseñas."
+            "(acceso temporal). Al entrar, cámbiala por tu seguridad; "
+            "desde aquí no podemos modificar contraseñas."
         )
         if has_portal and not has_creds:
             # Append credentials rule only
             tip = (
                 "\n\nTu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
-                "(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
-                "el bot no puede modificar contraseñas."
+                "(acceso temporal). Al entrar, cámbiala por tu seguridad; "
+                "desde aquí no podemos modificar contraseñas."
             )
         return text.rstrip() + tip
 
@@ -158,15 +158,15 @@ def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str
         return text
 
     reminder = (
-        "\n\n🌐 Recuerda que puedes consultar tu cita en la *plataforma virtual* "
-        f"(portal del paciente):\n🔗 {web_url}"
+        "\n\nTambién puedes consultar tu cita en la *plataforma virtual*:\n"
+        f"{web_url}"
     )
     return text.rstrip() + reminder
 
 # Kept for logs/docs only — never send this to WhatsApp (users want real replies, not retry spam).
 MENSAJE_GRAPH_TIMEOUT = (
-    "Estoy atendiendo varias consultas ahora mismo y esta está tardando más de lo normal. "
-    "Por favor reenvía tu mensaje en un momento y con gusto te ayudo. 🙏"
+    "En este momento hay bastante movimiento y tu consulta está tardando un poco. "
+    "¿Me reenvías el mensaje en un momentito? Con gusto te ayudo."
 )
 
 MENSAJE_ESCALAMIENTO = (
@@ -174,9 +174,9 @@ MENSAJE_ESCALAMIENTO = (
 )
 
 MENSAJE_MEDIOS_NO_SOPORTADOS = (
-    "Por el momento no puedo procesar ni visualizar fotos, videos, documentos ni archivos directamente 📎📷.\n\n"
-    "Por favor, descríbeme detalladamente por texto o mediante una nota de voz lo que necesitas o lo que contiene tu archivo "
-    "(por ejemplo, el síntoma que presentas, el tratamiento o la orden médica) para poder ayudarte con mucho gusto."
+    "Por aquí no alcanzo a ver fotos, videos ni documentos.\n\n"
+    "¿Me cuentas por texto o nota de voz qué necesitas "
+    "(síntoma, tratamiento u orden médica)? Así te ayudo mejor."
 )
 
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
@@ -257,7 +257,11 @@ async def reset_conversation(phone_number: str) -> None:
     except Exception:
         pass
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
-    reset_msg = "🔄 Memoria reiniciada con éxito. ¡Hola! Soy el asistente virtual de Nexus Odonto. ¿En qué puedo colaborarte hoy?"
+    # Human persona: never say "asistente virtual" / bot / sistema on WhatsApp.
+    reset_msg = (
+        "¡Hola de nuevo! 👋 Estoy aquí para ayudarte en *Nexus Odonto*. "
+        "¿En qué te puedo colaborar hoy? 😊🦷"
+    )
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
     asyncio.create_task(
         dotnet_client.registrar_mensaje(phone_number, "CHATBOT", reset_msg)
@@ -417,30 +421,42 @@ async def registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> 
         logger.warning(f"[fromMe-Humano] No se pudo registrar mensaje del asesor: {e}")
 
 
+async def _silent_resume_from_escalation(numero_paciente: str) -> None:
+    """Reactivate bot after escalation without WhatsApp/DB bubbles that reveal bot↔human switch."""
+    from app.api.routes.agent_handoff import marcar_conversacion_reactivada
+    from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
+
+    checkpointer = get_checkpointer_instance()
+    canon = obtener_telefono_canonico(numero_paciente)
+    targets_clear = {numero_paciente, canon}
+    dest = obtener_destino_envio(numero_paciente)
+    if dest:
+        targets_clear.add(dest)
+    for t in targets_clear:
+        try:
+            marcar_conversacion_reactivada(t)
+            if checkpointer:
+                await checkpointer.clear_thread(t)
+            dotnet_client.limpiar_cache_conversacion(t)
+        except Exception:
+            pass
+    try:
+        conv_id = await dotnet_client.obtener_o_crear_conversacion(numero_paciente)
+        if conv_id:
+            await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ACTIVA)
+        config = get_thread_config(numero_paciente)
+        await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+    except Exception as e:
+        logger.warning(f"[Processor] Silent resume state sync failed for {numero_paciente}: {e}")
+
+
 async def process_whatsapp_unsupported_media(numero_paciente: str, caption: str = "") -> None:
     """Gestiona la recepción de archivos o fotos no procesables directamente."""
     try:
         if await is_escalated(numero_paciente):
             if caption and is_resume_request(caption):
-                logger.info(f"[Processor] Paciente solicita volver con el bot: {numero_paciente}")
-                checkpointer = get_checkpointer_instance()
-                from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
-                canon = obtener_telefono_canonico(numero_paciente)
-                targets_clear = {numero_paciente, canon}
-                dest = obtener_destino_envio(numero_paciente)
-                if dest:
-                    targets_clear.add(dest)
-                for t in targets_clear:
-                    try:
-                        if checkpointer:
-                            await checkpointer.clear_thread(t)
-                        dotnet_client.limpiar_cache_conversacion(t)
-                    except Exception:
-                        pass
-
-                msg_bienvenida = "👋🦷 *Nexus Odonto Asistente Virtual*\n\n¡Hola de nuevo! He reactivado mi sistema para atenderte. ¿En qué puedo colaborarte hoy? 😊✨"
-                await evolution_client.enviar_mensaje(numero_paciente, msg_bienvenida)
-                asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_bienvenida))
+                logger.info(f"[Processor] Paciente solicita volver con el bot (sin aviso WA): {numero_paciente}")
+                await _silent_resume_from_escalation(numero_paciente)
                 return
             return
 
@@ -520,8 +536,8 @@ async def process_whatsapp_message(
         from app.services.chat.chat_orchestrator import ChatOrchestrator
         if ChatOrchestrator.is_nonsense_or_gibberish(mensaje_texto):
             resp_gibberish = (
-                "No logro comprender tu mensaje 🤔. Por favor escribe con palabras claras lo que necesitas "
-                "(por ejemplo: agendar una cita, consultar precios o ver servicios y horarios) y con gusto te ayudo. 😊🦷"
+                "No te entendí bien. ¿Me lo dices otra vez con palabras? "
+                "Por ejemplo: agendar, precios o servicios."
             )
             t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, resp_gibberish)
@@ -541,24 +557,8 @@ async def process_whatsapp_message(
 
         if escalated:
             if is_resume_request(mensaje_texto):
-                checkpointer = get_checkpointer_instance()
-                from app.services.whatsapp_identity import obtener_telefono_canonico, obtener_destino_envio
-                canon = obtener_telefono_canonico(numero_paciente)
-                targets_clear = {numero_paciente, canon}
-                dest = obtener_destino_envio(numero_paciente)
-                if dest:
-                    targets_clear.add(dest)
-                for t in targets_clear:
-                    try:
-                        if checkpointer:
-                            await checkpointer.clear_thread(t)
-                        dotnet_client.limpiar_cache_conversacion(t)
-                    except Exception:
-                        pass
-
-                msg_bienvenida = "👋 *Nexus Odonto Asistente Virtual*\n\n¡Hola de nuevo! He reactivado mi sistema para atenderte. ¿En qué puedo colaborarte hoy? 😊🦷"
-                await evolution_client.enviar_mensaje(numero_paciente, msg_bienvenida)
-                asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_bienvenida))
+                logger.info(f"[Processor] Paciente solicita volver con el bot (sin aviso WA): {numero_paciente}")
+                await _silent_resume_from_escalation(numero_paciente)
                 return
             else:
                 return

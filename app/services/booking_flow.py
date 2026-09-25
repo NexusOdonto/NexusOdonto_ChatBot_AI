@@ -272,19 +272,16 @@ def build_ask_service_response(*, nombre: Optional[str] = None) -> str:
         first = nombre.strip().split()[0].title()
     greet = f", {first}" if first else ""
     return (
-        f"¡Gracias por confirmar tus datos{greet}! 🦷✨\n\n"
-        "Para avanzar con la programación de tu cita, cuéntame: "
-        "¿qué tratamiento o servicio te gustaría agendar?\n\n"
-        "Puedes decirme el nombre (por ejemplo: *Profilaxis*, *Resina*, *Blanqueamiento*) "
-        "o pedirme la lista de *servicios y precios*. 😊"
+        f"Listo{greet}, gracias.\n\n"
+        "¿Qué tratamiento te gustaría agendar? "
+        "Puedes decirme el nombre (por ejemplo *Profilaxis*, *Resina* o *Blanqueamiento*) "
+        "o pedirme la lista de *servicios y precios*."
     )
 
 
 def build_agendar_inicio_response() -> str:
     return (
-        "¡Con gusto te ayudo a agendar tu cita en *Nexus Odonto*! 🦷✨\n\n"
-        "Para continuar, indícame por favor:\n"
-        "• Tu *número de cédula* 🆔\n"
-        "• Tu *nombre completo* (nombre y apellido) 👤\n\n"
-        "Con esos datos seguimos con el tratamiento y los horarios disponibles. 😊"
+        "Claro, te ayudo a agendar.\n\n"
+        "Para seguir, ¿me pasas tu *número de cédula* y tu *nombre completo* "
+        "(nombre y apellido)? Con eso miramos el tratamiento y los horarios."
     )
