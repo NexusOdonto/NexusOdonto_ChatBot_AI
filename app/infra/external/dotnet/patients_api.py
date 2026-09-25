@@ -87,18 +87,36 @@ class DotNetPatientsApi:
             logger.warning("[PatientsApi] crear_paciente_basico sin cédula — abortado")
             return None
 
-        # Prefer existing identity before attempting create.
-        existing = await self.resolver_paciente_por_documento(doc_num)
-        if existing and existing.get("patientId"):
-            logger.info(f"[PatientsApi] Paciente ya existe para cédula {doc_num}: {existing.get('patientId')}")
-            return existing
-
         full_name = (nombre or f"{first_name or ''} {last_name or ''}").strip()
         tel = telefono_whatsapp or phone
         cedula_clean = str(doc_num).strip()
         parts = full_name.split()
         first_name_val = parts[0] if parts else "Paciente"
         last_name_val = " ".join(parts[1:]) if len(parts) > 1 else "Nexus"
+
+        # Prefer existing identity before attempting create.
+        existing = await self.resolver_paciente_por_documento(doc_num)
+        if existing and existing.get("patientId"):
+            # If a real/richer name was provided, still hit onboard so the API can
+            # MaybeRefreshDisplayName (idempotent by cédula; never creates a duplicate).
+            name_looks_real = (
+                bool(full_name)
+                and len(full_name) >= 3
+                and not any(
+                    p in full_name.lower()
+                    for p in (
+                        "paciente", "nexus", "nexusodonto", "desconocido",
+                        "anonimo", "anónimo", "n/a", "none", "usuario", "cliente",
+                    )
+                )
+            )
+            if not name_looks_real:
+                logger.info(f"[PatientsApi] Paciente ya existe para cédula {doc_num}: {existing.get('patientId')}")
+                return existing
+            logger.info(
+                f"[PatientsApi] Paciente existe ({existing.get('patientId')}); "
+                f"onboard idempotente para eventual enriquecimiento de nombre"
+            )
 
         doc_type_id = "e0000000-0000-0000-0000-000000000001"
         try:

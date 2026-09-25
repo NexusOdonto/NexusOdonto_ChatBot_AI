@@ -35,6 +35,14 @@ def _normalizar_texto(texto: str) -> str:
 _PROF_TITLE_TOKENS = frozenset(
     {"dr", "dra", "doctor", "doctora", "odontologo", "odontologa", "doc"}
 )
+_PERSON_TITLE_TOKENS = frozenset(
+    {
+        "dr", "dra", "doctor", "doctora", "sr", "sra", "srta",
+        "don", "dona", "doña", "mr", "mrs", "ms",
+    }
+)
+# Particles / connectors ignored for significant-token matching.
+_PERSON_NAME_STOPWORDS = frozenset({"de", "del", "la", "las", "los", "y", "e", "da", "do", "dos"})
 _ANY_PROF_TOKENS = frozenset(
     {
         "",
@@ -70,6 +78,62 @@ def _prof_name_tokens(texto: str) -> List[str]:
     # Drop titles / punctuation so "Dra. Ana Sofía" → ana, sofia
     cleaned = re.sub(r"[^a-z0-9\s]", " ", norm)
     return [t for t in cleaned.split() if t and t not in _PROF_TITLE_TOKENS]
+
+
+def _patient_name_tokens(texto: str, *, significant_only: bool = True) -> List[str]:
+    """Normalize person name into word tokens (accents/case stripped; titles dropped)."""
+    norm = _normalizar_texto(texto or "")
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", norm)
+    raw = [t for t in cleaned.split() if t and t not in _PERSON_TITLE_TOKENS]
+    if not significant_only:
+        return raw
+    return [t for t in raw if t not in _PERSON_NAME_STOPWORDS and len(t) >= 2]
+
+
+def _es_subsecuencia_de_tokens(needle: List[str], haystack: List[str]) -> bool:
+    """True if needle appears as contiguous subsequence of haystack."""
+    if not needle:
+        return False
+    n, h = len(needle), len(haystack)
+    if n > h:
+        return False
+    for i in range(h - n + 1):
+        if haystack[i : i + n] == needle:
+            return True
+    return False
+
+
+def coincidencia_nombre_paciente(nombre_ingresado: str, nombre_registrado: str) -> str:
+    """
+    Compare typed name vs registered full name (cédula already matched elsewhere).
+
+    Returns:
+      - "match": all significant input tokens ⊆ registered, or input words are a
+        contiguous subsequence of the registered name (e.g. "Alejandro Escobar"
+        inside "Jhon Alejandro Escobar Lozada").
+      - "no_overlap": both sides have significant tokens and share none.
+      - "unknown": empty/placeholder on either side — do not block on name.
+    """
+    typed = _patient_name_tokens(nombre_ingresado)
+    registered = _patient_name_tokens(nombre_registrado)
+    if not typed or not registered:
+        return "unknown"
+
+    reg_set = set(registered)
+    if all(t in reg_set for t in typed):
+        return "match"
+
+    # Contiguous word subsequence on full token lists (titles already stripped).
+    typed_seq = _patient_name_tokens(nombre_ingresado, significant_only=False)
+    reg_seq = _patient_name_tokens(nombre_registrado, significant_only=False)
+    if typed_seq and _es_subsecuencia_de_tokens(typed_seq, reg_seq):
+        return "match"
+
+    if reg_set.isdisjoint(set(typed)):
+        return "no_overlap"
+
+    # Partial overlap without full containment → treat as soft match (same cédula).
+    return "match"
 
 
 def _score_profesional_nombre(query: str, prof: Dict[str, Any]) -> float:

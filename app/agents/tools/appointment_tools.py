@@ -35,6 +35,7 @@ from app.agents.tools.agenda_helpers import (
     _mensaje_catalogo_no_encontrado,
     _mensaje_especialidad_sin_servicio_unico,
     _es_servicio_activo,
+    coincidencia_nombre_paciente,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ async def _agendar_cita_impl(
     fecha_hora_inicio: str,
     motivo_consulta: str,
     config: Optional[RunnableConfig] = None,
+    confirmar_misma_persona: bool = False,
 ) -> str:
     """Agenda una cita buscando o creando el paciente por su cédula en el backend .NET."""
     try:
@@ -92,8 +94,8 @@ async def _agendar_cita_impl(
         if error_cedula:
             return error_cedula
 
-        # 1. Resolver paciente SOLO por cédula (nunca por nombre).
-        # Misma cédula → mismo patientId aunque el nombre varíe ("Alejandro" vs nombre completo).
+        # 1. Resolver paciente SOLO por cédula (clave única). Nombre: partes/tokens,
+        # no igualdad exacta — "Alejandro Escobar" ⊆ "Jhon Alejandro Escobar Lozada".
         paciente_id = None
         cuenta_nueva = False
         nombre_clean = (nombre_paciente or "").strip()
@@ -111,11 +113,30 @@ async def _agendar_cita_impl(
             paciente_id = resolved.get("patientId") or resolved.get("id")
             nombre_bd = f"{resolved.get('firstName', '')} {resolved.get('lastName', '')}".strip()
             bd_lower = nombre_bd.lower()
-            if nombre_bd and not any(p in bd_lower for p in ["paciente", "nexus"]):
-                # Prefer stored canonical name; keep longer incoming name for display if richer.
+            bd_es_placeholder = (
+                not nombre_bd
+                or any(p in bd_lower for p in ["paciente", "nexus"])
+            )
+
+            if not es_placeholder and not bd_es_placeholder:
+                match_kind = coincidencia_nombre_paciente(nombre_clean, nombre_bd)
+                if match_kind == "no_overlap" and not confirmar_misma_persona:
+                    # Same cédula but unrelated name → ask before attaching the booking.
+                    # Never create a second person; cédula remains the identity key.
+                    return (
+                        f"⚠️ Encontré un paciente registrado con la cédula *{cedula}* a nombre de "
+                        f"*{nombre_bd}*, pero el nombre que indicaste (*{nombre_clean}*) no coincide "
+                        f"con ninguna parte de ese registro.\n\n"
+                        f"¿Confirmas que *eres la misma persona*? "
+                        f"Si es así, responde *sí, soy yo* y continúo con el agendamiento "
+                        f"(se reutilizará el mismo historial; no se crea otra ficha). "
+                        f"Si no, verifica la cédula e inténtalo de nuevo. 😊"
+                    )
+
+            if not bd_es_placeholder:
+                # Prefer registered canonical name; enrich only if typed name is richer.
                 if not es_placeholder and len(nombre_clean) > len(nombre_bd) + 2:
                     nombre_display = nombre_clean
-                    # Enrich display name on the canonical person (idempotent onboard by cédula).
                     try:
                         await dotnet_client.crear_paciente_basico(
                             cedula=cedula,
@@ -128,7 +149,10 @@ async def _agendar_cita_impl(
                     nombre_display = nombre_bd
             elif not es_placeholder:
                 nombre_display = nombre_clean
-            logger.info(f"[Agenda] Paciente reutilizado por cédula {cedula} → patientId={paciente_id}")
+            logger.info(
+                f"[Agenda] Paciente reutilizado por cédula {cedula} → patientId={paciente_id} "
+                f"nombre_display={nombre_display!r}"
+            )
 
         if not paciente_id:
             if es_placeholder:
@@ -748,25 +772,37 @@ async def agendar_cita_tool(
     servicio_id: str,
     fecha_hora_inicio: str,
     motivo_consulta: str,
+    confirmar_misma_persona: bool = False,
     config: Annotated[Optional[RunnableConfig], InjectedToolArg] = None,
 ) -> str:
     """
     Registra una cita en el sistema para un paciente identificado por su cédula.
     
     IMPORTANTE: Antes de invocar esta herramienta DEBES tener los siguientes datos del usuario:
-    - cedula: Número de cédula o documento del paciente (OBLIGATORIO).
-    - nombre_paciente: Nombre completo del paciente (OBLIGATORIO).
+    - cedula: Número de cédula o documento del paciente (OBLIGATORIO). Clave única de identidad.
+    - nombre_paciente: Nombre del paciente (OBLIGATORIO). No hace falta el nombre exacto registrado:
+      basta con que las partes del nombre estén contenidas en el nombre canónico
+      (ej. "Alejandro Escobar" coincide con "Jhon Alejandro Escobar Lozada" + misma cédula).
     - profesional_id: ID o nombre del odontólogo seleccionado.
     - servicio_id: ID o nombre del servicio odontológico.
     - fecha_hora_inicio: Fecha y hora de inicio en formato ISO 8601 (ej. YYYY-MM-DDTHH:MM:SS).
     - motivo_consulta: Breve descripción de la razón de la consulta.
+    - confirmar_misma_persona: True SOLO si el paciente ya confirmó ser la misma persona
+      tras un aviso de nombre sin coincidencia de partes (misma cédula, nombres sin tokens comunes).
     
     Usa esta herramienta SOLAMENTE después de presentar la ficha de propuesta y obtener confirmación explícita del usuario.
     El número de WhatsApp del paciente se usa automáticamente como teléfono de contacto.
     Si el paciente no existe en el sistema, se creará automáticamente con los datos básicos.
     """
     return await _agendar_cita_impl(
-        cedula, nombre_paciente, profesional_id, servicio_id, fecha_hora_inicio, motivo_consulta, config
+        cedula,
+        nombre_paciente,
+        profesional_id,
+        servicio_id,
+        fecha_hora_inicio,
+        motivo_consulta,
+        config,
+        confirmar_misma_persona=bool(confirmar_misma_persona),
     )
 
 
