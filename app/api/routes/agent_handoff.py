@@ -196,6 +196,99 @@ async def resume_conversation(request: ResumeConversationRequest):
         raise HTTPException(status_code=500, detail=f"Error interno al reanudar conversación: {str(e)}")
 
 
+class ResolveIdentityRequest(BaseModel):
+    identifier: str = Field(..., description="LID (@lid) o JID WhatsApp a resolver a E.164")
+    conversation_id: Optional[str] = Field(
+        None, description="Si se indica y hay E.164, actualiza ChatbotConversations.chatIdentifier"
+    )
+
+
+@router.post("/whatsapp/resolve-identity", dependencies=[Depends(verify_internal_secret)])
+async def resolve_whatsapp_identity(request: ResolveIdentityRequest):
+    """Resuelve LID → E.164 (remoteJidAlt / Evolution DB / contacts). Nunca inventa +233."""
+    from app.services.whatsapp_identity import (
+        es_identificador_lid,
+        telefono_para_almacenar,
+    )
+
+    raw = (request.identifier or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="identifier requerido")
+
+    phone = telefono_para_almacenar(raw)
+    resolved_via = "direct"
+    if not phone and es_identificador_lid(raw):
+        phone = await evolution_client.resolver_telefono_desde_lid(raw)
+        resolved_via = "evolution" if phone else "unresolved"
+
+    if phone and request.conversation_id:
+        try:
+            await dotnet_client.transport.request(
+                "PUT",
+                f"ChatbotConversations/{request.conversation_id}",
+                json={"chatIdentifier": phone},
+            )
+        except Exception as exc:
+            logger.warning("[resolve-identity] No se pudo actualizar conv %s: %s", request.conversation_id, exc)
+
+    return {
+        "status": "ok" if phone else "unresolved",
+        "identifier": raw,
+        "phone": phone,
+        "via": resolved_via,
+    }
+
+
+@router.post("/whatsapp/repair-lid-conversations", dependencies=[Depends(verify_internal_secret)])
+async def repair_lid_conversations():
+    """Repara chatIdentifier LID→E.164 cuando Evolution tiene remoteJidAlt / mapping."""
+    from app.services.whatsapp_identity import es_identificador_lid, telefono_para_almacenar
+
+    items = await dotnet_client.tickets._list_conversations()
+    repaired: list[dict] = []
+    unresolved: list[dict] = []
+    skipped = 0
+
+    for conv in items or []:
+        cid = str(conv.get("id") or "")
+        ident = str(conv.get("chatIdentifier") or "").strip()
+        if not cid or not ident:
+            continue
+        if telefono_para_almacenar(ident):
+            skipped += 1
+            continue
+        if not es_identificador_lid(ident):
+            skipped += 1
+            continue
+
+        phone = await evolution_client.resolver_telefono_desde_lid(ident)
+        if not phone:
+            unresolved.append({"id": cid, "chatIdentifier": ident})
+            continue
+        try:
+            await dotnet_client.transport.request(
+                "PUT",
+                f"ChatbotConversations/{cid}",
+                json={
+                    "conversationStatusId": conv.get("conversationStatusId"),
+                    "patientId": conv.get("patientId"),
+                    "closedAt": conv.get("closedAt"),
+                    "chatIdentifier": phone,
+                },
+            )
+            repaired.append({"id": cid, "from": ident, "to": phone})
+        except Exception as exc:
+            logger.warning("[repair-lid] PUT falló %s: %s", cid, exc)
+            unresolved.append({"id": cid, "chatIdentifier": ident, "error": str(exc)})
+
+    return {
+        "status": "ok",
+        "repaired": repaired,
+        "unresolved": unresolved,
+        "skipped_count": skipped,
+    }
+
+
 @router.post("/agent/send-message", dependencies=[Depends(verify_internal_secret)])
 async def send_agent_message(request: SendMessageRequest):
     """Envía un mensaje redactado por un asesor humano hacia el WhatsApp del paciente.

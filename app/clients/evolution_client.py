@@ -191,8 +191,16 @@ class EvolutionClient:
         from app.services.whatsapp_identity import obtener_destino_envio
         return obtener_destino_envio(numero)
 
+    def _evolution_pg_uri(self) -> str:
+        """URI interna a Postgres de Evolution (misma red Docker). No inventa teléfonos."""
+        return (
+            os.getenv("EVOLUTION_POSTGRES_URI")
+            or os.getenv("EVOLUTION_DATABASE_URI")
+            or "postgresql://evolution_user:evolution_password@evolution-postgres:5432/evolution"
+        )
+
     async def resolver_telefono_desde_lid(self, lid_o_jid: str) -> Optional[str]:
-        """Resuelve LID → E.164 vía mensajes/chats Evolution (remoteJidAlt / senderPn).
+        """Resuelve LID → E.164 vía Evolution (remoteJidAlt / senderPn / IsOnWhatsapp / contacts).
 
         Nunca inventa +233 ni truncamientos. None si WhatsApp no envió teléfono real.
         """
@@ -218,17 +226,90 @@ class EvolutionClient:
                 key.get("remoteJidAlt"),
                 key.get("senderPn"),
                 key.get("participantAlt"),
+                key.get("numberedId"),
                 obj.get("senderPn"),
                 obj.get("remoteJidAlt"),
+                obj.get("phoneNumber"),
+                obj.get("numberedId"),
+                obj.get("pn"),
             ):
                 phone = telefono_para_almacenar(str(cand or ""))
                 if phone:
                     return phone
-            # lastMessage anidado (findChats)
+            # Contact: id=@s.whatsapp.net + lid=@lid (o al revés)
+            contact_id = str(obj.get("id") or obj.get("remoteJid") or "")
+            contact_lid = str(obj.get("lid") or "")
+            if contact_lid and limpiar_digitos(contact_lid) == digits:
+                phone = telefono_para_almacenar(contact_id)
+                if phone:
+                    return phone
+            if contact_id and es_identificador_lid(contact_id):
+                phone = telefono_para_almacenar(str(obj.get("phoneNumber") or obj.get("pn") or ""))
+                if phone:
+                    return phone
             lm = obj.get("lastMessage")
             if isinstance(lm, dict):
                 return _phone_from_blob(lm)
             return None
+
+        def _commit(phone: str, via: str) -> str:
+            registrar_asociacion_lid(phone, lid_jid)
+            logger.info("[Evolution API] LID %s → %s vía %s", lid_jid, phone, via)
+            return phone
+
+        # 0) Tabla IsOnWhatsapp (Baileys): remoteJid=teléfono, lid=@lid
+        try:
+            import asyncio
+
+            def _pg_lookup() -> Optional[str]:
+                import psycopg
+
+                uri = self._evolution_pg_uri()
+                with psycopg.connect(uri, connect_timeout=3) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT "remoteJid"
+                            FROM "IsOnWhatsapp"
+                            WHERE lid = %s
+                               OR lid = %s
+                               OR "jidOptions" LIKE %s
+                            LIMIT 5
+                            """,
+                            (lid_jid, digits, f"%{digits}%"),
+                        )
+                        for (rj,) in cur.fetchall() or []:
+                            phone = telefono_para_almacenar(str(rj or ""))
+                            if phone and limpiar_digitos(phone) != digits:
+                                return phone
+                        # Mensajes con remoteJidAlt (misma DB que usa Evolution)
+                        cur.execute(
+                            """
+                            SELECT "key"->>'remoteJidAlt' AS alt,
+                                   "key"->>'senderPn' AS pn
+                            FROM "Message"
+                            WHERE "key"->>'remoteJid' = %s
+                              AND (
+                                COALESCE("key"->>'remoteJidAlt','') LIKE '%%@s.whatsapp.net'
+                                OR COALESCE("key"->>'senderPn','') LIKE '%%@s.whatsapp.net'
+                              )
+                            ORDER BY "messageTimestamp" DESC NULLS LAST
+                            LIMIT 10
+                            """,
+                            (lid_jid,),
+                        )
+                        for alt, pn in cur.fetchall() or []:
+                            for cand in (alt, pn):
+                                phone = telefono_para_almacenar(str(cand or ""))
+                                if phone:
+                                    return phone
+                return None
+
+            phone_pg = await asyncio.to_thread(_pg_lookup)
+            if phone_pg:
+                return _commit(phone_pg, "IsOnWhatsapp/Message-pg")
+        except Exception as exc:
+            logger.debug("[Evolution API] Postgres LID resolve falló: %s", exc)
 
         async with httpx.AsyncClient(timeout=min(self.timeout, 12.0)) as client:
             # 1) Mensajes históricos con remoteJidAlt
@@ -253,13 +334,7 @@ class EvolutionClient:
                     for item in msgs if isinstance(msgs, list) else []:
                         phone = _phone_from_blob(item)
                         if phone:
-                            registrar_asociacion_lid(phone, lid_jid)
-                            logger.info(
-                                "[Evolution API] LID %s → %s vía findMessages",
-                                lid_jid,
-                                phone,
-                            )
-                            return phone
+                            return _commit(phone, "findMessages")
             except Exception as exc:
                 logger.debug("[Evolution API] findMessages LID resolve falló: %s", exc)
 
@@ -277,17 +352,60 @@ class EvolutionClient:
                     for item in items if isinstance(items, list) else []:
                         phone = _phone_from_blob(item)
                         if phone:
-                            registrar_asociacion_lid(phone, lid_jid)
-                            logger.info(
-                                "[Evolution API] LID %s → %s vía findChats",
-                                lid_jid,
-                                phone,
-                            )
-                            return phone
+                            return _commit(phone, "findChats")
             except Exception as exc:
                 logger.debug("[Evolution API] findChats LID resolve falló: %s", exc)
 
-            # 3) whatsappNumbers: solo si Evolution devolvió @s.whatsapp.net real (no el propio LID)
+            # 3) findContacts (phoneNumber / lid pair cuando Evolution lo expone)
+            try:
+                url = f"{self.base_url}/chat/findContacts/{self.instance_name}"
+                for body in (
+                    {"where": {"remoteJid": lid_jid}},
+                    {"where": {"id": lid_jid}},
+                    {},
+                ):
+                    resp = await client.post(url, json=body, headers=self._get_headers())
+                    if resp.status_code not in (200, 201):
+                        continue
+                    data = resp.json()
+                    items = data if isinstance(data, list) else (data.get("contacts") or data.get("data") or [])
+                    for item in items if isinstance(items, list) else []:
+                        if not isinstance(item, dict):
+                            continue
+                        # Matching: contacto cuyo remoteJid/id/lid es este LID
+                        blob = json.dumps(item, ensure_ascii=False)
+                        if digits not in blob and lid_jid not in blob:
+                            continue
+                        phone = _phone_from_blob(item)
+                        if phone and limpiar_digitos(phone) != digits:
+                            return _commit(phone, "findContacts")
+            except Exception as exc:
+                logger.debug("[Evolution API] findContacts LID resolve falló: %s", exc)
+
+            # 4) fetchProfile — a veces wuid viene como @s.whatsapp.net
+            try:
+                url = f"{self.base_url}/chat/fetchProfile/{self.instance_name}"
+                resp = await client.post(
+                    url,
+                    json={"number": lid_jid},
+                    headers=self._get_headers(),
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json() if resp.content else {}
+                    if isinstance(data, dict):
+                        for cand in (
+                            data.get("wuid"),
+                            data.get("number"),
+                            data.get("phoneNumber"),
+                            data.get("jid"),
+                        ):
+                            phone = telefono_para_almacenar(str(cand or ""))
+                            if phone and limpiar_digitos(phone) != digits:
+                                return _commit(phone, "fetchProfile")
+            except Exception as exc:
+                logger.debug("[Evolution API] fetchProfile LID resolve falló: %s", exc)
+
+            # 5) whatsappNumbers: solo si Evolution devolvió @s.whatsapp.net real (no el propio LID)
             try:
                 url = f"{self.base_url}/chat/whatsappNumbers/{self.instance_name}"
                 resp = await client.post(
@@ -306,13 +424,13 @@ class EvolutionClient:
                             continue
                         phone = telefono_para_almacenar(jid)
                         if phone and limpiar_digitos(phone) != digits:
-                            registrar_asociacion_lid(phone, lid_jid)
-                            logger.info(
-                                "[Evolution API] LID %s → %s vía whatsappNumbers",
-                                lid_jid,
-                                phone,
-                            )
-                            return phone
+                            return _commit(phone, "whatsappNumbers")
+                        # lid field en respuesta onWhatsApp
+                        mapped_lid = str(item.get("lid") or "")
+                        if mapped_lid and digits in limpiar_digitos(mapped_lid):
+                            phone = telefono_para_almacenar(jid)
+                            if phone:
+                                return _commit(phone, "whatsappNumbers-lid")
             except Exception as exc:
                 logger.debug("[Evolution API] whatsappNumbers LID resolve falló: %s", exc)
 
