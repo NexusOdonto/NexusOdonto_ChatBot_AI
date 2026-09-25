@@ -42,21 +42,15 @@ def construir_mensaje_recordatorio(cita: Dict[str, Any]) -> str:
         pass
 
     return (
-        f"¡Hola, {paciente}! 👋✨\n\n"
-        f"Te saludamos de *Nexus Odonto* 🦷 para recordarte tu cita programada:\n\n"
-        f"📋 *Detalles de tu cita:*\n"
-        f"• 🦷 *Tratamiento:* {servicio}\n"
-        f"• 👨‍⚕️ *Especialista:* {doctor}\n"
-        f"• 📅 *Fecha:* {fecha_legible}\n"
-        f"• ⏰ *Horario:* {hora}\n"
-        f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n"
-        f"• 📞 *Línea de atención:* +57 324 6030217\n\n"
-        f"💡 *Recomendación:* Por favor llega 10 a 15 minutos antes de tu hora para tu comodidad.\n\n"
-        f"👉 *Por favor responde a este mensaje para gestionar tu turno:*\n"
-        f"• Escribe *CONFIRMAR* para asegurar tu asistencia ✅\n"
-        f"• Escribe *REPROGRAMAR* si necesitas cambiar de horario 🔄\n"
-        f"• Escribe *CANCELAR* si ya no podrás asistir ❌\n\n"
-        f"¡Estamos listos para cuidar de tu sonrisa! 😊🦷"
+        f"¡Hola, {paciente}! Te escribimos de *Nexus Odonto* para recordarte tu cita:\n\n"
+        f"• *Tratamiento:* {servicio}\n"
+        f"• *Especialista:* {doctor}\n"
+        f"• *Fecha:* {fecha_legible}\n"
+        f"• *Horario:* {hora}\n"
+        f"• *Sede:* Calle 100 # 15-20\n"
+        f"• *Línea:* +57 324 6030217\n\n"
+        f"Te pedimos llegar 10 a 15 minutos antes.\n\n"
+        f"Responde con *CONFIRMAR*, *REPROGRAMAR* o *CANCELAR* según lo que necesites."
     )
 
 
@@ -213,15 +207,13 @@ def construir_mensaje_recordatorio_30m(cita: Dict[str, Any]) -> str:
     hora = cita.get("timeFormatted") or "su hora programada"
 
     return (
-        f"⏰ *¡Recordatorio de tu cita en 30 minutos!* 🦷✨\n\n"
-        f"¡Hola, {paciente}! 👋 Te saludamos de *Nexus Odonto* para recordarte que tu cita es hoy a las *{hora}* (faltan aproximadamente 30 minutos).\n\n"
-        f"📋 *Detalles de tu turno:*\n"
-        f"• 🦷 *Tratamiento:* {servicio}\n"
-        f"• 👨‍⚕️ *Especialista:* {doctor}\n"
-        f"• ⏰ *Horario:* {hora}\n"
-        f"• 📍 *Sede:* Calle 100 # 15-20, Centro Médico Odontológico\n"
-        f"• 📞 *Línea de atención:* +57 324 6030217\n\n"
-        f"💡 *Recomendación:* Por favor sal con tiempo hacia la clínica para evitar demoras. ¡Estamos listos para atenderte! 😊👍"
+        f"Hola, {paciente}. Te recordamos de *Nexus Odonto* que tu cita es hoy a las *{hora}* "
+        f"(en unos 30 minutos).\n\n"
+        f"• *Tratamiento:* {servicio}\n"
+        f"• *Especialista:* {doctor}\n"
+        f"• *Sede:* Calle 100 # 15-20\n"
+        f"• *Línea:* +57 324 6030217\n\n"
+        f"Sal con un poco de tiempo para llegar tranquilo/a. ¡Te esperamos!"
     )
 
 

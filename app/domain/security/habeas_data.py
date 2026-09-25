@@ -8,15 +8,15 @@ from app.domain.models.patient import SafePatientContext
 
 
 MENSAJE_SEGURIDAD_CONTRASENAS = (
-    "Por políticas de seguridad, no realizamos cambios ni restablecimientos de contraseñas por este chat 🛡️✨.\n\n"
-    "Para actualizar tu contraseña, ingresa a nuestra plataforma web en https://nexusodonto.chatcampuslands.com/login "
-    "con tu cédula como usuario y contraseña temporal, donde se te solicitará cambiar tu clave en el primer inicio de sesión."
+    "Por seguridad no cambiamos ni restablecemos contraseñas por este chat.\n\n"
+    "Puedes actualizarla en https://nexusodonto.chatcampuslands.com/login "
+    "con tu cédula como usuario y contraseña temporal; ahí te pedirá cambiarla al entrar."
 )
 
 MENSAJE_FUERA_DE_DOMINIO = (
-    "¡Hola! 👋 Soy la asesora de atención de *Nexus Odonto* 🦷✨. "
-    "Solo puedo orientarte con temas odontológicos, información de nuestros servicios, horarios y citas. "
-    "¿En qué te puedo colaborar hoy?"
+    "Hola, soy de recepción de *Nexus Odonto*. "
+    "Te puedo ayudar con temas odontológicos, servicios, horarios y citas. "
+    "¿En qué te oriento?"
 )
 
 

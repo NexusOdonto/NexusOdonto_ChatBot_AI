@@ -12,13 +12,13 @@ logger = logging.getLogger(__name__)
 
 # Mensaje amigable cuando el audio está vacío o inaudible
 MENSAJE_AUDIO_NO_ENTENDIDO = (
-    "No logré escuchar con claridad tu nota de voz 🎧.\n\n"
-    "Por favor, intenta grabarla nuevamente en un lugar con menos ruido o escríbenos tu consulta por texto para poder atenderte."
+    "No alcancé a escuchar bien tu nota de voz.\n\n"
+    "¿La grabas otra vez en un lugar más silencioso, o me lo escribes por texto?"
 )
 
 MENSAJE_ERROR_PROCESANDO_AUDIO = (
-    "Tuvimos un inconveniente técnico al procesar tu nota de voz 🎧.\n\n"
-    "Por favor, intenta enviarla nuevamente o escríbenos tu consulta por texto."
+    "Se nos complicó procesar tu nota de voz.\n\n"
+    "¿La intentas de nuevo o me cuentas por texto lo que necesitas?"
 )
 
 
