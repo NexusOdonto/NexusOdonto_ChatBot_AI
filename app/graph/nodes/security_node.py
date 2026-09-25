@@ -38,7 +38,39 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
         return {"conversation_status": "ACTIVA", "content_guard_triggered": False}
 
     # 1) Respeto / fuera de alcance odontológico (0 tokens) — no agendar ni urgencia
-    guard_kind, guard_msg = evaluate_content_guard(user_text)
+    # Evitar pegar el mismo párrafo si el paciente insiste: variar con el último turno.
+    last_ai_text = None
+    prior_respect = False
+    respect_markers = (
+        "respeto",
+        "salud oral",
+        "no es dental",
+        "broma no aplica",
+        "caso dental",
+        "molestia dental",
+        "dientes y boca",
+    )
+    ai_seen = 0
+    for msg in reversed(messages[:-1]):
+        if not isinstance(msg, AIMessage):
+            continue
+        content = msg.content if isinstance(msg.content, str) else ""
+        if not content:
+            continue
+        ai_seen += 1
+        if last_ai_text is None:
+            last_ai_text = content
+        if any(marker in content.lower() for marker in respect_markers):
+            prior_respect = True
+            break
+        if ai_seen >= 4:
+            break
+
+    guard_kind, guard_msg = evaluate_content_guard(
+        user_text,
+        avoid_reply=last_ai_text if prior_respect else None,
+        prior_respect=prior_respect,
+    )
     if guard_kind and guard_msg:
         logger.info(
             "[Security Node] content_guard=%s msg='%s'",
