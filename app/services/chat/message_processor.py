@@ -251,6 +251,11 @@ async def reset_conversation(phone_number: str) -> None:
         logger.warning(f"[Reset] No se encontró checkpointer para {phone_number}")
 
     dotnet_client.limpiar_cache_conversacion(phone_number)
+    try:
+        from app.services.booking_flow import clear_awaiting_booking_identity
+        clear_awaiting_booking_identity(phone_number)
+    except Exception:
+        pass
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     reset_msg = "🔄 Memoria reiniciada con éxito. ¡Hola! Soy el asistente virtual de Nexus Odonto. ¿En qué puedo colaborarte hoy?"
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
@@ -605,6 +610,11 @@ async def process_whatsapp_message(
                     pass
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
             inactivity_service.cancel(numero_paciente)
+            try:
+                from app.services.booking_flow import clear_awaiting_booking_identity
+                clear_awaiting_booking_identity(numero_paciente)
+            except Exception:
+                pass
 
         _USER_LAST_ACTIVE[numero_paciente] = now_ts
         if checkpointer:
@@ -613,12 +623,61 @@ async def process_whatsapp_message(
             except Exception:
                 pass
 
+        # Booking continuity: reuse cédula+nombre from recent history / pending flag.
+        from app.services.booking_flow import (
+            build_ask_service_response,
+            clear_awaiting_booking_identity,
+            extract_identity_from_history_newest_first,
+            is_awaiting_booking_identity,
+            is_booking_start_intent,
+            mark_awaiting_booking_identity,
+            parse_identity_from_text,
+            prev_asked_for_booking_identity,
+        )
 
-        # Caché semántico (⚡ 0 tokens)
+        history_msgs: list = []
+        prev_ai_text = ""
+        try:
+            snap = await get_graph().aget_state(config)
+            history_msgs = list((snap.values or {}).get("messages") or [])
+            for m in reversed(history_msgs):
+                if isinstance(m, AIMessage) and m.content:
+                    prev_ai_text = str(m.content)
+                    break
+        except Exception as hist_err:
+            logger.debug("[Processor] No se pudo leer historial para booking: %s", hist_err)
+
+        hist_identity = extract_identity_from_history_newest_first(history_msgs)
+        msg_identity = parse_identity_from_text(mensaje_texto)
+        known_cedula = msg_identity.cedula or hist_identity.cedula
+        known_nombre = msg_identity.nombre or hist_identity.nombre
+        awaiting_id = is_awaiting_booking_identity(numero_paciente) or prev_asked_for_booking_identity(
+            prev_ai_text
+        )
+
+        # Caché semántico (⚡ 0 tokens) — booking-aware
         t_cache = time.perf_counter()
-        cached_response = await buscar_en_cache(mensaje_texto)
+        cached_response = await buscar_en_cache(
+            mensaje_texto,
+            known_cedula=known_cedula,
+            known_nombre=known_nombre,
+            awaiting_booking_identity=awaiting_id,
+        )
         spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
+            # Track booking identity step vs continue-to-service
+            asks_identity = (
+                "número de cédula" in cached_response.lower()
+                or "numero de cedula" in cached_response.lower()
+            ) and "nombre completo" in cached_response.lower()
+            asks_service = "qué tratamiento o servicio" in cached_response.lower() or (
+                "tratamiento o servicio" in cached_response.lower()
+            )
+            if asks_identity and is_booking_start_intent(mensaje_texto):
+                mark_awaiting_booking_identity(numero_paciente)
+            elif asks_service or (awaiting_id and msg_identity.cedula):
+                clear_awaiting_booking_identity(numero_paciente)
+
             logger.info(f"[Semantic Cache] Respondiendo a {numero_paciente} desde caché.")
             t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, cached_response)
@@ -633,7 +692,20 @@ async def process_whatsapp_message(
             try:
                 await get_graph().aupdate_state(
                     config,
-                    {"messages": [HumanMessage(content=mensaje_texto), AIMessage(content=cached_response)]},
+                    {
+                        "messages": [
+                            HumanMessage(content=mensaje_texto),
+                            AIMessage(content=cached_response),
+                        ],
+                        "user_context": {
+                            "nombre": known_nombre or "",
+                            "primer_nombre": (known_nombre or "").split()[0] if known_nombre else "",
+                            "cedula": known_cedula,
+                            "is_registered": bool(known_cedula),
+                            "phone": numero_paciente,
+                            "push_name": push_name.strip() if push_name else "",
+                        },
+                    },
                 )
             except Exception:
                 pass
@@ -645,12 +717,64 @@ async def process_whatsapp_message(
             )
             return
 
-        # Contexto del paciente: Cero asunción (Habeas Data)
+        # Extra safety: if cache missed but we just got identity mid-booking, do not greet.
+        if awaiting_id and msg_identity.cedula and (msg_identity.nombre or known_nombre):
+            cached_response = build_ask_service_response(
+                nombre=msg_identity.nombre or known_nombre
+            )
+            clear_awaiting_booking_identity(numero_paciente)
+            logger.info(
+                "[BookingFlow] Identity mid-booking → ask service (cache miss fallback) phone=%s",
+                numero_paciente,
+            )
+            t_send = time.perf_counter()
+            await evolution_client.enviar_mensaje(numero_paciente, cached_response)
+            spans["send"] = time.perf_counter() - t_send
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=cached_response,
+                )
+            )
+            try:
+                await get_graph().aupdate_state(
+                    config,
+                    {
+                        "messages": [
+                            HumanMessage(content=mensaje_texto),
+                            AIMessage(content=cached_response),
+                        ],
+                        "user_context": {
+                            "nombre": msg_identity.nombre or known_nombre or "",
+                            "primer_nombre": (
+                                (msg_identity.nombre or known_nombre or "").split()[0]
+                                if (msg_identity.nombre or known_nombre)
+                                else ""
+                            ),
+                            "cedula": msg_identity.cedula or known_cedula,
+                            "is_registered": True,
+                            "phone": numero_paciente,
+                            "push_name": push_name.strip() if push_name else "",
+                        },
+                    },
+                )
+            except Exception:
+                pass
+            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+            spans["total"] = time.perf_counter() - t_total
+            logger.info(
+                f"[Latency] phone={numero_paciente} path=booking_identity "
+                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
+            )
+            return
+
+        # Contexto del paciente: only from what the user already wrote (Habeas Data)
         user_context = {
-            "nombre": "",
-            "primer_nombre": "",
-            "cedula": None,
-            "is_registered": False,
+            "nombre": known_nombre or "",
+            "primer_nombre": (known_nombre or "").split()[0] if known_nombre else "",
+            "cedula": known_cedula,
+            "is_registered": bool(known_cedula),
             "phone": numero_paciente,
             "push_name": push_name.strip() if push_name else "",
         }

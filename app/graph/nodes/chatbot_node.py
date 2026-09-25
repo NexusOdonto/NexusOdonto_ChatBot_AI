@@ -62,6 +62,11 @@ SYSTEM_MESSAGE = SystemMessage(
         "9. clinical_knowledge_tool — dudas clínicas (sin mezclar con agenda)\n\n"
         "AGENDAR — primera respuesta si pide cita y falta cédula: "
         "pide cédula y nombre completo. NO invoques herramientas todavía.\n"
+        "Si ya dio cédula+nombre en este chat (aunque sea antes del 'quiero agendar'), "
+        "NO vuelvas a pedirlos: confirma y pregunta el servicio/tratamiento.\n"
+        "Si responde con cédula+nombre tras pedirlos para agendar: "
+        "PROHIBIDO menú de bienvenida ni '¿en qué te ayudamos?'; "
+        "confirma y pregunta servicio. PROHIBIDO consultar_cita_por_cedula_tool.\n"
         "Si responde solo con cédula en hilo de agendar: "
         "PROHIBIDO consultar_cita_por_cedula_tool; confirma cédula y pide nombre si falta, luego servicio/horario.\n"
         "Protocolo: (1) cédula+nombre+servicio+horario vía disponibilidad "
@@ -138,6 +143,12 @@ def _select_tools(last_user_msg: str, prev_ai_msg: str, cedula: str | None) -> t
     # Booking start without cédula: no tools (text-only)
     if any(k in norm for k in ("quiero una cita", "quiero agendar", "necesito una cita", "agendar cita")) and not cedula:
         return tuple()
+
+    # Identity just provided (cédula + name) mid-booking: allow services catalog only
+    if re.search(r"\b\d{7,12}\b", norm) and any(
+        k in prev for k in ("cédula", "cedula", "nombre completo", "agendar")
+    ):
+        return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
 
     # Reschedule / cancel paths
     if any(k in norm for k in ("reprogramar", "modificar")) or any(k in prev for k in ("reprogramar", "modificar")):
@@ -245,20 +256,43 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     last_user_msg = ""
     prev_ai_msg = ""
     cedula_detectada = None
+    nombre_detectado = None
+
+    from app.services.booking_flow import (
+        extract_identity_from_history_newest_first,
+        is_booking_start_intent,
+        parse_identity_from_text,
+        prev_asked_for_booking_identity,
+    )
+
+    hist_id = extract_identity_from_history_newest_first(raw_msgs)
+    cedula_detectada = hist_id.cedula
+    nombre_detectado = hist_id.nombre
 
     for m in reversed(raw_msgs):
         if isinstance(m, HumanMessage) and not last_user_msg and m.content:
             last_user_msg = str(m.content).strip()
         elif isinstance(m, AIMessage) and not prev_ai_msg and m.content:
             prev_ai_msg = str(m.content).strip().lower()
-        if isinstance(m, HumanMessage) and m.content and not cedula_detectada:
-            m_ced = re.search(r"\b(\d{7,12})\b", str(m.content))
-            if m_ced:
-                cedula_detectada = m_ced.group(1)
+
+    # Prefer identity on the current turn if present
+    if last_user_msg:
+        turn_id = parse_identity_from_text(last_user_msg)
+        if turn_id.cedula:
+            cedula_detectada = turn_id.cedula
+        if turn_id.nombre:
+            nombre_detectado = turn_id.nombre
+
+    uc = state.get("user_context") or {}
+    if not cedula_detectada and uc.get("cedula"):
+        cedula_detectada = str(uc.get("cedula")).strip() or None
+    if not nombre_detectado and uc.get("nombre"):
+        nombre_detectado = str(uc.get("nombre")).strip() or None
 
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
         norm_user = last_user_msg.lower()
+        turn_id = parse_identity_from_text(last_user_msg)
         if re.match(r"^\d{7,12}$", last_user_msg) and any(
             w in prev_ai_msg for w in ["reprogramar", "modificar", "cambiar", "cambio"]
         ):
@@ -276,17 +310,27 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 f"\n[ACCIÓN] Cancelar con cédula {cedula_detectada} → "
                 f"cancelar_cita_tool(cedula='{cedula_detectada}') YA."
             )
-        elif any(
-            p in norm_user
-            for p in (
-                "quiero una cita",
-                "quiero agendar",
-                "necesito una cita",
-                "agendar cita",
-                "apartar cita",
-                "programar cita",
+        elif prev_asked_for_booking_identity(prev_ai_msg) and turn_id.cedula:
+            # Bug B: after collecting identity for agendar, continue — never welcome menu.
+            nombre_txt = turn_id.nombre or nombre_detectado or ""
+            context_str += (
+                f"\n[ACCIÓN] Paciente entregó identidad para AGENDAR "
+                f"(cédula={turn_id.cedula}"
+                + (f", nombre={nombre_txt}" if nombre_txt else "")
+                + "). "
+                "PROHIBIDO menú de bienvenida / '¿En qué te podemos ayudar?'. "
+                "Confirma brevemente y pregunta qué tratamiento o servicio desea agendar. "
+                "PROHIBIDO consultar_cita_por_cedula_tool ni inventar horarios en este turno."
             )
-        ) and not cedula_detectada:
+        elif is_booking_start_intent(last_user_msg) and cedula_detectada and nombre_detectado:
+            # Bug A: booking start with identity already in history.
+            context_str += (
+                f"\n[ACCIÓN] Inicio de agendamiento CON identidad ya conocida "
+                f"(cédula={cedula_detectada}, nombre={nombre_detectado}). "
+                "NO pidas cédula ni nombre otra vez. Confirma y pregunta el servicio/tratamiento. "
+                "PROHIBIDO menú de bienvenida. Sin inventar citas ni horarios."
+            )
+        elif is_booking_start_intent(last_user_msg) and not cedula_detectada:
             # One LLM round, no catalog tools — correct booking step 1.
             context_str += (
                 "\n[ACCIÓN] Inicio de agendamiento sin cédula: responde en texto pidiendo "

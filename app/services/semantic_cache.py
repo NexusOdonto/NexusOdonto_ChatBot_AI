@@ -99,15 +99,66 @@ def _normalize_query_key(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def _get_fast_response(text: str) -> Optional[str]:
-    """Retorna una respuesta instantánea si el mensaje coincide con un patrón determinista común."""
+def _get_fast_response(
+    text: str,
+    *,
+    known_cedula: Optional[str] = None,
+    known_nombre: Optional[str] = None,
+    awaiting_booking_identity: bool = False,
+) -> Optional[str]:
+    """Retorna una respuesta instantánea si el mensaje coincide con un patrón determinista común.
+
+    Booking continuity:
+    - If user says "quiero agendar" but cédula+nombre are already known → ask service (not identity).
+    - If we are awaiting identity for agendar and the message is cédula+nombre → ask service.
+    - Never return the generic greeting while awaiting booking identity.
+    """
+    from app.services.booking_flow import (
+        build_agendar_inicio_response,
+        build_ask_service_response,
+        is_booking_start_intent,
+        parse_identity_from_text,
+    )
+
     norm = _normalize_query_key(text)
     if not norm:
         return None
 
+    identity_now = parse_identity_from_text(text)
+    has_known = bool(known_cedula and known_nombre)
+    identity_complete = identity_now.complete or (
+        identity_now.cedula and known_nombre
+    ) or (known_cedula and identity_now.nombre) or has_known
+
+    # Mid-booking identity capture: continue to service, never welcome menu.
+    if awaiting_booking_identity and identity_now.cedula and (identity_now.nombre or known_nombre):
+        nombre = identity_now.nombre or known_nombre
+        logger.info(
+            "[Semantic Cache] ⚡ Booking identity captured → ask service (ced=%s)",
+            identity_now.cedula,
+        )
+        return build_ask_service_response(nombre=nombre)
+
+    # Booking start with identity already in session/history.
+    if is_booking_start_intent(text) and has_known:
+        logger.info(
+            "[Semantic Cache] ⚡ Booking start with known identity → ask service (ced=%s)",
+            known_cedula,
+        )
+        return build_ask_service_response(nombre=known_nombre)
+
     for pattern, cat in _FAST_MATCH_PATTERNS:
-        if re.match(pattern, norm):
-            return _FAST_RESPONSES.get(cat)
+        if not re.match(pattern, norm):
+            continue
+        # Do not reset to greeting while collecting booking identity.
+        if cat == "saludo" and awaiting_booking_identity:
+            logger.info("[Semantic Cache] Skip saludo fast-path (awaiting booking identity)")
+            return None
+        if cat == "agendar_inicio":
+            if has_known or identity_complete:
+                return build_ask_service_response(nombre=known_nombre or identity_now.nombre)
+            return build_agendar_inicio_response()
+        return _FAST_RESPONSES.get(cat)
     return None
 
 
@@ -263,12 +314,21 @@ def _es_contenido_cacheable(pregunta: str, respuesta: str, categoria: str = "gen
     return True
 
 
-async def buscar_en_cache(pregunta: str) -> Optional[str]:
+async def buscar_en_cache(
+    pregunta: str,
+    *,
+    known_cedula: Optional[str] = None,
+    known_nombre: Optional[str] = None,
+    awaiting_booking_identity: bool = False,
+) -> Optional[str]:
     """Busca una respuesta en el sistema de caché en capas (L1 Memoria -> L2 Qdrant).
     
     1. Interceptor de Respuestas Rápidas (0 tokens, < 1ms).
     2. Caché L1 en Memoria RAM (0 tokens, < 1ms).
     3. Caché L2 Semántico Vectorial en Qdrant (< 50ms).
+
+    known_cedula / known_nombre / awaiting_booking_identity keep booking flow
+    from re-asking identity or falling back to the welcome menu.
     """
     if not settings.semantic_cache_enabled:
         return None
@@ -278,7 +338,12 @@ async def buscar_en_cache(pregunta: str) -> Optional[str]:
         return None
 
     # 1. Interceptor de respuestas deterministas comunes (saludos, menú, horarios, contacto)
-    fast_resp = _get_fast_response(query)
+    fast_resp = _get_fast_response(
+        query,
+        known_cedula=known_cedula,
+        known_nombre=known_nombre,
+        awaiting_booking_identity=awaiting_booking_identity,
+    )
     if fast_resp:
         logger.info(f"[Semantic Cache] ⚡ Fast-Path HIT (0 tokens) para query: '{query[:40]}'")
         return fast_resp
