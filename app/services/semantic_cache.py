@@ -21,40 +21,27 @@ _MAX_L1_ENTRIES = 500
 # Respuestas pre-armadas deterministas de máxima velocidad (0 tokens, 0 red, 0ms)
 _FAST_RESPONSES: Dict[str, str] = {
     "saludo": (
-        "¡Hola! Qué gusto saludarte 👋✨ Bienvenido a *Nexus Odonto* 🦷.\n\n"
-        "Soy tu asistente virtual. ¿En qué te puedo ayudar hoy?\n\n"
-        "• 📅 *Agendar una cita:* Consulta disponibilidad y reserva tu turno.\n"
-        "• 📋 *Ver mis citas:* Consulta tus citas programadas con tu número de cédula.\n"
-        "• ✏️ *Modificar una cita:* Reprograma una cita existente.\n"
-        "• ❌ *Cancelar una cita:* Cancela una cita que no puedas atender.\n"
-        "• 🦷 *Servicios y tratamientos:* Conoce nuestros procedimientos y tarifas.\n"
-        "• 👨‍⚕️ *Nuestros especialistas:* Conoce a nuestro equipo de odontólogos.\n"
-        "• 💡 *Dudas odontológicas:* Cuidados bucales, recomendaciones o preparaciones.\n\n"
-        "¿Cómo podemos ayudarte hoy? 😊"
+        "¡Hola! Bienvenido/a a *Nexus Odonto* 😊\n\n"
+        "Soy de recepción. Dime en qué te ayudo: agendar, ver o cambiar una cita, "
+        "precios, especialistas o alguna duda odontológica."
     ),
     "horario": (
-        "⏰ *Horarios de Atención - Nexus Odonto:*\n\n"
-        "• *Lunes a Sábado:* 8:00 AM a 6:00 PM (Jornada Continua)\n"
-        "• *Domingos y Festivos:* Cerrado\n\n"
-        "¿Te gustaría consultar disponibilidad o agendar una cita para algún día en específico? 📅🦷"
+        "Atendemos de *lunes a sábado* de 8:00 AM a 6:00 PM. "
+        "Domingos y festivos estamos cerrados.\n\n"
+        "¿Quieres que miremos disponibilidad para algún día?"
     ),
     "ubicacion": (
-        "📍 *Ubicación de Nexus Odonto:*\n"
-        "Calle 100 # 15-20, Centro Médico Odontológico 🏥\n\n"
-        "🚗 Contamos con excelente ubicación y fácil acceso.\n\n"
-        "¿Deseas conocer más sobre nuestros servicios o agendar una cita con nuestros especialistas? ✨"
+        "Estamos en *Calle 100 # 15-20*, Centro Médico Odontológico.\n\n"
+        "¿Te ayudo a agendar o quieres saber algo más de la clínica?"
     ),
     "contacto": (
-        "📞 *Canales de Contacto - Nexus Odonto:*\n\n"
-        "• 📱 *WhatsApp / Teléfono:* +57 324 6030217\n"
-        "• 📍 *Dirección:* Calle 100 # 15-20, Centro Médico Odontológico\n"
-        "• ⏰ *Horario:* Lunes a Sábado de 8:00 AM a 6:00 PM\n"
-        "• 📧 *Correo:* soporte@nexusodonto.com\n\n"
-        "¡Estamos listos para cuidar de tu sonrisa! ¿En qué más te puedo orientar? 😊"
+        "Puedes escribirnos por aquí o llamar al *+57 324 6030217*.\n"
+        "También estamos en Calle 100 # 15-20 y el correo es soporte@nexusodonto.com "
+        "(lun-sáb 8:00 AM–6:00 PM).\n\n"
+        "¿En qué te puedo orientar?"
     ),
     "agradecimiento": (
-        "¡Con el mayor de los gustos! 😊 En *Nexus Odonto* siempre estamos listos para cuidar de tu salud bucal 🦷✨.\n\n"
-        "Si necesitas algo más, solo escríbeme. ¡Que tengas un excelente día! 👋"
+        "Con mucho gusto. Si necesitas algo más de *Nexus Odonto*, aquí estoy. ¡Que te vaya muy bien!"
     ),
     # Safe booking step-1 only: ask for cédula/nombre. Never invents appointments or assumes IDs.
     "agendar_inicio": (

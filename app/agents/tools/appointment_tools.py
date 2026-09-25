@@ -54,16 +54,16 @@ def _bloque_portal_paciente(es_primera_vez: bool) -> str:
     web_url = _web_portal_url()
     if es_primera_vez:
         return (
-            f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
-            f"🔗 {web_url}\n"
+            f"También puedes ver tu cita en la *plataforma virtual*:\n"
+            f"{web_url}\n"
             f"Tu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
-            f"(acceso temporal inicial). Al entrar, cámbiala por tu seguridad; "
-            f"el bot no puede modificar contraseñas.\n"
+            f"(acceso temporal). Al entrar, cámbiala por tu seguridad; "
+            f"desde aquí no podemos modificar contraseñas.\n"
             f"{_PRIMERA_VEZ_PORTAL_FLAG}"
         )
     return (
-        f"🌐 Puedes consultar tu cita en la *plataforma virtual* (portal del paciente):\n"
-        f"🔗 {web_url}"
+        f"También puedes consultar tu cita en la *plataforma virtual*:\n"
+        f"{web_url}"
     )
 
 
@@ -302,21 +302,17 @@ async def _agendar_cita_impl(
             fecha_str = starts_dt.strftime("%d/%m/%Y")
 
             return (
-                f"¡Cita Confirmada con Éxito! 🎉🦷✨\n\n"
-                f"📋 *Resumen de tu Cita:*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 🆔 *Cédula:* {cedula}\n"
-                f"• 👤 *Paciente:* {nombre_display}\n"
-                f"• 👨‍⚕️ *Especialista:* {prof_nombre_display}\n"
-                f"• 🦷 *Tratamiento:* {serv_nombre_display}\n"
-                f"• 📅 *Fecha:* {fecha_str}\n"
-                f"• ⏰ *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
-                f"• 🆔 *Código de Cita:* `{cita_id}`\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"¡Listo! Quedó *confirmada con éxito* tu cita.\n\n"
+                f"• *Paciente:* {nombre_display}\n"
+                f"• *Cédula:* {cedula}\n"
+                f"• *Especialista:* {prof_nombre_display}\n"
+                f"• *Tratamiento:* {serv_nombre_display}\n"
+                f"• *Fecha:* {fecha_str}\n"
+                f"• *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
+                f"• *Código:* `{cita_id}`\n\n"
                 f"{_bloque_portal_paciente(es_primera_vez)}\n\n"
-                f"📍 *Sede:* Nexus Odonto — Calle 100 # 15-20, Centro Médico Odontológico\n"
-                f"📞 *Atención:* +57 324 6030217\n\n"
-                f"¡Te esperamos en Nexus Odonto! 😊✨"
+                f"Te esperamos en Nexus Odonto (Calle 100 # 15-20). "
+                f"Si necesitas algo, al +57 324 6030217."
             )
         else:
             err_msg = str((respuesta.get("error") if isinstance(respuesta, dict) else "") or "").lower()

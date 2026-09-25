@@ -259,8 +259,7 @@ async def reset_conversation(phone_number: str) -> None:
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     # Human persona: never say "asistente virtual" / bot / sistema on WhatsApp.
     reset_msg = (
-        "¡Hola de nuevo! 👋 Estoy aquí para ayudarte en *Nexus Odonto*. "
-        "¿En qué te puedo colaborar hoy? 😊🦷"
+        "Listo, empezamos de nuevo. Hola, soy de recepción de *Nexus Odonto*. ¿En qué te ayudo?"
     )
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
     asyncio.create_task(

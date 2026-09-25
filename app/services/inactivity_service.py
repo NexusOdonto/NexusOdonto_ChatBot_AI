@@ -26,16 +26,13 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MENSAJE_INACTIVIDAD_CITA_INCOMPLETA = (
-    "Por no haber completado la información requerida, no pudimos continuar "
-    "con el agendamiento de tu cita. 😔🦷\n\n"
-    "Si deseas agendar una nueva cita o consultar algún servicio, solo escríbeme "
-    "y con mucho gusto te ayudaré. ¡Aquí estaré para cuando lo necesites! 😊"
+    "Como no alcanzamos a completar los datos, dejamos el agendamiento por ahora.\n\n"
+    "Cuando quieras retomarlo o consultar algo de la clínica, escríbeme y con gusto te ayudo."
 )
 
 MENSAJE_INACTIVIDAD_GENERAL = (
-    "He cerrado nuestra conversación por inactividad. 🦷\n\n"
-    "Recuerda que aquí estaré cuando desees agendar una cita, consultar nuestros "
-    "servicios o resolver cualquier duda. ¡Solo escríbeme cuando lo necesites! 😊👋"
+    "Te dejo por ahora por si estás ocupado/a.\n\n"
+    "Cuando quieras agendar, consultar un servicio o resolver una duda, aquí estoy."
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
