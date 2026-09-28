@@ -127,6 +127,12 @@ async def receive_whatsapp_message(request: Request):
 
         data = payload.data
 
+        # Grupos, estados, difusiones y canales: la instancia tiene groupsIgnore=false y la
+        # identidad caería al participant, respondiendo en privado a cada miembro.
+        chat_jid = str((data.key.remoteJid if data.key else "") or "").strip().lower()
+        if chat_jid.endswith(("@g.us", "@broadcast", "@newsletter")):
+            return {"status": "ignored", "reason": "group_status_or_broadcast"}
+
         # 1. Mensajes enviados desde el propio dispositivo vinculado (fromMe)
         if data.key and data.key.fromMe:
             msg_id_from_me = getattr(data.key, "id", None) or ""
