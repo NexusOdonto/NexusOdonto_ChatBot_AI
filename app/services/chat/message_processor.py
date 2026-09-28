@@ -153,8 +153,18 @@ async def _notify_staff_outage(numero_paciente: str, reason: str) -> None:
         logger.warning(f"[Processor] No se pudo notificar a recepción la falla de {numero_paciente}: {err}")
 
 
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+
+
+def _to_whatsapp_format(text: str) -> str:
+    """WhatsApp renders *bold* and bare URLs; markdown **bold** / [text](url) show up literally."""
+    text = _MD_BOLD_RE.sub(r"*\1*", text)
+    return _MD_LINK_RE.sub(lambda m: m.group(2) if m.group(1) in m.group(2) else f"{m.group(1)}: {m.group(2)}", text)
+
+
 def _update_booking_context(numero_paciente: str, messages: list, cedula: Optional[str], nombre: Optional[str]) -> None:
-    """Track the service Gemini is booking this turn so the next prompt keeps it."""
+    """Track the service the LLM is booking this turn so the next prompt keeps it."""
     from app.services.booking_flow import clear_pending_service, set_pending_service, sync_session_identity
 
     start = 0
@@ -788,7 +798,7 @@ async def process_whatsapp_message(
         _OUTAGE_NOTICE_SENT_AT.pop(numero_paciente, None)
         # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
         respuesta_texto = _ensure_portal_reminder_after_booking(
-            respuesta_texto, mensajes_resultado, phone=numero_paciente
+            _to_whatsapp_format(respuesta_texto), mensajes_resultado, phone=numero_paciente
         )
         _update_booking_context(numero_paciente, mensajes_resultado, known_cedula, known_nombre)
 

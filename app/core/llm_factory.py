@@ -94,14 +94,14 @@ def get_chat_llm(
     )
 
 
-def get_evaluator_llm(provider: Optional[str] = None) -> BaseChatModel:
+def get_evaluator_llm(provider: Optional[str] = None, max_tokens: int = 32) -> BaseChatModel:
     """Retorna un modelo ligero y rápido para tareas de clasificación, triage y compresión."""
     active_provider = (provider or settings.llm_provider or "openai").lower().strip()
     if active_provider == "gemini":
         target = settings.gemini_model if "flash" in settings.gemini_model else "gemini-3.5-flash-lite"
-        return get_chat_llm(model=target, temperature=0.0, max_tokens=32, provider="gemini")
+        return get_chat_llm(model=target, temperature=0.0, max_tokens=max_tokens, provider="gemini")
     else:
-        return get_chat_llm(model="gpt-4o-mini", temperature=0.0, max_tokens=32, provider="openai")
+        return get_chat_llm(model="gpt-4o-mini", temperature=0.0, max_tokens=max_tokens, provider="openai")
 
 
 def get_embeddings_model(provider: Optional[str] = None) -> Embeddings:

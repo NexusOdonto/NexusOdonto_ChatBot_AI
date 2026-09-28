@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_THRESHOLD: int = 25
 RECENT_MESSAGES_KEEP: int = 6
+# Room for ~120 words; a smaller cap cuts the summary before the patient's name and cédula.
+SUMMARY_MAX_TOKENS: int = 220
 
 
 async def summarize_conversation_node(state: AgentState) -> dict:
@@ -40,7 +42,7 @@ async def summarize_conversation_node(state: AgentState) -> dict:
     previous_summary = state.get("conversation_summary") or ""
     transcript = "\n".join(lines)
 
-    summarizer_llm = get_evaluator_llm()
+    summarizer_llm = get_evaluator_llm(max_tokens=SUMMARY_MAX_TOKENS)
 
     sys_prompt = (
         "Eres un asistente que genera resúmenes concisos de conversaciones de WhatsApp "

@@ -132,6 +132,7 @@ _MAX_AI_MSG_CHARS = 1200
 # Chat replies on WhatsApp stay short; lower caps cut decode time and output tokens.
 _CHAT_MAX_OUTPUT_TOKENS = 400
 _CHAT_TEMPERATURE = 0.4
+_MAX_TOOL_RESULTS_PER_TURN = 4
 
 _ALL_TOOLS = (
     clinical_knowledge_tool,
@@ -160,6 +161,56 @@ def _same_day_request(last_user_msg: str, now: datetime) -> tuple[datetime, bool
     return req, req < now + timedelta(minutes=15)
 
 
+_CLINICAL_KEYWORDS = (
+    "dolor", "duele", "brackets", "ortodoncia", "extraccion", "extracción", "cuidado",
+    "recomienda", "que comer", "qué comer", "preparacion", "preparación", "sensibilidad",
+    "sangra", "encia", "encía", "caries",
+)
+_WEEKDAY_WORDS = {
+    "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2, "jueves": 3,
+    "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6,
+}
+
+
+def _is_clinical_question(norm: str) -> bool:
+    return any(k in norm for k in _CLINICAL_KEYWORDS) and not any(
+        k in norm for k in ("cita", "agendar", "cancelar", "modificar", "reprogramar")
+    )
+
+
+def _requested_date(last_user_msg: str, now: datetime) -> tuple[str, datetime] | None:
+    """('sábado', date) when the patient names a weekday or 'mañana'; weekdays mean the next one ahead."""
+    norm = (last_user_msg or "").lower()
+    if "pasado mañana" in norm or "pasado manana" in norm:
+        return "pasado mañana", now + timedelta(days=2)
+    if re.search(r"\bma(ñ|n)ana\b", norm) and not re.search(r"\b(en|por|de) la ma(ñ|n)ana\b", norm):
+        return "mañana", now + timedelta(days=1)
+    for word, weekday in _WEEKDAY_WORDS.items():
+        if re.search(rf"\b{word}\b", norm):
+            ahead = (weekday - now.weekday()) % 7 or 7
+            return word, now + timedelta(days=ahead)
+    return None
+
+
+def _cedula_from_summaries(raw_msgs: list) -> str | None:
+    for msg in reversed(raw_msgs):
+        if isinstance(msg, SystemMessage):
+            m = re.search(r"\b(\d{7,12})\b", str(msg.content or ""))
+            if m:
+                return m.group(1)
+    return None
+
+
+def _tool_results_this_turn(raw_msgs: list) -> int:
+    count = 0
+    for msg in reversed(raw_msgs):
+        if isinstance(msg, HumanMessage):
+            break
+        if isinstance(msg, ToolMessage):
+            count += 1
+    return count
+
+
 def _select_tools(
     last_user_msg: str,
     prev_ai_msg: str,
@@ -180,6 +231,10 @@ def _select_tools(
     ):
         return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
 
+    # Clinical Q&A without booking language
+    if _is_clinical_question(norm):
+        return (clinical_knowledge_tool, consultar_servicios_y_precios_tool)
+
     if any(k in norm for k in ("servicio", "servicios", "tratamiento", "tratamientos", "limpieza", "profilaxis", "blanqueamiento")) and not any(
         k in norm for k in ("cita", "agendar", "disponib")
     ):
@@ -188,29 +243,23 @@ def _select_tools(
     if any(k in norm for k in ("doctor", "doctora", "odontologo", "especialista", "especialistas")):
         return (consultar_doctores_tool, consultar_servicios_y_precios_tool)
 
-    # Clinical Q&A without booking language
-    if any(k in norm for k in ("dolor", "duele", "brackets", "ortodoncia", "extraccion", "cuidado", "recomienda", "que comer", "preparacion")) and not any(
-        k in norm for k in ("cita", "agendar", "cancelar", "modificar")
-    ):
-        return (clinical_knowledge_tool, consultar_servicios_y_precios_tool)
-
     # Booking start without cédula: no tools (text-only)
     if any(k in norm for k in ("quiero una cita", "quiero agendar", "necesito una cita", "agendar cita")) and not cedula:
         return tuple()
 
-    # Identity just provided (cédula + name) mid-booking: allow services catalog only
-    if re.search(r"\b\d{7,12}\b", norm) and any(
-        k in prev for k in ("cédula", "cedula", "nombre completo", "agendar")
-    ):
-        return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
-
-    # Reschedule / cancel paths
+    # Reschedule / cancel paths (before the identity rule: a cédula sent to cancel is not a new booking)
     if any(k in norm for k in ("reprogramar", "modificar")) or any(k in prev for k in ("reprogramar", "modificar")):
         return (modificar_cita_tool, consultar_disponibilidad_tool, consultar_servicios_y_precios_tool)
     if "cancelar" in norm or "cancelar" in prev:
         return (cancelar_cita_tool,)
     if "confirmar" in norm:
         return (confirmar_cita_tool,)
+
+    # Identity just provided (cédula + name) mid-booking: allow services catalog only
+    if re.search(r"\b\d{7,12}\b", norm) and any(
+        k in prev for k in ("cédula", "cedula", "nombre completo", "agendar")
+    ):
+        return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
 
     # Mid-booking / availability
     if any(k in norm for k in ("cita", "agendar", "disponib", "horario", "turno")) or cedula:
@@ -228,13 +277,15 @@ def _select_tools(
     return _ALL_TOOLS
 
 
-@lru_cache(maxsize=16)
-def _bound_llm_for_tools(tool_names: tuple[str, ...]):
+@lru_cache(maxsize=32)
+def _bound_llm_for_tools(tool_names: tuple[str, ...], tool_choice: str | None = None):
     name_to_tool = {t.name: t for t in _ALL_TOOLS}
     tools = [name_to_tool[n] for n in tool_names if n in name_to_tool]
     primary_llm = get_chat_llm(temperature=_CHAT_TEMPERATURE, max_tokens=_CHAT_MAX_OUTPUT_TOKENS)
     if not tools:
         return primary_llm
+    if tool_choice:
+        return primary_llm.bind_tools(tools, tool_choice=tool_choice)
     return primary_llm.bind_tools(tools)
 
 
@@ -446,8 +497,11 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         cedula_detectada = str(uc.get("cedula")).strip() or None
     if not nombre_detectado and uc.get("nombre"):
         nombre_detectado = str(uc.get("nombre")).strip() or None
+    if not cedula_detectada:
+        cedula_detectada = _cedula_from_summaries(raw_msgs)
 
     same_day = _same_day_request(last_user_msg, now) if last_user_msg else None
+    tool_results = _tool_results_this_turn(raw_msgs)
 
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
@@ -470,7 +524,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         elif any(w in norm_user for w in ["cancelar", "anular"]) and "cita" in norm_user and cedula_detectada:
             context_str += (
                 f"\n[ACCIÓN] Cancelar con cédula {cedula_detectada} → "
-                f"cancelar_cita_tool(cedula='{cedula_detectada}') YA."
+                f"cancelar_cita_tool(cedula='{cedula_detectada}') YA. No pidas la cédula otra vez."
+            )
+        elif turn_id.cedula and any(w in prev_ai_msg for w in ["cancelar", "anular"]):
+            context_str += (
+                f"\n[ACCIÓN] Cédula {turn_id.cedula} para CANCELAR → "
+                f"cancelar_cita_tool(cedula='{turn_id.cedula}') YA. No es un agendamiento nuevo."
             )
         elif prev_asked_for_booking_identity(prev_ai_msg) and turn_id.cedula:
             # Bug B: after collecting identity for agendar, continue — never welcome menu.
@@ -497,6 +556,20 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             context_str += (
                 "\n[ACCIÓN] Inicio de agendamiento sin cédula: responde en texto pidiendo "
                 "número de cédula y nombre completo. PROHIBIDO invocar herramientas en este turno."
+            )
+
+        requested = _requested_date(last_user_msg, now) if not same_day else None
+        if requested:
+            word, day = requested
+            context_str += (
+                f"\n[FECHA PEDIDA] «{word}» = {dias_semana[day.weekday()]} {day.strftime('%Y-%m-%d')}. "
+                "Usa EXACTAMENTE esa fecha en consultar_disponibilidad_tool y en agendar_cita_tool; "
+                "no reutilices fechas de mensajes anteriores."
+            )
+        if _is_clinical_question(norm_user) and not tool_results:
+            context_str += (
+                "\n[ACCIÓN] Pregunta clínica: consulta clinical_knowledge_tool antes de responder "
+                "y basa tu respuesta en lo que devuelva."
             )
 
     off_topic = bool(last_user_msg) and detect_off_topic_non_dental(last_user_msg)
@@ -531,6 +604,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         llm, tool_names = _bound_llm_for_tools(()), ()
     else:
         llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
+        if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
+            # Stops tool loops (same lookup repeated) — answer with the data already gathered.
+            llm = _bound_llm_for_tools(tool_names, tool_choice="none")
     t_llm = time.perf_counter()
     try:
         response = await with_llm_slot(
