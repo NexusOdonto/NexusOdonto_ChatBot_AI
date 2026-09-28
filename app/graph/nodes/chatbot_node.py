@@ -100,7 +100,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "PROHIBIDO consultar_cita_por_cedula_tool; confirma cédula y pide nombre si falta, luego servicio/horario.\n"
         "Protocolo: (1) cédula+nombre+servicio+horario vía disponibilidad "
         "(2) resume la propuesta de cita de forma clara (sin encabezados de bot) "
-        "(3) solo si confirma ('sí'/'confirmo'), llama agendar_cita_tool.\n"
+        "(3) solo si confirma ('sí'/'confirmo'), llama agendar_cita_tool. "
+        "PROHIBIDO agendar un día/hora que el paciente no eligió explícitamente.\n"
         "TRAS AGENDAR / REPROGRAMAR / CANCELAR CON ÉXITO, o al LISTAR citas del paciente "
         "(consultar_cita_por_cedula_tool con citas): incluye un recordatorio breve de la "
         "plataforma virtual / portal del paciente con URL "
@@ -226,6 +227,8 @@ def _cedula_from_summaries(raw_msgs: list) -> str | None:
                 return m.group(1)
     return None
 
+
+_BOOKING_WORDS = ("cita", "turno", "horario", "disponib", "agend", "a las", "hay", "puedo ir", "sirve")
 
 _UNBACKED_CONFIRMATION_NUDGE = (
     "[SISTEMA] Tu respuesta afirma que la cita quedó agendada/reprogramada/cancelada, pero en este turno "
@@ -566,6 +569,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 
     same_day = _same_day_request(last_user_msg, now) if last_user_msg else None
     tool_results = _tool_results_this_turn(raw_msgs)
+    requested = None
 
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
@@ -595,7 +599,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 f"\n[ACCIÓN] Cédula {turn_id.cedula} para CANCELAR → "
                 f"cancelar_cita_tool(cedula='{turn_id.cedula}') YA. No es un agendamiento nuevo."
             )
-        elif prev_asked_for_booking_identity(prev_ai_msg) and turn_id.cedula:
+        elif turn_id.cedula and (prev_asked_for_booking_identity(prev_ai_msg) or uc.get("booking_flow")):
             # Bug B: after collecting identity for agendar, continue — never welcome menu.
             nombre_txt = turn_id.nombre or nombre_detectado or ""
             context_str += (
@@ -675,6 +679,16 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
             # Stops tool loops (same lookup repeated) — answer with the data already gathered.
             llm = _bound_llm_for_tools(tool_names, tool_choice="none")
+        elif (
+            requested
+            and not is_gemini
+            and tool_results == 0
+            and consultar_disponibilidad_tool.name in tool_names
+            and (booking_flow or any(k in last_user_msg.lower() for k in _BOOKING_WORDS))
+        ):
+            # The patient named a day: answer from a fresh lookup of that date, never from memory
+            # of earlier suggestions (that is how a free 9:00 AM was reported as taken).
+            llm = _bound_llm_for_tools(tool_names, tool_choice=consultar_disponibilidad_tool.name)
     t_llm = time.perf_counter()
     try:
         response = await with_llm_slot(

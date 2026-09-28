@@ -264,7 +264,7 @@ def _hoy_bogota() -> datetime:
 
 
 def _rangos_slots(slots: List[str]) -> str:
-    """['08:00','08:30','09:00','14:00'] → '8:00–9:00 AM, 2:00 PM' (consecutive 30-min starts merged)."""
+    """['08:00','08:30','09:00','14:00'] → 'de 8:00 a 9:00 AM, 2:00 PM' (consecutive 30-min starts merged)."""
     mins = sorted({int(s[:2]) * 60 + int(s[3:5]) for s in slots})
     grupos: List[List[int]] = []
     for m in mins:
@@ -281,7 +281,7 @@ def _rangos_slots(slots: List[str]) -> str:
         fin = hora_corta(f"{g[-1] // 60:02d}:{g[-1] % 60:02d}")
         if ini[-2:] == fin[-2:]:
             ini = ini[:-3]
-        partes.append(f"{ini}–{fin}")
+        partes.append(f"de {ini} a {fin}")
     return ", ".join(partes)
 
 
@@ -303,15 +303,17 @@ def _sugerencias(dias: List[tuple], maximo: int = 4) -> List[str]:
             if mejor:
                 candidatos.append((dia, *mejor))
         por_dia.append(candidatos)
-    out: List[str] = []
+    elegidas: List[tuple] = []
     ronda = 0
-    while len(out) < maximo and any(len(c) > ronda for c in por_dia):
+    while len(elegidas) < maximo and any(len(c) > ronda for c in por_dia):
         for candidatos in por_dia:
-            if ronda < len(candidatos) and len(out) < maximo:
-                dia, s, nombre = candidatos[ronda]
-                out.append(f"{fecha_legible(dia, con_anio=False)} a las {hora_corta(s)} con {nombre}")
+            if ronda < len(candidatos) and len(elegidas) < maximo:
+                elegidas.append(candidatos[ronda])
         ronda += 1
-    return out
+    return [
+        f"{fecha_legible(dia, con_anio=False)} a las {hora_corta(s)} con {nombre}"
+        for dia, s, nombre in sorted(elegidas, key=lambda x: (x[0], x[1]))
+    ]
 
 
 async def _dias_con_turnos(
@@ -348,8 +350,8 @@ async def _dias_con_turnos(
 _INSTRUCCION_OPCIONES = (
     "[CÓMO RESPONDER] Ofrece 2-4 opciones (las sugeridas u otras de la lista, mezclando días y horas) "
     "nombrando el día de la semana EXACTAMENTE como aparece aquí, y pregunta cuál prefiere. "
-    "No enumeres todos los turnos salvo que lo pida. Las horas son inicios de cita: una hora fuera "
-    "de estos rangos NO está libre."
+    "No enumeres todos los turnos salvo que lo pida. Los rangos son inicios de cita cada 30 min "
+    "(«de 8:00 a 10:00 AM» incluye 8:00, 8:30, 9:00, 9:30 y 10:00); una hora fuera de ellos NO está libre."
 )
 
 
