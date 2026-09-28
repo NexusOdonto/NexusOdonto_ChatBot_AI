@@ -87,7 +87,7 @@ SYSTEM_MESSAGE = SystemMessage(
         "6. modificar_cita_tool(cedula, nueva_fecha_hora opcional) — reprogramar\n"
         "7. cancelar_cita_tool(cedula, cita_id opcional)\n"
         "8. confirmar_cita_tool(cedula)\n"
-        "9. clinical_knowledge_tool — dudas clínicas (sin mezclar con agenda)\n\n"
+        "9. buscar_conocimiento_clinico — dudas clínicas (sin mezclar con agenda)\n\n"
         "AGENDAR — primera respuesta si pide cita y falta cédula: "
         "pide cédula y nombre completo en tono natural (sin menú ni checklist robótico). "
         "NO invoques herramientas todavía.\n"
@@ -655,8 +655,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             word, day = requested
             context_str += (
                 f"\n[FECHA PEDIDA] «{word}» = {dias_semana[day.weekday()]} {day.strftime('%Y-%m-%d')}. "
-                "Usa EXACTAMENTE esa fecha en consultar_disponibilidad_tool y en agendar_cita_tool; "
-                "no reutilices fechas de mensajes anteriores."
+                "Llama consultar_disponibilidad_tool con EXACTAMENTE esa fecha antes de responder y "
+                "no digas que un horario está libre sin verlo en su resultado; usa esa misma fecha en "
+                "agendar_cita_tool. No reutilices fechas de mensajes anteriores."
             )
         hora_pedida = _hora_pedida(last_user_msg) if requested else None
         if hora_pedida:
@@ -666,7 +667,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             )
         if _is_clinical_question(norm_user) and not tool_results:
             context_str += (
-                "\n[ACCIÓN] Pregunta clínica: consulta clinical_knowledge_tool antes de responder "
+                f"\n[ACCIÓN] Pregunta clínica: consulta {clinical_knowledge_tool.name} antes de responder "
                 "y basa tu respuesta en lo que devuelva."
             )
 

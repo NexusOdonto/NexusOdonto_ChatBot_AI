@@ -167,3 +167,19 @@ def initialize_qdrant() -> None:
 		poblar_conocimiento_clinico()
 	except Exception as exc:
 		logger.warning(f"No se pudo poblar la base de conocimiento clinico automaticamente: {exc}")
+
+	import threading
+	threading.Thread(target=_warm_up_retrieval, name="rag-warmup", daemon=True).start()
+
+
+def _warm_up_retrieval() -> None:
+	# Loading the reranker takes ~25s after each deploy; doing it on the first patient question
+	# would blow the per-turn LLM budget and send the outage notice.
+	import time
+	t0 = time.perf_counter()
+	try:
+		get_reranker()
+		retrieve_clinical_knowledge("cuidados después de una limpieza dental")
+		logger.info(f"[Qdrant] Recuperación clínica precargada en {time.perf_counter() - t0:.1f}s")
+	except Exception as exc:
+		logger.warning(f"[Qdrant] No se pudo precargar la recuperación clínica: {exc}")
