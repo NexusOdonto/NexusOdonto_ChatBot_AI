@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from app.core.llm_factory import get_chat_llm
 from app.core.config import settings
-from app.core.llm_concurrency import with_llm_slot
+from app.core.llm_concurrency import GraphDeadlineExceeded, LLMCallTimeoutError, with_llm_slot
 from app.graph.state import AgentState
 
 from app.agents.tools.clinical_rag_tool import clinical_knowledge_tool
@@ -161,8 +161,8 @@ def _select_tools(
     prev = (prev_ai_msg or "").lower()
 
     if same_day and not cedula:
-        # Past hour: may look up today's real slots if the service is known; valid hour: ask identity only.
-        return (consultar_disponibilidad_tool,) if same_day[1] else tuple()
+        # Identity step first: the hint already carries today's remaining hours, no lookup needed.
+        return tuple()
 
     # Pure price / catalog questions
     if any(k in norm for k in ("precio", "precios", "vale", "cuesta", "cuanto", "tarif")) and not any(
@@ -301,9 +301,13 @@ def _same_day_hint(same_day: tuple[datetime, bool], now: datetime, cedula_conoci
             return (
                 f"\n[ACCIÓN] Pidió hoy a las {hora_req}, pero esa hora ya pasó (son las "
                 f"{_formatear_hora_ampm(now.strftime('%H:%M'))}). Díselo con naturalidad, sin tono de error, "
-                f"y ofrécele lo que queda de hoy: atendemos {restantes}. Si ya sabes el tratamiento, usa "
-                "consultar_disponibilidad_tool con la fecha de HOY para darle turnos exactos; si no, pregunta "
-                f"qué hora de esas le sirve.{pedir_id}"
+                f"y ofrécele lo que queda de hoy: atendemos {restantes}."
+                + (
+                    f"{pedir_id} Los turnos exactos se confirman cuando tengamos esos datos."
+                    if pedir_id
+                    else " Si ya sabes el tratamiento, usa consultar_disponibilidad_tool con la fecha de HOY "
+                    "para darle turnos exactos."
+                )
             )
         return (
             f"\n[ACCIÓN] Pidió hoy a las {hora_req}, pero por hoy ya cerramos la jornada. Díselo con "
@@ -441,10 +445,18 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     prompt_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
     llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
     t_llm = time.perf_counter()
-    response = await with_llm_slot(
-        llm.ainvoke(messages),
-        label="chatbot_ainvoke",
-    )
+    try:
+        response = await with_llm_slot(
+            llm.ainvoke(messages),
+            label="chatbot_ainvoke",
+        )
+    except (LLMCallTimeoutError, GraphDeadlineExceeded):
+        raise
+    except Exception as llm_err:
+        # A rejected tool schema / call must not surface as a service outage; answer text-only.
+        logger.warning(f"[Chatbot] LLM call failed with tools={list(tool_names)} ({llm_err!r}); retrying without tools")
+        llm = _bound_llm_for_tools(())
+        response = await with_llm_slot(llm.ainvoke(messages), label="chatbot_ainvoke_notools")
     if not str(response.content or "").strip() and not getattr(response, "tool_calls", None):
         logger.warning("[Chatbot] Empty LLM reply; retrying once")
         response = await with_llm_slot(llm.ainvoke(messages), label="chatbot_ainvoke_retry")

@@ -305,7 +305,7 @@ class FastGeminiChat(BaseChatModel):
         raise last_exc
 
 
-_TRANSIENT_STATUS = {404, 429, 500, 502, 503, 504}
+_TRANSIENT_STATUS = {400, 403, 404, 429, 500, 502, 503, 504}
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -316,5 +316,8 @@ def _is_transient(exc: Exception) -> bool:
 
 def _describe(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
-        return f"HTTP {exc.response.status_code}"
+        code = exc.response.status_code
+        if code in (400, 403):
+            return f"HTTP {code} body={exc.response.text[:300]}"
+        return f"HTTP {code}"
     return type(exc).__name__
