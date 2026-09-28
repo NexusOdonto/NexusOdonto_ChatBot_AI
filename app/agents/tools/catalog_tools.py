@@ -23,6 +23,10 @@ from app.agents.tools.agenda_helpers import (
     _mensaje_catalogo_no_encontrado,
     _mensaje_especialidad_sin_servicio_unico,
     DESCRIPCIONES_SERVICIO_ES,
+    fecha_legible,
+    formatear_precio_cop,
+    hora_corta,
+    motivo_dia_cerrado,
 )
 
 logger = logging.getLogger(__name__)
@@ -251,7 +255,113 @@ async def turnos_disponibles(servicio: Dict[str, Any], fecha: str) -> List[tuple
     return [(pid, nombre, slots) for pid, nombre, slots in turnos if slots]
 
 
-async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
+def _hoy_bogota() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Bogota")).replace(tzinfo=None)
+    except Exception:
+        return datetime.now()
+
+
+def _rangos_slots(slots: List[str]) -> str:
+    """['08:00','08:30','09:00','14:00'] → '8:00–9:00 AM, 2:00 PM' (consecutive 30-min starts merged)."""
+    mins = sorted({int(s[:2]) * 60 + int(s[3:5]) for s in slots})
+    grupos: List[List[int]] = []
+    for m in mins:
+        if grupos and m - grupos[-1][-1] == 30:
+            grupos[-1].append(m)
+        else:
+            grupos.append([m])
+    partes = []
+    for g in grupos:
+        ini = hora_corta(f"{g[0] // 60:02d}:{g[0] % 60:02d}")
+        if len(g) == 1:
+            partes.append(ini)
+            continue
+        fin = hora_corta(f"{g[-1] // 60:02d}:{g[-1] % 60:02d}")
+        if ini[-2:] == fin[-2:]:
+            ini = ini[:-3]
+        partes.append(f"{ini}–{fin}")
+    return ", ".join(partes)
+
+
+def _bloque_dia(dia: datetime, turnos: List[tuple]) -> str:
+    detalle = "; ".join(f"{nombre} {_rangos_slots(slots)}" for nombre, slots in turnos)
+    return f"• {fecha_legible(dia)} ({dia.strftime('%Y-%m-%d')}): {detalle}"
+
+
+def _sugerencias(dias: List[tuple], maximo: int = 4) -> List[str]:
+    """Up to `maximo` options mixing days and morning/afternoon, earliest first."""
+    por_dia = []
+    for dia, turnos in dias:
+        candidatos = []
+        for franja in (lambda s: s < "12:00", lambda s: s >= "14:00"):
+            mejor = min(
+                ((s, n) for n, slots in turnos for s in slots if franja(s)),
+                default=None,
+            )
+            if mejor:
+                candidatos.append((dia, *mejor))
+        por_dia.append(candidatos)
+    out: List[str] = []
+    ronda = 0
+    while len(out) < maximo and any(len(c) > ronda for c in por_dia):
+        for candidatos in por_dia:
+            if ronda < len(candidatos) and len(out) < maximo:
+                dia, s, nombre = candidatos[ronda]
+                out.append(f"{fecha_legible(dia, con_anio=False)} a las {hora_corta(s)} con {nombre}")
+        ronda += 1
+    return out
+
+
+async def _dias_con_turnos(
+    profesionales: List[Dict[str, Any]],
+    servicio_id: Any,
+    duracion: int,
+    cerca_de: datetime,
+    max_dias: int = 3,
+    horizonte: int = 14,
+) -> List[tuple]:
+    """Open days with free slots closest to `cerca_de` (never before today): [(day, [(doctor, slots)])]."""
+    hoy = _hoy_bogota().replace(hour=0, minute=0, second=0, microsecond=0)
+    objetivo = max(cerca_de.replace(hour=0, minute=0, second=0, microsecond=0), hoy)
+    candidatos = [objetivo + timedelta(days=i) for i in range(-3, horizonte + 1)]
+    candidatos = [d for d in candidatos if d >= hoy and not motivo_dia_cerrado(d)]
+    candidatos.sort(key=lambda d: (abs((d - objetivo).days), d))
+
+    encontrados: List[tuple] = []
+    for i in range(0, len(candidatos), 4):
+        lote = candidatos[i : i + 4]
+        resultados = await asyncio.gather(
+            *(_turnos_por_profesional(profesionales, d.strftime("%Y-%m-%d"), servicio_id, duracion) for d in lote)
+        )
+        for dia, turnos in zip(lote, resultados):
+            libres = [(nombre, slots) for _pid, nombre, slots in turnos if slots]
+            if libres:
+                encontrados.append((dia, libres))
+        if len(encontrados) >= max_dias:
+            break
+    encontrados.sort(key=lambda x: (abs((x[0] - objetivo).days), x[0]))
+    return sorted(encontrados[:max_dias], key=lambda x: x[0])
+
+
+_INSTRUCCION_OPCIONES = (
+    "[CÓMO RESPONDER] Ofrece 2-4 opciones (las sugeridas u otras de la lista, mezclando días y horas) "
+    "nombrando el día de la semana EXACTAMENTE como aparece aquí, y pregunta cuál prefiere. "
+    "No enumeres todos los turnos salvo que lo pida. Las horas son inicios de cita: una hora fuera "
+    "de estos rangos NO está libre."
+)
+
+
+def _texto_opciones(dias: List[tuple]) -> str:
+    sugeridas = _sugerencias(dias)
+    return (
+        "\n".join(_bloque_dia(d, t) for d, t in dias)
+        + ("\nSugeridas: " + " | ".join(sugeridas) if sugeridas else "")
+    )
+
+
+async def _consultar_disponibilidad_impl(especialidad: str, fecha: Optional[str] = None) -> str:
     """Consulta la disponibilidad real de turnos evitando recesos de almuerzo (12:00 a 14:00) y traslapes."""
     try:
         norm_query = _normalizar_texto(especialidad)
@@ -328,26 +438,51 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
         else:
             return _mensaje_catalogo_no_encontrado(especialidad, servicios)
 
-        resultados = []
-        for _prof_id, prof_nombre, slots in await _turnos_por_profesional(
-            profesionales, fecha, servicio_id, duracion_servicio
-        ):
-            if slots is None:
-                resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin horarios registrados.")
-            elif slots:
-                bloque_horarios = "   ⏰ " + ", ".join(_formatear_hora_ampm(s) for s in slots)
-                resultados.append(f"👨‍⚕️ *{prof_nombre}*:\n{bloque_horarios}")
-            else:
-                resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin turnos disponibles para esta fecha.")
+        precio = _obtener_valor(servicio_encontrado, "price", "precio")
+        cabecera = f"Servicio: {servicio_nombre} ({duracion_servicio} min"
+        cabecera += f", {formatear_precio_cop(precio)})" if precio not in (None, "") else ")"
+        hoy = _hoy_bogota()
 
-        if not resultados:
-            return f"No se encontraron espacios disponibles para *{servicio_nombre}* en la fecha `{fecha}`. ¿Deseas consultar otro día? 😊"
+        dia = None
+        if fecha and str(fecha).strip().lower() not in ("none", "null", ""):
+            try:
+                dia = datetime.strptime(str(fecha).strip()[:10], "%Y-%m-%d")
+            except ValueError:
+                dia = None
+        if dia and dia.date() < hoy.date():
+            dia = None
 
+        if dia is None:
+            dias = await _dias_con_turnos(profesionales, servicio_id, duracion_servicio, hoy)
+            if not dias:
+                return f"{cabecera}\nNo hay turnos libres en los próximos 14 días. Sugiere llamar al +57 324 6030217."
+            return (
+                f"{cabecera}\nHoy es {fecha_legible(hoy)}. Próximos días con turnos libres:\n"
+                f"{_texto_opciones(dias)}\n{_INSTRUCCION_OPCIONES}"
+            )
+
+        cerrado = motivo_dia_cerrado(dia)
+        if cerrado:
+            dias = await _dias_con_turnos(profesionales, servicio_id, duracion_servicio, dia)
+            return (
+                f"{cabecera}\n[DÍA CERRADO] {cerrado} Dilo así, con naturalidad (no digas que no hay turnos "
+                "con los odontólogos), y ofrece los días más cercanos:\n"
+                f"{_texto_opciones(dias)}\n{_INSTRUCCION_OPCIONES}"
+            )
+
+        turnos = await _turnos_por_profesional(profesionales, dia.strftime("%Y-%m-%d"), servicio_id, duracion_servicio)
+        libres = [(nombre, slots) for _pid, nombre, slots in turnos if slots]
+        if libres:
+            return (
+                f"{cabecera}\nTurnos libres el {fecha_legible(dia)}:\n"
+                f"{_texto_opciones([(dia, libres)])}\n{_INSTRUCCION_OPCIONES}"
+            )
+
+        dias = await _dias_con_turnos(profesionales, servicio_id, duracion_servicio, dia)
         return (
-            f"📅 *Horarios Disponibles para {servicio_nombre}* ✨\n"
-            f"🗓️ *Fecha:* {fecha}\n\n"
-            + "\n\n".join(resultados)
-            + "\n\n💬 *¿Cuál de estos horarios te queda más cómodo para apartar tu cita?* 😊"
+            f"{cabecera}\n[SIN CUPOS] El {fecha_legible(dia)} ya no quedan turnos para este servicio. "
+            "Días más cercanos con turnos:\n"
+            f"{_texto_opciones(dias)}\n{_INSTRUCCION_OPCIONES}"
         )
     except Exception as exc:
         logger.error(f"Error al consultar disponibilidad: {exc}", exc_info=True)
@@ -439,11 +574,7 @@ async def _consultar_servicios_impl() -> str:
 
             partes = []
             if precio is not None and str(precio).strip() != "":
-                try:
-                    precio_num = float(precio)
-                    partes.append(f"${precio_num:,.0f} COP")
-                except (TypeError, ValueError):
-                    partes.append(f"${precio} COP")
+                partes.append(formatear_precio_cop(precio))
             if duracion:
                 partes.append(f"{duracion} min")
 
@@ -458,7 +589,9 @@ async def _consultar_servicios_impl() -> str:
             "NUNCA hagas un volcado copiado de toda la lista de servicios con todas las duraciones y precios a la vez. "
             "Si preguntó de forma general qué servicios tienen, salúdalo con calidez por su nombre, resume en 3 o 4 viñetas limpias las categorías principales (limpieza/profilaxis, resinas/calzas estéticas, blanqueamiento, valoración general) "
             "y pregúntale amablemente si presenta alguna molestia o qué procedimiento en particular le interesa. "
-            "Si el paciente preguntó por un servicio puntual, dale directamente su valor y detalles amables.]"
+            "Si el paciente preguntó por un servicio puntual, dale directamente su valor y detalles amables. "
+            "Escribe los precios tal cual aparecen aquí (ej. $960.000, sin 'COP'). "
+            "Al dar precios NO pidas cédula ni nombre: pregunta si quiere agendar o qué día le sirve.]"
         )
     except Exception as exc:
         logger.error(f"Error al consultar servicios: {exc}", exc_info=True)
@@ -468,9 +601,14 @@ async def _consultar_servicios_impl() -> str:
 # ─── Herramientas LangChain (async nativas — ToolNode.ainvoke sin _run_sync/t.join) ─
 
 @tool
-async def consultar_disponibilidad_tool(especialidad: str, fecha: str) -> str:
+async def consultar_disponibilidad_tool(especialidad: str, fecha: Optional[str] = None) -> str:
     """
-    Consulta los horarios disponibles para un servicio odontológico (o especialidad) en una fecha (YYYY-MM-DD).
+    Consulta los horarios disponibles para un servicio odontológico (o especialidad).
+    - fecha (YYYY-MM-DD): el día que pidió el paciente. Si el día está cerrado (domingo/festivo)
+      o lleno, devuelve el motivo y los días más cercanos con turnos.
+    - Sin fecha: cuando pregunta qué días hay o no ha dicho día; devuelve los próximos días con
+      turnos empezando desde hoy.
+    Cada fecha del resultado trae su día de la semana correcto: úsalo tal cual.
     IMPORTANTE: Usa SOLO nombres de servicios activos del catálogo (consultar_servicios_y_precios_tool).
     No inventes ni ofrezcas ejemplos de tratamientos que no hayan salido de esa herramienta.
     Si el paciente nombra una especialidad (p. ej. ortodoncia), esta herramienta listará los servicios activos relacionados.

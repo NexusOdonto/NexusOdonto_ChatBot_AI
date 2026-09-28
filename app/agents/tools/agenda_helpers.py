@@ -652,6 +652,83 @@ def _generar_slots_desde_regla(
         return [str(start_time_str)[:5]]
 
 
+DIAS_SEMANA_ES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+MESES_ES = (
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+)
+
+
+def fecha_legible(d: Any, con_anio: bool = True) -> str:
+    """'jueves 1 de octubre de 2026' — weekday computed here so the LLM never has to."""
+    if isinstance(d, str):
+        d = datetime.strptime(d[:10], "%Y-%m-%d")
+    texto = f"{DIAS_SEMANA_ES[d.weekday()]} {d.day} de {MESES_ES[d.month - 1]}"
+    return f"{texto} de {d.year}" if con_anio else texto
+
+
+def hora_corta(hhmm: str) -> str:
+    """'09:00' → '9:00 AM'."""
+    return _formatear_hora_ampm(hhmm).lstrip("0")
+
+
+def formatear_precio_cop(valor: Any) -> str:
+    """960000 → '$960.000' (Colombian thousands separator)."""
+    try:
+        return "$" + f"{float(valor):,.0f}".replace(",", ".")
+    except (TypeError, ValueError):
+        return f"${valor}"
+
+
+def _domingo_pascua(anio: int):
+    a, b, c = anio % 19, anio // 100, anio % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return datetime(anio, mes, dia).date()
+
+
+def _lunes_siguiente(d):
+    return d + timedelta(days=(7 - d.weekday()) % 7)
+
+
+def festivos_colombia(anio: int) -> Dict[Any, str]:
+    """Colombian public holidays (Ley 51 de 1983 moves most of them to Monday)."""
+    fijos = {(1, 1): "Año Nuevo", (5, 1): "Día del Trabajo", (7, 20): "Día de la Independencia",
+             (8, 7): "Batalla de Boyacá", (12, 8): "Inmaculada Concepción", (12, 25): "Navidad"}
+    trasladables = {(1, 6): "Reyes Magos", (3, 19): "San José", (6, 29): "San Pedro y San Pablo",
+                    (8, 15): "Asunción de la Virgen", (10, 12): "Día de la Raza",
+                    (11, 1): "Todos los Santos", (11, 11): "Independencia de Cartagena"}
+    out = {datetime(anio, m, d).date(): n for (m, d), n in fijos.items()}
+    for (m, d), n in trasladables.items():
+        out[_lunes_siguiente(datetime(anio, m, d).date())] = n
+    pascua = _domingo_pascua(anio)
+    out[pascua - timedelta(days=3)] = "Jueves Santo"
+    out[pascua - timedelta(days=2)] = "Viernes Santo"
+    out[pascua + timedelta(days=43)] = "Ascensión del Señor"
+    out[pascua + timedelta(days=64)] = "Corpus Christi"
+    out[pascua + timedelta(days=71)] = "Sagrado Corazón"
+    return out
+
+
+def motivo_dia_cerrado(d: Any) -> Optional[str]:
+    """Why the clinic is closed that day (Sunday or Colombian holiday), or None if it opens."""
+    if isinstance(d, str):
+        d = datetime.strptime(d[:10], "%Y-%m-%d")
+    if d.weekday() == 6:
+        return f"El {fecha_legible(d)} la clínica no atiende: domingos y festivos está cerrada."
+    festivo = festivos_colombia(d.year).get(d.date() if isinstance(d, datetime) else d)
+    if festivo:
+        return f"El {fecha_legible(d)} es festivo ({festivo}): la clínica no atiende domingos ni festivos."
+    return None
+
+
 def _formatear_hora_ampm(hora_str: str) -> str:
     """Convierte 24h a 12h AM/PM."""
     if not hora_str:
@@ -712,7 +789,7 @@ def franjas_restantes_hoy(now: datetime, margen_min: int = 30) -> str:
     Vacío si ya no queda jornada hoy. Son franjas de atención, no turnos confirmados.
     """
     wd = now.weekday()
-    if wd == 6:
+    if motivo_dia_cerrado(now.replace(tzinfo=None)):
         return ""
     jornadas = [(time(8, 0), time(12, 0))] if wd == 5 else [(time(8, 0), time(12, 0)), (time(14, 0), time(17, 0))]
     earliest = now.replace(tzinfo=None, second=0, microsecond=0) + timedelta(minutes=margen_min)
@@ -740,11 +817,12 @@ def _validar_horario_cita(
     prof_nombre: str = "el especialista",
 ) -> Tuple[bool, Optional[str]]:
     """Valida que inicio + duración quepa en jornada (sin cruzar almuerzo ni pasar el cierre)."""
-    if dt.weekday() == 6:
+    cerrado = motivo_dia_cerrado(dt)
+    if cerrado:
         return (
             False,
-            "⚠️ El consultorio *Nexus Odonto* permanece cerrado los domingos 🏥.\n\n"
-            "Nuestra jornada de atención es de Lunes a Sábado. ¿Te gustaría agendar para el próximo día hábil o consultar horarios disponibles? 😊",
+            f"[DÍA CERRADO] {cerrado} Díselo con naturalidad y ofrece el día hábil más cercano "
+            "(consultar_disponibilidad_tool sin fecha trae las próximas opciones).",
         )
 
     dur = max(30, int(duracion_min or 30))

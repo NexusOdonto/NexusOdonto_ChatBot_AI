@@ -153,12 +153,42 @@ async def _notify_staff_outage(numero_paciente: str, reason: str) -> None:
         logger.warning(f"[Processor] No se pudo notificar a recepción la falla de {numero_paciente}: {err}")
 
 
+def _booking_not_done_message() -> str:
+    return (
+        "Perdona, no alcancé a dejar registrada la cita todavía. Ya le pasé tus datos a recepción "
+        "para que te la confirmen por aquí; si prefieres, también puedes llamar al "
+        f"{settings.clinic_phone}."
+    )
+
+
+async def _notify_staff_booking_not_done(
+    numero_paciente: str, cedula: Optional[str], nombre: Optional[str], ultimo_mensaje: str
+) -> None:
+    try:
+        conv_id = await dotnet_client.obtener_o_crear_conversacion(numero_paciente)
+        await dotnet_client.crear_notificacion(
+            titulo="Cita pendiente de registrar",
+            mensaje=(
+                f"El paciente {nombre or ''} (cédula {cedula or 'sin dato'}, WhatsApp {numero_paciente}) "
+                f"quiso agendar/modificar una cita por el chat y no quedó registrada. Último mensaje: "
+                f"«{ultimo_mensaje[:120]}». Revisa la conversación y confírmale la cita."
+            ),
+            prioridad="ALTA",
+            conversation_id=conv_id,
+            telefono=numero_paciente,
+        )
+    except Exception as err:
+        logger.warning(f"[Processor] No se pudo notificar a recepción la cita pendiente de {numero_paciente}: {err}")
+
+
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_INTERNAL_MARKER_RE = re.compile(r"\[(?:AGENDA SIN CAMBIOS|DÍA CERRADO|SIN CUPOS|CÓMO RESPONDER)[^\]]*\]\s*")
 
 
 def _to_whatsapp_format(text: str) -> str:
     """WhatsApp renders *bold* and bare URLs; markdown **bold** / [text](url) show up literally."""
+    text = _INTERNAL_MARKER_RE.sub("", text)
     text = _MD_BOLD_RE.sub(r"*\1*", text)
     return _MD_LINK_RE.sub(lambda m: m.group(2) if m.group(1) in m.group(2) else f"{m.group(1)}: {m.group(2)}", text)
 
@@ -796,6 +826,24 @@ async def process_whatsapp_message(
             return
 
         _OUTAGE_NOTICE_SENT_AT.pop(numero_paciente, None)
+        from app.services.booking_flow import is_unbacked_confirmation
+
+        if is_unbacked_confirmation(respuesta_texto, _tool_messages_this_turn(mensajes_resultado)):
+            logger.error(
+                f"[Processor] Confirmación de cita SIN resultado exitoso de herramienta para "
+                f"{numero_paciente}; no se envía: {respuesta_texto[:200]!r}"
+            )
+            respuesta_texto = _booking_not_done_message()
+            try:
+                await _update_thread_state(
+                    config, {"messages": [AIMessage(content=respuesta_texto, id=ultimo_mensaje.id)]}
+                )
+            except Exception as st_err:
+                logger.warning(f"[Processor] No se pudo corregir el historial de {numero_paciente}: {st_err}")
+            asyncio.create_task(
+                _notify_staff_booking_not_done(numero_paciente, known_cedula, known_nombre, mensaje_texto)
+            )
+
         # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
         respuesta_texto = _ensure_portal_reminder_after_booking(
             _to_whatsapp_format(respuesta_texto), mensajes_resultado, phone=numero_paciente

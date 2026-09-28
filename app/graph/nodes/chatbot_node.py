@@ -16,8 +16,10 @@ from app.core.llm_concurrency import with_llm_slot
 from app.core.llm_runtime import active_chat_model, active_provider, is_request_rejected, usage_summary
 from app.graph.state import AgentState
 from app.security.content_guard import detect_off_topic_non_dental
+from app.services.booking_flow import is_unbacked_confirmation
 
 from app.agents.tools.clinical_rag_tool import clinical_knowledge_tool
+from app.agents.tools.agenda_helpers import fecha_legible, motivo_dia_cerrado
 from app.agents.tools.catalog_tools import (
     consultar_disponibilidad_tool,
     consultar_doctores_tool,
@@ -76,7 +78,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "1. consultar_doctores_tool\n"
         "2. consultar_servicios_y_precios_tool — fuente de verdad de precios; NUNCA inventes tarifas. "
         "No vuelques el catálogo entero: destaca 3-4 servicios y pregunta qué necesita.\n"
-        "3. consultar_disponibilidad_tool(especialidad/servicio, fecha YYYY-MM-DD)\n"
+        "3. consultar_disponibilidad_tool(servicio, fecha YYYY-MM-DD opcional) — sin fecha trae los próximos "
+        "días con turnos desde hoy (úsalo si pregunta qué días hay)\n"
         "4. agendar_cita_tool — SOLO tras confirmación explícita del paciente y con nombre+cédula+servicio+horario. "
         "Si el paciente pidió un odontólogo por nombre (ej: Ana Sofía), pasa ESE nombre en profesional_id; "
         "PROHIBIDO sustituirlo por Laura Gómez u otro por defecto/cabecera.\n"
@@ -114,6 +117,18 @@ SYSTEM_MESSAGE = SystemMessage(
         "Citas múltiples: usa ordinales 1/2 en cita_id; nunca pidas UUIDs.\n\n"
         "HORARIOS CLÍNICOS: Lun-Vie 8:00–12:00 y 14:00–17:00; Sáb 8:00–12:00; Dom/festivos cerrado. "
         "Almuerzo 12:00–14:00 sin citas. Slots cada 30 min. No inventes turnos.\n\n"
+        "FECHAS: NUNCA calcules tú el día de la semana. Usa el CALENDARIO del contexto y las fechas que "
+        "traen las herramientas (ya vienen con su día). «el martes», «el viernes», «el próximo lunes» = "
+        "el más cercano hacia adelante en el calendario; «mañana» = hoy + 1. Al proponer o confirmar una "
+        "cita di siempre día + fecha tal como aparecen (ej. «jueves 1 de octubre»).\n"
+        "DISPONIBILIDAD: ofrece solo 2-4 opciones (mezcla días y horas) y pregunta cuál prefiere; más "
+        "horarios solo si los pide. Si el día pedido es domingo o festivo, di con naturalidad que ese día "
+        "no atendemos y ofrece los días más cercanos (no digas «no hay turnos con ningún odontólogo»).\n"
+        "PRECIOS: formato colombiano $960.000, sin «COP». Al dar precios no pidas cédula; pregunta si "
+        "quiere agendar. Pide cédula y nombre UNA sola vez, cuando ya va a apartar.\n"
+        "CONFIRMACIONES: PROHIBIDO decir que una cita quedó agendada, reprogramada o cancelada si en "
+        "ESTE turno no recibiste el resultado exitoso de la herramienta. Fecha, hora y odontólogo de la "
+        "confirmación: cópialos del resultado de la herramienta.\n\n"
         "DOLOR DENTAL / SIN CUPOS: solo si el dolor es de diente, muela, encía o boca — "
         "empatía + sobrecupo presencial + línea +57 324 6030217 + paliativos seguros "
         "(compresa fría, enjuague salino; NUNCA aspirina sobre el diente). "
@@ -192,6 +207,17 @@ def _requested_date(last_user_msg: str, now: datetime) -> tuple[str, datetime] |
     return None
 
 
+def _calendario(now: datetime, dias: int = 10) -> str:
+    lineas = []
+    for i in range(dias):
+        d = now + timedelta(days=i)
+        etiqueta = " (hoy)" if i == 0 else " (mañana)" if i == 1 else ""
+        cerrado = motivo_dia_cerrado(d.replace(tzinfo=None))
+        nota = " — cerrado" if cerrado else ""
+        lineas.append(f"{d.strftime('%Y-%m-%d')} = {fecha_legible(d, con_anio=False)}{etiqueta}{nota}")
+    return "\n".join(lineas)
+
+
 def _cedula_from_summaries(raw_msgs: list) -> str | None:
     for msg in reversed(raw_msgs):
         if isinstance(msg, SystemMessage):
@@ -199,6 +225,25 @@ def _cedula_from_summaries(raw_msgs: list) -> str | None:
             if m:
                 return m.group(1)
     return None
+
+
+_UNBACKED_CONFIRMATION_NUDGE = (
+    "[SISTEMA] Tu respuesta afirma que la cita quedó agendada/reprogramada/cancelada, pero en este turno "
+    "NO hay un resultado exitoso de agendar_cita_tool, modificar_cita_tool ni cancelar_cita_tool: la agenda "
+    "no cambió. Si el paciente ya confirmó y tienes cédula, nombre, servicio, odontólogo y fecha/hora, "
+    "llama la herramienta ahora. Si falta algo o no ha confirmado, resume la propuesta y pregunta; "
+    "no digas que quedó hecha."
+)
+
+
+def _tool_messages_this_turn(raw_msgs: list) -> list:
+    out = []
+    for msg in reversed(raw_msgs):
+        if isinstance(msg, HumanMessage):
+            break
+        if isinstance(msg, ToolMessage):
+            out.append(msg)
+    return out
 
 
 def _tool_results_this_turn(raw_msgs: list) -> int:
@@ -211,13 +256,28 @@ def _tool_results_this_turn(raw_msgs: list) -> int:
     return count
 
 
+_BOOKING_TOOLS = (
+    consultar_disponibilidad_tool,
+    agendar_cita_tool,
+    modificar_cita_tool,
+    cancelar_cita_tool,
+    consultar_servicios_y_precios_tool,
+    consultar_doctores_tool,
+)
+
+
 def _select_tools(
     last_user_msg: str,
     prev_ai_msg: str,
     cedula: str | None,
     same_day: tuple[datetime, bool] | None = None,
+    booking_active: bool = False,
 ) -> tuple:
-    """Bind only tools likely needed this turn — smaller schemas → fewer input tokens."""
+    """Bind only tools likely needed this turn — smaller schemas → fewer input tokens.
+
+    While a booking is in progress the booking tools stay bound: without agendar_cita_tool the
+    model can only *claim* the appointment was created.
+    """
     norm = (last_user_msg or "").lower()
     prev = (prev_ai_msg or "").lower()
 
@@ -229,6 +289,8 @@ def _select_tools(
     if any(k in norm for k in ("precio", "precios", "vale", "cuesta", "cuanto", "tarif")) and not any(
         k in norm for k in ("cita", "agendar", "cancelar", "modificar", "reprogramar")
     ):
+        if booking_active:
+            return _BOOKING_TOOLS
         return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
 
     # Clinical Q&A without booking language
@@ -238,6 +300,8 @@ def _select_tools(
     if any(k in norm for k in ("servicio", "servicios", "tratamiento", "tratamientos", "limpieza", "profilaxis", "blanqueamiento")) and not any(
         k in norm for k in ("cita", "agendar", "disponib")
     ):
+        if booking_active:
+            return _BOOKING_TOOLS
         return (consultar_servicios_y_precios_tool,)
 
     if any(k in norm for k in ("doctor", "doctora", "odontologo", "especialista", "especialistas")):
@@ -255,11 +319,15 @@ def _select_tools(
     if "confirmar" in norm:
         return (confirmar_cita_tool,)
 
-    # Identity just provided (cédula + name) mid-booking: allow services catalog only
+    # Identity just provided (cédula + name) mid-booking: the slot may already be chosen, so
+    # agendar must be available (never consultar_cita_por_cedula here).
     if re.search(r"\b\d{7,12}\b", norm) and any(
         k in prev for k in ("cédula", "cedula", "nombre completo", "agendar")
     ):
-        return (consultar_servicios_y_precios_tool, consultar_doctores_tool)
+        return _BOOKING_TOOLS
+
+    if booking_active:
+        return _BOOKING_TOOLS + (confirmar_cita_tool,)
 
     # Mid-booking / availability
     if any(k in norm for k in ("cita", "agendar", "disponib", "horario", "turno")) or cedula:
@@ -294,8 +362,9 @@ def get_llm_with_tools(
     prev_ai_msg: str = "",
     cedula: str | None = None,
     same_day: tuple[datetime, bool] | None = None,
+    booking_active: bool = False,
 ):
-    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day)
+    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day, booking_active)
     tool_names = tuple(t.name for t in selected)
     return _bound_llm_for_tools(tool_names), tool_names
 
@@ -446,18 +515,13 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     fecha_str = now.strftime("%Y-%m-%d")
     hora_str = now.strftime("%I:%M %p")
     dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    dia_nombre = dias_semana[now.weekday()]
 
     # Compact temporal block (rules already in SYSTEM_MESSAGE). The explicit calendar keeps the
     # model from miscounting weekdays ("el sábado") into the wrong date.
-    proximos = ", ".join(
-        f"{dias_semana[d.weekday()]}={d.strftime('%Y-%m-%d')}"
-        for d in (now + timedelta(days=i) for i in range(1, 8))
-    )
     context_str = (
-        f"HOY={fecha_str} ({dia_nombre}) HORA_CO={hora_str}. PRÓXIMOS DÍAS: {proximos}. "
-        "Usa estas fechas exactas para 'hoy'/'mañana'/días de la semana. No ofrezcas horarios pasados. "
-        "Disponibilidad solo con consultar_disponibilidad_tool."
+        f"HOY={fecha_legible(now)} ({fecha_str}) HORA_CO={hora_str}.\n"
+        f"CALENDARIO (fecha = día de la semana; úsalo tal cual):\n{_calendario(now)}\n"
+        "No ofrezcas horarios pasados. Disponibilidad solo con consultar_disponibilidad_tool."
     )
 
     raw_msgs = state.get("messages", [])
@@ -539,9 +603,11 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 f"(cédula={turn_id.cedula}"
                 + (f", nombre={nombre_txt}" if nombre_txt else "")
                 + "). "
-                "PROHIBIDO menú de bienvenida / '¿En qué te podemos ayudar?'. "
-                "Confirma brevemente y pregunta qué tratamiento o servicio desea agendar. "
-                "PROHIBIDO consultar_cita_por_cedula_tool ni inventar horarios en este turno."
+                "PROHIBIDO menú de bienvenida / '¿En qué te podemos ayudar?' y consultar_cita_por_cedula_tool. "
+                "Si en el chat ya eligió servicio y día/hora: resume la cita (servicio, odontólogo, día de la "
+                "semana + fecha del calendario, hora) y pide que confirme; si ya la había confirmado de forma "
+                "explícita, llama agendar_cita_tool ahora. Si falta el servicio o el horario, pregúntalo. "
+                "No digas que quedó agendada sin el resultado exitoso de agendar_cita_tool."
             )
         elif is_booking_start_intent(last_user_msg) and cedula_detectada and nombre_detectado:
             # Bug A: booking start with identity already in history.
@@ -603,7 +669,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     if off_topic:
         llm, tool_names = _bound_llm_for_tools(()), ()
     else:
-        llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
+        llm, tool_names = get_llm_with_tools(
+            last_user_msg, prev_ai_msg, cedula_detectada, same_day, booking_active=bool(booking_flow)
+        )
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
             # Stops tool loops (same lookup repeated) — answer with the data already gathered.
             llm = _bound_llm_for_tools(tool_names, tool_choice="none")
@@ -623,6 +691,18 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     if not str(response.content or "").strip() and not getattr(response, "tool_calls", None):
         logger.warning("[Chatbot] Empty LLM reply; retrying once")
         response = await with_llm_slot(llm.ainvoke(messages), label="chatbot_ainvoke_retry")
+    if not getattr(response, "tool_calls", None) and is_unbacked_confirmation(
+        str(response.content or ""), _tool_messages_this_turn(raw_msgs)
+    ):
+        logger.warning(
+            f"[Chatbot] Reply claims an agenda change without a successful tool result "
+            f"(bound_tools={list(tool_names)}); retrying with booking tools"
+        )
+        retry_llm = _bound_llm_for_tools(tuple(t.name for t in _BOOKING_TOOLS))
+        response = await with_llm_slot(
+            retry_llm.ainvoke([*messages, HumanMessage(content=_UNBACKED_CONFIRMATION_NUDGE)]),
+            label="chatbot_ainvoke_unbacked",
+        )
     llm_elapsed = time.perf_counter() - t_llm
     n_tools = len(getattr(response, "tool_calls", None) or [])
     logger.info(

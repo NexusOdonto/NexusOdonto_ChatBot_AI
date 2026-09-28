@@ -36,6 +36,8 @@ from app.agents.tools.agenda_helpers import (
     _mensaje_especialidad_sin_servicio_unico,
     _es_servicio_activo,
     coincidencia_nombre_paciente,
+    fecha_legible,
+    hora_corta,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,35 @@ def _bloque_portal_paciente(es_primera_vez: bool) -> str:
         f"También puedes consultar tu cita en la *plataforma virtual*:\n"
         f"{web_url}"
     )
+
+
+def _horario_registrado(respuesta: Dict[str, Any], inicio: datetime, fin: datetime) -> tuple:
+    """Start/end as stored by the API (falls back to what was sent)."""
+    def _parse(valor, defecto):
+        try:
+            return datetime.fromisoformat(str(valor).replace("Z", "").split(".")[0]) if valor else defecto
+        except ValueError:
+            return defecto
+    return (
+        _parse(_obtener_valor(respuesta, "startsAt", "startDateTime"), inicio),
+        _parse(_obtener_valor(respuesta, "endsAt", "endDateTime"), fin),
+    )
+
+
+# Prefixed to every agendar/modificar/cancelar result that did NOT change the agenda, so the
+# model never reads an error or a follow-up question as a completed booking.
+_SIN_CAMBIOS_PREFIX = (
+    "[AGENDA SIN CAMBIOS — no se creó, movió ni canceló ninguna cita. No digas que quedó hecha: "
+    "explica el motivo o pide el dato que falta.]\n"
+)
+_EXITO_MARKERS = ("confirmada con éxito", "reprogramada exitosamente", "cancelada exitosamente")
+
+
+def _marcar_sin_cambios(resultado: str) -> str:
+    low = (resultado or "").lower()
+    if any(m in low for m in _EXITO_MARKERS):
+        return resultado
+    return _SIN_CAMBIOS_PREFIX + (resultado or "")
 
 
 async def _agendar_cita_impl(
@@ -297,17 +328,22 @@ async def _agendar_cita_impl(
         respuesta = await dotnet_client.agendar_cita(payload)
         if respuesta and respuesta.get("success"):
             cita_id = _obtener_valor(respuesta, "id", "citaId", "appointmentId")
-            hora_inicio_str = _formatear_hora_ampm(starts_dt.strftime("%H:%M"))
-            hora_fin_str = _formatear_hora_ampm(ends_dt.strftime("%H:%M"))
-            fecha_str = starts_dt.strftime("%d/%m/%Y")
+            inicio_real, fin_real = _horario_registrado(respuesta, starts_dt, ends_dt)
+            prof_real = _obtener_valor(respuesta, "professionalName") or prof_nombre_display
+            hora_inicio_str = hora_corta(inicio_real.strftime("%H:%M"))
+            hora_fin_str = hora_corta(fin_real.strftime("%H:%M"))
+            logger.info(
+                f"[Agenda] Cita creada id={cita_id} cedula={cedula} inicio={inicio_real.isoformat()} "
+                f"prof={prof_real} servicio={serv_nombre_display}"
+            )
 
             return (
                 f"¡Listo! Quedó *confirmada con éxito* tu cita.\n\n"
                 f"• *Paciente:* {nombre_display}\n"
                 f"• *Cédula:* {cedula}\n"
-                f"• *Especialista:* {prof_nombre_display}\n"
+                f"• *Especialista:* {prof_real}\n"
                 f"• *Tratamiento:* {serv_nombre_display}\n"
-                f"• *Fecha:* {fecha_str}\n"
+                f"• *Fecha:* {fecha_legible(inicio_real)}\n"
                 f"• *Horario:* {hora_inicio_str} a {hora_fin_str}\n"
                 f"• *Código:* `{cita_id}`\n\n"
                 f"{_bloque_portal_paciente(es_primera_vez)}\n\n"
@@ -448,7 +484,7 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> str
             if starts_at_raw:
                 clean = str(starts_at_raw).replace("Z", "").split(".")[0]
                 dt = datetime.fromisoformat(clean)
-                fecha_display = dt.strftime("%d/%m/%Y a las %I:%M %p")
+                fecha_display = f"{fecha_legible(dt)} a las {hora_corta(dt.strftime('%H:%M'))}"
         except Exception:
             pass
 
@@ -626,8 +662,9 @@ async def _modificar_cita_impl(
         resultado = await dotnet_client.modificar_cita(target_id, datos_actualizacion)
 
         if resultado.get("success"):
-            fecha_display = starts_dt.strftime("%d/%m/%Y")
-            hora_display = f"{starts_dt.strftime('%I:%M %p')} - {ends_dt.strftime('%I:%M %p')}"
+            inicio_real, fin_real = _horario_registrado(resultado, starts_dt, ends_dt)
+            fecha_display = fecha_legible(inicio_real)
+            hora_display = f"{hora_corta(inicio_real.strftime('%H:%M'))} a {hora_corta(fin_real.strftime('%H:%M'))}"
 
             return (
                 f"Perfecto, tu cita quedó *reprogramada exitosamente*.\n\n"
@@ -770,7 +807,7 @@ async def agendar_cita_tool(
     El número de WhatsApp del paciente se usa automáticamente como teléfono de contacto.
     Si el paciente no existe en el sistema, se creará automáticamente con los datos básicos.
     """
-    return await _agendar_cita_impl(
+    return _marcar_sin_cambios(await _agendar_cita_impl(
         cedula,
         nombre_paciente,
         profesional_id,
@@ -779,7 +816,7 @@ async def agendar_cita_tool(
         motivo_consulta,
         config,
         confirmar_misma_persona=bool(confirmar_misma_persona),
-    )
+    ))
 
 
 @tool
@@ -807,7 +844,7 @@ async def cancelar_cita_tool(cedula: str, cita_id: Optional[str] = None) -> str:
     
     Usa esta herramienta DE INMEDIATO tan pronto el usuario manifieste que desea cancelar su cita y proporcione su número de cédula. NO llames a consultar_cita_por_cedula_tool antes.
     """
-    return await _cancelar_cita_impl(cedula, cita_id)
+    return _marcar_sin_cambios(await _cancelar_cita_impl(cedula, cita_id))
 
 
 @tool
@@ -831,7 +868,7 @@ async def modificar_cita_tool(
     Si la cédula ya fue mencionada en el chat, NO se la vuelvas a pedir, invoca esta herramienta de una vez.
     NO uses consultar_cita_por_cedula_tool para reprogramar citas.
     """
-    return await _modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id)
+    return _marcar_sin_cambios(await _modificar_cita_impl(cedula, nueva_fecha_hora, cita_id, nuevo_profesional_id))
 
 
 @tool

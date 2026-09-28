@@ -265,6 +265,53 @@ def prev_asked_for_booking_identity(prev_ai: str) -> bool:
     return asks_id and bookingish
 
 
+_CLAIM_RE = re.compile(
+    r"\b(?:queda|qued[oó]|ha\s+quedado|est[aá]|fue|ha\s+sido)\s+(?:\w+\s+){0,2}?"
+    r"(?:agendad|reservad|programad|confirmad|reprogramad|cancelad|apartad)[oa]s?\b"
+    r"|\b(?:agend|reserv|apart|cancel|reprogram)é\b"
+    r"|\b(?:he|hemos)\s+(?:agendado|reservado|apartado|cancelado|reprogramado)\b",
+    re.IGNORECASE,
+)
+_CONDITIONAL_RE = re.compile(
+    r"\b(?:si|cuando|una\s+vez|apenas|en\s+cuanto|para\s+que|quieres|deseas|puedo|podemos|confirmas|confirmes)\b",
+    re.IGNORECASE,
+)
+_MUTATION_TOOLS = frozenset({"agendar_cita_tool", "modificar_cita_tool", "cancelar_cita_tool", "confirmar_cita_tool"})
+_MUTATION_SUCCESS = (
+    "confirmada con éxito",
+    "reprogramada exitosamente",
+    "cancelada exitosamente",
+    "confirmada exitosamente",
+)
+
+
+def claims_agenda_change(text: str) -> bool:
+    """True if the reply states (not asks) that an appointment was booked/moved/cancelled."""
+    for sentence in re.split(r"(?<=[.!?\n])", text or ""):
+        s = sentence.strip()
+        if not s or s.startswith("¿") or s.endswith("?") or _CONDITIONAL_RE.search(s):
+            continue
+        if _CLAIM_RE.search(s):
+            return True
+    return False
+
+
+def agenda_changed_this_turn(tool_msgs: Iterable[Any]) -> bool:
+    """A mutation tool succeeded, or the patient's existing appointments were just listed."""
+    for msg in tool_msgs:
+        name = (getattr(msg, "name", None) or "").strip()
+        content = str(getattr(msg, "content", "") or "").lower()
+        if name == "consultar_cita_por_cedula_tool" and "próximas citas programadas" in content:
+            return True
+        if name in _MUTATION_TOOLS and any(m in content for m in _MUTATION_SUCCESS):
+            return True
+    return False
+
+
+def is_unbacked_confirmation(text: str, tool_msgs: Iterable[Any]) -> bool:
+    return claims_agenda_change(text) and not agenda_changed_this_turn(tool_msgs)
+
+
 @dataclass
 class BookingSession:
     servicio: str
