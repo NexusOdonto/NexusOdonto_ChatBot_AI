@@ -250,6 +250,39 @@ async def repair_lid_conversations():
     }
 
 
+class ScheduleChangeRequest(BaseModel):
+    appointment_id: str
+    patient_id: str
+    patient_name: Optional[str] = None
+    phone: str = Field(..., description="E.164 (+573XXXXXXXXX) o chatIdentifier/LID de WhatsApp")
+    service_id: Optional[str] = None
+    service: Optional[str] = None
+    professional_id: Optional[str] = None
+    professional: Optional[str] = None
+    starts_at: str = Field(..., description="Hora local de Colombia (una 'Z' final se ignora)")
+    ends_at: Optional[str] = None
+
+
+@router.post("/agent/schedule-change", dependencies=[Depends(verify_internal_secret)])
+async def schedule_change_notice(request: ScheduleChangeRequest):
+    """Avisa al paciente que su cita quedó por fuera del nuevo horario del odontólogo.
+
+    200 {"status":"sent"} si el WhatsApp salió; 202 {"status":"queued"} si queda en cola
+    (el scheduler lo reintenta cada 10 min); 400 si los datos no sirven.
+    """
+    from fastapi.responses import JSONResponse
+    from app.services.schedule_change import ScheduleChangeError, notificar_cambio_horario
+
+    try:
+        result = await notificar_cambio_horario(request.model_dump())
+    except ScheduleChangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"[ScheduleChange] Error procesando aviso {request.appointment_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=503, detail="No se pudo registrar el aviso; reintenta.")
+    return JSONResponse(status_code=200 if result["status"] == "sent" else 202, content=result)
+
+
 @router.post("/agent/send-message", dependencies=[Depends(verify_internal_secret)])
 async def send_agent_message(request: SendMessageRequest):
     """Envía un mensaje redactado por un asesor humano hacia el WhatsApp del paciente.

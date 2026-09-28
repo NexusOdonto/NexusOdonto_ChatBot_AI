@@ -246,31 +246,41 @@ class InactivityService:
             "CITA INCOMPLETA" if cita_en_curso else "CIERRE GENERAL",
         )
 
-        # 1. Enviar mensaje de cierre por WhatsApp
+        # A schedule-change notice still waiting for the patient's answer must stay the last
+        # message of the chat; its context survives the purge in pending_schedule_changes.
         try:
-            await evolution_client.enviar_mensaje(numero_paciente, mensaje_cierre)
-        except Exception as e:
-            logger.warning(
-                "[Inactivity] No se pudo enviar mensaje de cierre a %s: %s",
-                numero_paciente,
-                e,
-            )
+            from app.services.schedule_change import avisos_pendientes_para
 
-        # 2. Registrar el mensaje de cierre en la base de datos de auditoría
-        try:
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=mensaje_cierre,
+            aviso_abierto = bool(await avisos_pendientes_para(numero_paciente))
+        except Exception:
+            aviso_abierto = False
+
+        if not aviso_abierto:
+            # 1. Enviar mensaje de cierre por WhatsApp
+            try:
+                await evolution_client.enviar_mensaje(numero_paciente, mensaje_cierre)
+            except Exception as e:
+                logger.warning(
+                    "[Inactivity] No se pudo enviar mensaje de cierre a %s: %s",
+                    numero_paciente,
+                    e,
                 )
-            )
-        except Exception as e:
-            logger.warning(
-                "[Inactivity] No se pudo registrar mensaje de cierre en DB para %s: %s",
-                numero_paciente,
-                e,
-            )
+
+            # 2. Registrar el mensaje de cierre en la base de datos de auditoría
+            try:
+                asyncio.create_task(
+                    dotnet_client.registrar_mensaje(
+                        chat_identifier=numero_paciente,
+                        rol="CHATBOT",
+                        contenido=mensaje_cierre,
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Inactivity] No se pudo registrar mensaje de cierre en DB para %s: %s",
+                    numero_paciente,
+                    e,
+                )
 
         # 3. Purgar el hilo de LangGraph en PostgreSQL
         canon = obtener_telefono_canonico(numero_paciente)

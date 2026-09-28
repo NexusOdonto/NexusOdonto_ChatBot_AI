@@ -20,6 +20,7 @@ from app.services.appointment_reminders import (
 from app.graph.builder import create_graph
 from app.session.postgres_checkpointer import PostgresCheckpointer
 from app.services.inactivity_service import inactivity_service
+from app.services import schedule_change
 from app.clients.evolution_client import evolution_client
 
 # Cargar variables de entorno desde el archivo .env
@@ -113,6 +114,7 @@ async def startup() -> None:
     checkpoint_store = PostgresCheckpointer(settings.postgres_checkpoint_url)
     await checkpoint_store.start()
     create_graph(checkpoint_store.saver)
+    await schedule_change.ensure_schema()
 
     initialize_qdrant()
     scheduler.add_job(
@@ -139,6 +141,14 @@ async def startup() -> None:
         inactivity_service.procesar_expiraciones_pendientes,
         IntervalTrigger(seconds=60, timezone=settings.reminder_timezone),
         id="inactivity-sweeper",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        schedule_change.reintentar_avisos_pendientes,
+        IntervalTrigger(minutes=schedule_change.RETRY_INTERVAL_MINUTES, timezone=settings.reminder_timezone),
+        id="schedule-change-retry",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

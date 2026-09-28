@@ -761,6 +761,14 @@ async def process_whatsapp_message(
             "push_name": push_name.strip() if push_name else "",
             "booking_flow": describe_session_for_llm(numero_paciente),
         }
+        try:
+            from app.services.schedule_change import avisos_pendientes_para, bloque_cita_afectada
+
+            avisos = await avisos_pendientes_para(numero_paciente)
+            if avisos:
+                user_context["cita_afectada"] = bloque_cita_afectada(avisos)
+        except Exception as aviso_err:
+            logger.warning(f"[Processor] No se pudo leer avisos de cambio de horario de {numero_paciente}: {aviso_err}")
 
         invoke_input = {
             "messages": [HumanMessage(content=mensaje_texto)],

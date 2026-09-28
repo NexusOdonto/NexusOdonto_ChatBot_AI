@@ -287,6 +287,14 @@ _BOOKING_TOOLS = (
     consultar_doctores_tool,
 )
 
+_AVISO_TOOLS = (
+    modificar_cita_tool,
+    cancelar_cita_tool,
+    consultar_disponibilidad_tool,
+    consultar_doctores_tool,
+    consultar_servicios_y_precios_tool,
+)
+
 
 def _select_tools(
     last_user_msg: str,
@@ -294,14 +302,19 @@ def _select_tools(
     cedula: str | None,
     same_day: tuple[datetime, bool] | None = None,
     booking_active: bool = False,
+    cita_afectada: bool = False,
 ) -> tuple:
     """Bind only tools likely needed this turn — smaller schemas → fewer input tokens.
 
     While a booking is in progress the booking tools stay bound: without agendar_cita_tool the
-    model can only *claim* the appointment was created.
+    model can only *claim* the appointment was created. The same holds for an open
+    schedule-change notice and modificar/cancelar.
     """
     norm = (last_user_msg or "").lower()
     prev = (prev_ai_msg or "").lower()
+
+    if cita_afectada and not _is_clinical_question(norm):
+        return _AVISO_TOOLS
 
     if same_day and not cedula:
         # Identity step first: the hint already carries today's remaining hours, no lookup needed.
@@ -388,8 +401,9 @@ def get_llm_with_tools(
     cedula: str | None = None,
     same_day: tuple[datetime, bool] | None = None,
     booking_active: bool = False,
+    cita_afectada: bool = False,
 ):
-    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day, booking_active)
+    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day, booking_active, cita_afectada)
     tool_names = tuple(t.name for t in selected)
     return _bound_llm_for_tools(tool_names), tool_names
 
@@ -690,6 +704,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             "Solo tras un «sí» explícito crea la cita con agendar_cita_tool."
         )
 
+    cita_afectada = str(uc.get("cita_afectada") or "")
+    context_str += cita_afectada
+
     combined_system_message = SystemMessage(
         content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO]\n{context_str}"
     )
@@ -703,7 +720,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         llm, tool_names = _bound_llm_for_tools(()), ()
     else:
         llm, tool_names = get_llm_with_tools(
-            last_user_msg, prev_ai_msg, cedula_detectada, same_day, booking_active=bool(booking_flow)
+            last_user_msg,
+            prev_ai_msg,
+            cedula_detectada,
+            same_day,
+            booking_active=bool(booking_flow),
+            cita_afectada=bool(cita_afectada),
         )
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
             # Stops tool loops (same lookup repeated) — answer with the data already gathered.

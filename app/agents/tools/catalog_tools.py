@@ -227,8 +227,8 @@ async def _turnos_por_profesional(
     return resultados
 
 
-async def turnos_disponibles(servicio: Dict[str, Any], fecha: str) -> List[tuple]:
-    """Turnos libres de un servicio del catálogo en una fecha YYYY-MM-DD: [(prof_id, prof_nombre, [HH:MM])]."""
+async def profesionales_para_servicio(servicio: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Professionals of the service's specialty (all active professionals if none matches)."""
     especialidades = await dotnet_client.obtener_especialidades() or []
     esp_id = None
     cat_servicio = _obtener_valor(servicio, "category", "categoria", "Category") or ""
@@ -246,6 +246,12 @@ async def turnos_disponibles(servicio: Dict[str, Any], fecha: str) -> List[tuple
         profesionales = await dotnet_client.obtener_profesionales(especialidad_id=esp_id) or []
     if not profesionales:
         profesionales = await dotnet_client.obtener_profesionales() or []
+    return profesionales
+
+
+async def turnos_disponibles(servicio: Dict[str, Any], fecha: str) -> List[tuple]:
+    """Turnos libres de un servicio del catálogo en una fecha YYYY-MM-DD: [(prof_id, prof_nombre, [HH:MM])]."""
+    profesionales = await profesionales_para_servicio(servicio)
     if not profesionales:
         return []
 

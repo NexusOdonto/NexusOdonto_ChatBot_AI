@@ -1058,6 +1058,12 @@ def _resolver_cita_por_selector(
             return None, "Solo tienes una cita activa programada (Cita #1). ¿Deseas gestionar esa cita? 😊"
         return citas_ordenadas[0], None
 
+    # Exact id before ordinals: a UUID such as "3fa8..." would otherwise parse as "cita 3".
+    for c in citas_ordenadas:
+        cid = str(c.get("id") or c.get("citaId") or "").lower()
+        if cid and cid == raw_sel.lower():
+            return c, None
+
     if not norm or norm in ("none", "null", "n/a", "cita", "mi cita", "la cita", "cancelar", "reprogramar", "modificar"):
         opciones = []
         for i, c in enumerate(citas_ordenadas, 1):
