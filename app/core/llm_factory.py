@@ -77,15 +77,20 @@ def get_chat_llm(
             "OPENAI_API_KEY no está configurada. Define OPENAI_API_KEY en tu archivo .env "
             "o cambia LLM_PROVIDER='gemini' junto con GEMINI_API_KEY."
         )
-    from langchain_openai import ChatOpenAI
+    from app.core.llm_runtime import BudgetedChatOpenAI
 
     target_model = model or settings.openai_model
-    logger.debug(f"[LLM Factory] Instanciando ChatOpenAI (modelo: {target_model})")
-    return ChatOpenAI(
+    logger.info(
+        f"[LLM Factory] ChatOpenAI model={target_model} "
+        f"max_tokens={max_tokens} temperature={temperature}"
+    )
+    return BudgetedChatOpenAI(
         model=target_model,
         api_key=settings.openai_api_key,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=float(settings.llm_attempt_timeout_seconds or 14.0),
+        max_retries=1,
     )
 
 

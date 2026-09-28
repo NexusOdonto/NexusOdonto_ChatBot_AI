@@ -9,11 +9,11 @@ import time
 from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import httpx
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from app.core.llm_factory import get_chat_llm
 from app.core.config import settings
 from app.core.llm_concurrency import with_llm_slot
+from app.core.llm_runtime import active_chat_model, active_provider, is_request_rejected, usage_summary
 from app.graph.state import AgentState
 from app.security.content_guard import detect_off_topic_non_dental
 
@@ -33,8 +33,8 @@ from app.agents.tools.appointment_tools import (
 
 logger = logging.getLogger(__name__)
 
-# Compact system prompt: keep booking correctness, drop redundant prose that
-# duplicated the temporal context block (cuts ~60% input tokens → faster Gemini TTFT).
+# Fixed system prompt. It must stay byte-identical across turns and come before any
+# per-turn context so OpenAI's automatic prefix caching (>1024 tokens) keeps hitting.
 SYSTEM_MESSAGE = SystemMessage(
     content=(
         "Eres una persona de recepción de *Nexus Odonto* escribiendo por WhatsApp "
@@ -124,13 +124,14 @@ SYSTEM_MESSAGE = SystemMessage(
     )
 )
 
-# Cap history fed to Gemini (tool schemas + system already dominate TTFT).
+# Cap history fed to the LLM (tool schemas + system already dominate input tokens).
 _MAX_HISTORY_MESSAGES = 16
 _MAX_TOOL_MSG_CHARS = 1800
 _MAX_AI_MSG_CHARS = 1200
 
-# Chat replies on WhatsApp stay short; lower caps cut decode time.
-_CHAT_MAX_OUTPUT_TOKENS = 512
+# Chat replies on WhatsApp stay short; lower caps cut decode time and output tokens.
+_CHAT_MAX_OUTPUT_TOKENS = 400
+_CHAT_TEMPERATURE = 0.4
 
 _ALL_TOOLS = (
     clinical_knowledge_tool,
@@ -165,7 +166,7 @@ def _select_tools(
     cedula: str | None,
     same_day: tuple[datetime, bool] | None = None,
 ) -> tuple:
-    """Bind only tools likely needed this turn — smaller schemas → faster Gemini TTFT."""
+    """Bind only tools likely needed this turn — smaller schemas → fewer input tokens."""
     norm = (last_user_msg or "").lower()
     prev = (prev_ai_msg or "").lower()
 
@@ -231,7 +232,7 @@ def _select_tools(
 def _bound_llm_for_tools(tool_names: tuple[str, ...]):
     name_to_tool = {t.name: t for t in _ALL_TOOLS}
     tools = [name_to_tool[n] for n in tool_names if n in name_to_tool]
-    primary_llm = get_chat_llm(temperature=0, max_tokens=_CHAT_MAX_OUTPUT_TOKENS)
+    primary_llm = get_chat_llm(temperature=_CHAT_TEMPERATURE, max_tokens=_CHAT_MAX_OUTPUT_TOKENS)
     if not tools:
         return primary_llm
     return primary_llm.bind_tools(tools)
@@ -266,7 +267,7 @@ def _trim_history(raw_msgs: list, *, is_gemini: bool) -> list:
                 )
             ):
                 continue
-            if len(content) > _MAX_AI_MSG_CHARS:
+            if len(content) > _MAX_AI_MSG_CHARS and not getattr(msg, "tool_calls", None):
                 # Keep original message object; only shorten text for the prompt view.
                 msg = HumanMessage(content=content[:_MAX_AI_MSG_CHARS] + "… [respuesta previa truncada]")
                 chat_messages.append(msg)
@@ -278,17 +279,66 @@ def _trim_history(raw_msgs: list, *, is_gemini: bool) -> list:
         elif is_gemini and isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and not msg.content:
             continue
         elif is_gemini and isinstance(msg, ToolMessage):
-            tool_name = getattr(msg, "name", None) or "herramienta"
+            chat_messages.append(_tool_result_as_context(msg))
+        elif isinstance(msg, ToolMessage):
             body = str(msg.content or "")
             if len(body) > _MAX_TOOL_MSG_CHARS:
-                body = body[:_MAX_TOOL_MSG_CHARS] + "…"
-            chat_messages.append(HumanMessage(content=f"[Información del sistema ({tool_name})]:\n{body}"))
+                msg = ToolMessage(
+                    content=body[:_MAX_TOOL_MSG_CHARS] + "…",
+                    tool_call_id=msg.tool_call_id,
+                    name=getattr(msg, "name", None),
+                )
+            chat_messages.append(msg)
         else:
             chat_messages.append(msg)
 
     if len(chat_messages) > _MAX_HISTORY_MESSAGES:
         chat_messages = chat_messages[-_MAX_HISTORY_MESSAGES:]
+    if not is_gemini:
+        chat_messages = _pair_tool_messages(chat_messages)
     return chat_messages
+
+
+def _tool_result_as_context(msg: ToolMessage) -> HumanMessage:
+    tool_name = getattr(msg, "name", None) or "herramienta"
+    body = str(msg.content or "")
+    if len(body) > _MAX_TOOL_MSG_CHARS:
+        body = body[:_MAX_TOOL_MSG_CHARS] + "…"
+    return HumanMessage(content=f"[Información del sistema ({tool_name})]:\n{body}")
+
+
+def _pair_tool_messages(msgs: list) -> list:
+    """OpenAI rejects tool calls without their results and results without their call.
+
+    Keeps each AI tool-call message only together with the tool results that follow it;
+    orphaned results (e.g. cut by the history window) become plain context.
+    """
+    out: list = []
+    i = 0
+    while i < len(msgs):
+        msg = msgs[i]
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            j = i + 1
+            results = []
+            while j < len(msgs) and isinstance(msgs[j], ToolMessage):
+                results.append(msgs[j])
+                j += 1
+            call_ids = {tc.get("id") for tc in msg.tool_calls}
+            if call_ids and call_ids <= {r.tool_call_id for r in results}:
+                out.append(msg)
+                out.extend(r for r in results if r.tool_call_id in call_ids)
+            else:
+                if msg.content:
+                    out.append(AIMessage(content=msg.content))
+                out.extend(_tool_result_as_context(r) for r in results)
+            i = j
+            continue
+        if isinstance(msg, ToolMessage):
+            out.append(_tool_result_as_context(msg))
+        else:
+            out.append(msg)
+        i += 1
+    return out
 
 
 def _same_day_hint(same_day: tuple[datetime, bool], now: datetime, cedula_conocida: bool) -> str:
@@ -467,7 +517,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO]\n{context_str}"
     )
 
-    is_gemini = (settings.llm_provider or "openai").lower().strip() == "gemini"
+    is_gemini = active_provider() == "gemini"
     chat_messages = _trim_history(raw_msgs, is_gemini=is_gemini)
     messages = [combined_system_message, *chat_messages]
 
@@ -482,8 +532,8 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             llm.ainvoke(messages),
             label="chatbot_ainvoke",
         )
-    except httpx.HTTPStatusError as llm_err:
-        if llm_err.response.status_code not in (400, 403) or not tool_names:
+    except Exception as llm_err:
+        if not is_request_rejected(llm_err) or not tool_names:
             raise
         # A rejected tool schema / call must not surface as a service outage; answer text-only.
         logger.warning(f"[Chatbot] LLM call failed with tools={list(tool_names)} ({llm_err!r}); retrying without tools")
@@ -498,8 +548,8 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         f"[Latency] llm_turn={llm_elapsed:.3f}s prompt_chars={prompt_chars} "
         f"history_msgs={len(chat_messages)} tool_calls={n_tools} "
         f"bound_tools={list(tool_names)} "
-        f"model={settings.gemini_model if is_gemini else settings.openai_model} "
-        f"max_out={_CHAT_MAX_OUTPUT_TOKENS}"
+        f"provider={active_provider()} model={active_chat_model()} "
+        f"max_out={_CHAT_MAX_OUTPUT_TOKENS} {usage_summary(response)}"
     )
 
     # Solo propagar confianza si una tool RAG escribió [RAG_SCORE:...]; nunca default 1.0

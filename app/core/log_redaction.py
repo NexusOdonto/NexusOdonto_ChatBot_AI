@@ -8,12 +8,16 @@ import re
 _SECRET_RE = re.compile(r"((?:[?&]|\b)(?:key|api_key|apikey|access_token)=)[^&\s'\"]+", re.IGNORECASE)
 _HEADER_RE = re.compile(r"(x-goog-api-key['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+", re.IGNORECASE)
 _GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_\-]{30,}")
+_OPENAI_KEY_RE = re.compile(r"sk-[0-9A-Za-z_\-*]{8,}")
+_BEARER_RE = re.compile(r"(Bearer\s+)[^'\"\s,}]+", re.IGNORECASE)
 
 
 def redact(text: str) -> str:
     if not text:
         return text
     text = _HEADER_RE.sub(r"\1***", _SECRET_RE.sub(r"\1***", text))
+    text = _BEARER_RE.sub(r"\1***", text)
+    text = _OPENAI_KEY_RE.sub("sk-***", text)
     return _GOOGLE_KEY_RE.sub("AIza***", text)
 
 

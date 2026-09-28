@@ -146,13 +146,14 @@ async def extraer_bytes_audio(raw_payload_data: Dict[str, Any], raw_message: Dic
 
 async def transcribir_audio(audio_bytes: bytes, mimetype: str = "audio/ogg") -> Optional[str]:
     """
-    Transcribe los bytes de audio a texto usando Gemini Multimodal o OpenAI Whisper
-    según el proveedor configurado.
+    Transcribe los bytes de audio a texto con el proveedor configurado (OpenAI o Gemini).
+    Si falta la clave del proveedor activo, usa el otro cuando tenga clave.
     """
     prov = (settings.llm_provider or "openai").lower().strip()
+    use_openai = bool(settings.openai_api_key) and (prov == "openai" or not settings.gemini_api_key)
 
-    # 1. Si el proveedor activo es Gemini o si hay clave de Gemini y no de OpenAI
-    if (prov == "gemini" and settings.gemini_api_key) or (not settings.openai_api_key.startswith("sk-") and settings.gemini_api_key):
+    # 1. Gemini cuando es el proveedor activo, o cuando no hay clave de OpenAI
+    if not use_openai and settings.gemini_api_key:
         try:
             import asyncio
             import google.generativeai as genai
@@ -183,8 +184,8 @@ async def transcribir_audio(audio_bytes: bytes, mimetype: str = "audio/ogg") -> 
             if not settings.openai_api_key:
                 return None
 
-    # 2. Si hay clave válida de OpenAI
-    if settings.openai_api_key and settings.openai_api_key.startswith("sk-"):
+    # 2. OpenAI (proveedor activo, o respaldo si Gemini falló)
+    if settings.openai_api_key:
         # Determinar extensión apropiada
         ext = "ogg"
         if "mp4" in mimetype:
@@ -196,25 +197,31 @@ async def transcribir_audio(audio_bytes: bytes, mimetype: str = "audio/ogg") -> 
 
         filename = f"audio.{ext}"
 
-        try:
-            client = AsyncOpenAI(api_key=settings.openai_api_key)
-            audio_file = io.BytesIO(audio_bytes)
-            audio_file.name = filename
+        client = AsyncOpenAI(api_key=settings.openai_api_key, timeout=30.0, max_retries=1)
+        models = [settings.openai_transcription_model or "whisper-1"]
+        if models[0] != "whisper-1":
+            models.append("whisper-1")
+        for model_name in models:
+            try:
+                audio_file = io.BytesIO(audio_bytes)
+                audio_file.name = filename
 
-            logger.info(f"[Audio Service] Enviando audio ({len(audio_bytes)} bytes, {filename}) a Whisper...")
-            transcription = await client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="es",
-                prompt="Nexus Odonto, consultorio odontológico, citas, doctores, tratamientos, limpieza, ortodoncia, endodoncia, diseño de sonrisa, implantes."
-            )
+                logger.info(
+                    f"[Audio Service] Transcribiendo audio ({len(audio_bytes)} bytes, {filename}) con OpenAI ({model_name})..."
+                )
+                transcription = await client.audio.transcriptions.create(
+                    model=model_name,
+                    file=audio_file,
+                    language="es",
+                    prompt="Nexus Odonto, consultorio odontológico, citas, doctores, tratamientos, limpieza, ortodoncia, endodoncia, diseño de sonrisa, implantes."
+                )
 
-            texto = transcription.text.strip()
-            logger.info(f"[Audio Service] Transcripción exitosa con Whisper: '{texto}'")
-            return texto
-        except Exception as e:
-            logger.error(f"[Audio Service] Error al transcribir audio con Whisper: {e}", exc_info=True)
-            return None
+                texto = transcription.text.strip()
+                logger.info(f"[Audio Service] Transcripción exitosa con OpenAI ({model_name}): '{texto}'")
+                return texto
+            except Exception as e:
+                logger.error(f"[Audio Service] Error al transcribir audio con OpenAI ({model_name}): {e}", exc_info=True)
+        return None
 
     logger.error("[Audio Service] No hay API Key válida para transcribir notas de voz (OpenAI o Gemini).")
     return None

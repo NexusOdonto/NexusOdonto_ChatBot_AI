@@ -1,13 +1,12 @@
 """Fast Gemini chat+tools client via REST (thinkingLevel=MINIMAL for lower TTFT).
 
-Used by the chatbot node when LLM_PROVIDER=gemini to avoid the old
+Optional provider, used only when LLM_PROVIDER=gemini, to avoid the old
 langchain-google-genai path that cannot pass Gemini 3 thinkingConfig.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import re
@@ -28,29 +27,16 @@ from langchain_core.tools import BaseTool
 from pydantic import Field, PrivateAttr
 
 from app.core.config import settings
+from app.core.llm_runtime import LLMUnavailableError, turn_deadline
 
 logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _async_client: Optional[httpx.AsyncClient] = None
 
-# Monotonic deadline shared by every Gemini call of the current chat turn.
-_TURN_DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
-    "gemini_turn_deadline", default=None
-)
 
-
-class GeminiUnavailableError(RuntimeError):
-    """Every Gemini model is cooling down or the turn budget ran out: answer without the LLM."""
-
-
-def start_turn_budget(seconds: Optional[float] = None) -> contextvars.Token:
-    budget = float(seconds if seconds is not None else settings.gemini_turn_budget_seconds or 0)
-    return _TURN_DEADLINE.set(time.monotonic() + budget if budget > 0 else None)
-
-
-def end_turn_budget(token: contextvars.Token) -> None:
-    _TURN_DEADLINE.reset(token)
+class GeminiUnavailableError(LLMUnavailableError):
+    """Every Gemini model is cooling down or the turn budget ran out."""
 
 
 def _request_headers(api_key: str) -> dict[str, str]:
@@ -270,16 +256,12 @@ class FastGeminiChat(BaseChatModel):
     def _attempt_timeout(self, is_last: bool, deadline: float) -> float:
         """Non-final models get a shorter budget; no attempt may outlive the turn deadline."""
         base = self.timeout if is_last else min(
-            self.timeout, float(settings.gemini_attempt_timeout_seconds or self.timeout)
+            self.timeout, float(settings.llm_attempt_timeout_seconds or self.timeout)
         )
         return max(1.0, min(base, deadline - time.monotonic()))
 
     def _deadline(self) -> float:
-        turn = _TURN_DEADLINE.get()
-        if turn is not None:
-            return turn
-        budget = float(settings.gemini_turn_budget_seconds or 0)
-        return time.monotonic() + (budget if budget > 0 else self.timeout)
+        return turn_deadline(self.timeout)
 
     def _plan_attempts(self, rnd: int, deadline: float) -> list[str]:
         if time.monotonic() >= deadline:

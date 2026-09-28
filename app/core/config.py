@@ -15,11 +15,23 @@ class Settings(BaseSettings):
 
     # Configuración del modelo de lenguaje y del modelo de embeddings.
     llm_provider: str = Field(
-        default="gemini",
+        default="openai",
         validation_alias=AliasChoices("LLM_PROVIDER", "AI_PROVIDER"),
     )
     openai_api_key: str = ""
-    openai_model: str = "gpt-3.5-turbo"
+    openai_model: str = "gpt-4o-mini"
+    # Voice notes; falls back to whisper-1 if this model is rejected.
+    openai_transcription_model: str = "gpt-4o-mini-transcribe"
+    # Per-request timeout for a single LLM call (clipped to what is left of the turn budget).
+    llm_attempt_timeout_seconds: float = Field(
+        default=14.0,
+        validation_alias=AliasChoices("LLM_ATTEMPT_TIMEOUT_SECONDS", "GEMINI_ATTEMPT_TIMEOUT_SECONDS"),
+    )
+    # Total LLM time per chat turn (all calls, retries and waits) before sending the outage notice.
+    llm_turn_budget_seconds: float = Field(
+        default=14.0,
+        validation_alias=AliasChoices("LLM_TURN_BUDGET_SECONDS", "GEMINI_TURN_BUDGET_SECONDS"),
+    )
     gemini_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -28,14 +40,10 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash-lite"
     # Comma-separated models tried in order when the primary returns 429/5xx (capacity spikes).
     gemini_fallback_models: str = "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash"
-    # Per-attempt timeout for every model except the last in the chain.
-    gemini_attempt_timeout_seconds: float = 30.0
     # When every model is overloaded / rate-limited, wait up to this long for one to recover.
     gemini_quota_max_wait_seconds: float = 35.0
-    # Total Gemini time per chat turn (all calls, retries and waits) before sending the outage notice.
-    gemini_turn_budget_seconds: float = 14.0
     embedding_provider: str = Field(
-        default="gemini",
+        default="openai",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),
     )
     embedding_model: str = "text-embedding-3-small"
@@ -45,7 +53,7 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
     qdrant_collection_name: str = "conocimiento_clinico"
-    embedding_dimension: int = 3072
+    embedding_dimension: int = 1536
 
     # Configuración de Caché Semántico en Qdrant
     semantic_cache_enabled: bool = True

@@ -722,7 +722,7 @@ async def process_whatsapp_message(
         }
 
         t_graph = time.perf_counter()
-        from app.core.fast_gemini import end_turn_budget, start_turn_budget
+        from app.core.llm_runtime import end_turn_budget, start_turn_budget
 
         budget_token = start_turn_budget()
         try:
@@ -814,14 +814,14 @@ async def process_whatsapp_message(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        from app.core.fast_gemini import GeminiUnavailableError
+        from app.core.llm_runtime import LLMUnavailableError
 
         if isinstance(exc, (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError)):
             reason = f"timeout ({type(exc).__name__}: {exc!s})"
-        elif isinstance(exc, GeminiUnavailableError):
+        elif isinstance(exc, LLMUnavailableError):
             reason = str(exc)
         elif isinstance(exc, httpx.HTTPStatusError):
-            reason = f"Gemini HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+            reason = f"LLM HTTP {exc.response.status_code}: {exc.response.text[:200]}"
         else:
             logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
             reason = f"{type(exc).__name__}: {exc!s}"
