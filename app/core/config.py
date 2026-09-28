@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     gemini_fallback_models: str = "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash"
     # Per-attempt timeout for every model except the last in the chain.
     gemini_attempt_timeout_seconds: float = 30.0
+    # When every model is overloaded / rate-limited, wait up to this long for one to recover.
+    gemini_quota_max_wait_seconds: float = 35.0
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),

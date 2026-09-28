@@ -9,10 +9,11 @@ import time
 from functools import lru_cache
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import httpx
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from app.core.llm_factory import get_chat_llm
 from app.core.config import settings
-from app.core.llm_concurrency import GraphDeadlineExceeded, LLMCallTimeoutError, with_llm_slot
+from app.core.llm_concurrency import with_llm_slot
 from app.graph.state import AgentState
 
 from app.agents.tools.clinical_rag_tool import clinical_knowledge_tool
@@ -450,9 +451,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             llm.ainvoke(messages),
             label="chatbot_ainvoke",
         )
-    except (LLMCallTimeoutError, GraphDeadlineExceeded):
-        raise
-    except Exception as llm_err:
+    except httpx.HTTPStatusError as llm_err:
+        if llm_err.response.status_code not in (400, 403) or not tool_names:
+            raise
         # A rejected tool schema / call must not surface as a service outage; answer text-only.
         logger.warning(f"[Chatbot] LLM call failed with tools={list(tool_names)} ({llm_err!r}); retrying without tools")
         llm = _bound_llm_for_tools(())
