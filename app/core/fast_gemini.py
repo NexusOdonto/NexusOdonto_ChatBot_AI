@@ -242,20 +242,28 @@ class FastGeminiChat(BaseChatModel):
                 chain.append(m)
         return chain
 
+    def _attempt_timeout(self, is_last: bool) -> float:
+        """Non-final models get a shorter budget so an overloaded model that hangs doesn't stall the reply."""
+        if is_last:
+            return self.timeout
+        return min(self.timeout, float(settings.gemini_attempt_timeout_seconds or self.timeout))
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         api_key = self.google_api_key or settings.gemini_api_key
         base_body = self._build_body(messages)
         t0 = time.perf_counter()
         last_exc: Optional[Exception] = None
         with httpx.Client(timeout=self.timeout) as client:
-            for model in self._model_chain():
+            chain = self._model_chain()
+            for i, model in enumerate(chain):
                 body = json.loads(json.dumps(base_body))
                 url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+                attempt_timeout = self._attempt_timeout(i == len(chain) - 1)
                 try:
-                    resp = client.post(url, json=body)
+                    resp = client.post(url, json=body, timeout=attempt_timeout)
                     if resp.status_code == 400:
                         body["generationConfig"].pop("thinkingConfig", None)
-                        resp = client.post(url, json=body)
+                        resp = client.post(url, json=body, timeout=attempt_timeout)
                     resp.raise_for_status()
                     return self._parse_response(resp.json(), time.perf_counter() - t0, model)
                 except (httpx.HTTPStatusError, httpx.TransportError) as exc:
@@ -272,18 +280,20 @@ class FastGeminiChat(BaseChatModel):
         t0 = time.perf_counter()
         client = _get_async_client(self.timeout)
         last_exc: Optional[Exception] = None
-        for model in self._model_chain():
+        chain = self._model_chain()
+        for i, model in enumerate(chain):
             body = json.loads(json.dumps(base_body))
             url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+            attempt_timeout = self._attempt_timeout(i == len(chain) - 1)
             try:
-                resp = await client.post(url, json=body)
+                resp = await client.post(url, json=body, timeout=attempt_timeout)
                 if resp.status_code == 400:
                     logger.warning(
                         f"[FastGemini] HTTP 400 with thinkingConfig on {model}; retrying without. "
                         f"body={resp.text[:200]}"
                     )
                     body["generationConfig"].pop("thinkingConfig", None)
-                    resp = await client.post(url, json=body)
+                    resp = await client.post(url, json=body, timeout=attempt_timeout)
                 resp.raise_for_status()
                 return self._parse_response(resp.json(), time.perf_counter() - t0, model)
             except (httpx.HTTPStatusError, httpx.TransportError) as exc:

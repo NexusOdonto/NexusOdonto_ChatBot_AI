@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash-lite"
     # Comma-separated models tried in order when the primary returns 429/5xx (capacity spikes).
     gemini_fallback_models: str = "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash"
+    # Per-attempt timeout for every model except the last in the chain.
+    gemini_attempt_timeout_seconds: float = 30.0
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),
