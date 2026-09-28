@@ -101,8 +101,10 @@ def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
     return should_remind, is_primera_vez
 
 
-def _fallback_reply(phone: Optional[str]) -> str:
-    return reply_variants.pick("intermitencias", reply_variants.INTERMITENCIAS, phone=phone)
+def _fallback_reply(phone: Optional[str], mensaje_texto: str = "") -> str:
+    from app.services.info_replies import build_generic_reply
+
+    return build_generic_reply(mensaje_texto, phone=phone)
 
 
 def _ensure_portal_reminder_after_booking(
@@ -649,6 +651,15 @@ async def process_whatsapp_message(
             awaiting_booking_identity=awaiting_id,
             phone=numero_paciente,
         )
+        if not cached_response and not awaiting_id:
+            from app.services.info_replies import build_info_reply, is_fast_path_candidate
+
+            if is_fast_path_candidate(mensaje_texto):
+                cached_response = await build_info_reply(
+                    mensaje_texto, phone=numero_paciente, nombre=known_nombre
+                )
+                if cached_response:
+                    logger.info(f"[InfoReplies] ⚡ Respuesta informativa sin LLM para {numero_paciente}")
         spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
             # Track booking identity step vs continue-to-service
@@ -783,8 +794,7 @@ async def process_whatsapp_message(
             else:
                 result = await get_graph().ainvoke(invoke_input, config)
         except (GraphDeadlineExceeded, LLMCallTimeoutError) as timeout_exc:
-            # Do NOT WhatsApp a retry/error copy — users need the real reply path,
-            # not "reenvía". Log only; safety net should be high enough this is rare.
+            # Never a retry/error copy: answer from the no-LLM layer instead.
             spans["graph_total"] = time.perf_counter() - t_graph
             spans["queue_wait_total"] = graph_queue_wait_total()
             spans["total"] = time.perf_counter() - t_total
@@ -798,9 +808,10 @@ async def process_whatsapp_message(
                 f"limit={settings.graph_timeout_seconds}s "
                 f"llm_call_limit={settings.llm_call_timeout_seconds}s "
                 f"queue_wait_excluded={spans['queue_wait_total']:.3f}s "
-                f"err={timeout_exc!s} (no WhatsApp timeout message) "
+                f"err={timeout_exc!s} (respuesta sin LLM) "
                 + " ".join(f"{k}={v:.3f}s" for k, v in spans.items() if k != "queue_wait_total")
             )
+            await _send_degraded_reply(numero_paciente, mensaje_texto, bool(known_cedula), known_nombre)
             return
         spans["graph_total"] = time.perf_counter() - t_graph
         spans["queue_wait_total"] = graph_queue_wait_total()
@@ -840,7 +851,7 @@ async def process_whatsapp_message(
         # Solo escalar por baja confianza RAG cuando hubo score real de tool RAG
         if rag_conf is not None and rag_conf < settings.rag_min_confidence:
             if not await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                fallback = _fallback_reply(numero_paciente)
+                fallback = _fallback_reply(numero_paciente, mensaje_texto)
                 await evolution_client.enviar_mensaje(numero_paciente, fallback)
                 asyncio.create_task(
                     dotnet_client.registrar_mensaje(
@@ -854,14 +865,14 @@ async def process_whatsapp_message(
         # Extraer respuesta final del bot
         mensajes_resultado = result.get("messages", [])
         if not mensajes_resultado:
-            await evolution_client.enviar_mensaje(numero_paciente, _fallback_reply(numero_paciente))
+            await evolution_client.enviar_mensaje(numero_paciente, _fallback_reply(numero_paciente, mensaje_texto))
             return
 
         ultimo_mensaje = mensajes_resultado[-1]
         respuesta_texto = extract_text_content(getattr(ultimo_mensaje, "content", "")).strip()
 
         if not respuesta_texto:
-            respuesta_texto = _fallback_reply(numero_paciente)
+            respuesta_texto = _fallback_reply(numero_paciente, mensaje_texto)
         else:
             # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
             respuesta_texto = _ensure_portal_reminder_after_booking(
@@ -888,40 +899,63 @@ async def process_whatsapp_message(
         )
 
     except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError) as timeout_exc:
-        # Silent: never WhatsApp timeout/retry spam.
-        logger.warning(
-            f"[Processor] Timeout silencioso para {numero_paciente}: {timeout_exc!s} "
-            "(sin mensaje de reintento al usuario)"
-        )
+        # Never a retry/error copy. If the graph never produced a result, answer without LLM.
+        logger.warning(f"[Processor] Timeout para {numero_paciente}: {timeout_exc!s}")
+        if "result" not in locals():
+            await _send_degraded_reply(
+                numero_paciente,
+                mensaje_texto,
+                bool(locals().get("known_cedula")),
+                locals().get("known_nombre"),
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
-        degraded = _reply_without_llm(
-            mensaje_texto, bool(locals().get("known_cedula")), numero_paciente
+        await _send_degraded_reply(
+            numero_paciente,
+            mensaje_texto,
+            bool(locals().get("known_cedula")),
+            locals().get("known_nombre"),
         )
-        if degraded:
-            logger.warning(f"[Processor] LLM no disponible; respuesta de agenda sin LLM para {numero_paciente}")
-            respuesta = degraded
-        else:
-            respuesta = _fallback_reply(numero_paciente)
+
+
+async def _send_degraded_reply(
+    numero_paciente: str,
+    mensaje_texto: str,
+    cedula_conocida: bool,
+    nombre: Optional[str] = None,
+) -> None:
+    """Answer without the LLM: booking step, real catalog info, or a human follow-up question."""
+    respuesta = _reply_without_llm(mensaje_texto, cedula_conocida, numero_paciente)
+    if not respuesta:
         try:
-            await evolution_client.enviar_mensaje(numero_paciente, respuesta)
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=respuesta,
-                )
+            from app.services.info_replies import build_info_reply
+
+            respuesta = await build_info_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
+        except Exception as err:
+            logger.warning(f"[Processor] Respuesta informativa sin LLM falló: {err}")
+    if not respuesta:
+        from app.services.info_replies import build_generic_reply
+
+        respuesta = build_generic_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
+    logger.warning(f"[Processor] LLM no disponible; respuesta sin LLM para {numero_paciente}")
+    try:
+        await evolution_client.enviar_mensaje(numero_paciente, respuesta)
+        asyncio.create_task(
+            dotnet_client.registrar_mensaje(
+                chat_identifier=numero_paciente,
+                rol="CHATBOT",
+                contenido=respuesta,
             )
-            if degraded:
-                # The failed graph run already checkpointed the user's message; add only our reply.
-                await get_graph().aupdate_state(
-                    get_thread_config(numero_paciente), {"messages": [AIMessage(content=respuesta)]}
-                )
-                inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
-        except Exception:
-            pass
+        )
+        # The failed graph run already checkpointed the user's message; add only our reply.
+        await get_graph().aupdate_state(
+            get_thread_config(numero_paciente), {"messages": [AIMessage(content=respuesta)]}
+        )
+        inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
+    except Exception:
+        pass
 
 
 def _reply_without_llm(

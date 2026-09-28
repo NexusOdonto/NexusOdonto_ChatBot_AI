@@ -252,17 +252,6 @@ HORA_HOY_VALIDA = (
     "Perfecto, hoy a las {hora}.\n\nPara dejarla apartada, {pedir}",
 )
 
-INTERMITENCIAS = (
-    "En este momento tenemos una pequeña falla en el sistema. "
-    "¿Me escribes de nuevo en un ratico? Qué pena la molestia.",
-    "Uy, se nos está cayendo el sistema por un momento. "
-    "Intenta de nuevo en unos minutos, porfa. Disculpa la espera.",
-    "Tenemos intermitencias en este momento y no alcancé a revisar tu mensaje. "
-    "¿Me lo reenvías en un momentico?",
-    "Qué pena, el sistema está lento ahora mismo. "
-    "Escríbeme otra vez en unos minutos y con gusto te ayudo.",
-)
-
 ESCALAMIENTO = (
     "Entiendo. Un asesor de la clínica revisará tu solicitud y te contactará pronto.",
     "Listo, ya le paso tu caso a un asesor de la clínica; te escribe en un momento.",
