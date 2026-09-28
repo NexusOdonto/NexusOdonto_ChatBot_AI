@@ -90,7 +90,7 @@ def _get_fast_response(
     if not norm:
         return None
 
-    identity_now = parse_identity_from_text(text)
+    identity_now = parse_identity_from_text(text, allow_name_only=awaiting_booking_identity)
     has_known = bool(known_cedula and known_nombre)
     identity_complete = identity_now.complete or (
         identity_now.cedula and known_nombre

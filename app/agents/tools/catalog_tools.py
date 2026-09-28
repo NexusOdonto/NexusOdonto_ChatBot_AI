@@ -28,6 +28,210 @@ from app.agents.tools.agenda_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _intervalos_ocupados(citas_raw: Any, prof_id: Any, fecha_target: str, duracion_servicio: int) -> list:
+    if isinstance(citas_raw, dict):
+        citas_existentes = citas_raw.get("items", [])
+    elif isinstance(citas_raw, list):
+        citas_existentes = citas_raw
+    else:
+        citas_existentes = []
+
+    intervalos = []
+    for c in citas_existentes:
+        if not isinstance(c, dict):
+            continue
+        c_prof = str(
+            c.get("professionalId")
+            or c.get("profesionalId")
+            or c.get("employeeId")
+            or c.get("doctorId")
+            or ""
+        ).lower().strip()
+        c_canc = c.get("cancelledAt") or c.get("cancelado")
+        c_st_id = str(c.get("appointmentStatusId") or "").lower().strip()
+        c_st_name = str(c.get("statusName") or c.get("status") or c.get("estado") or "").lower()
+
+        if prof_id and c_prof and c_prof != str(prof_id).lower().strip():
+            continue
+
+        if c_canc or c_st_id == "10000000-0000-0000-0000-000000000005" or "cancel" in c_st_name:
+            continue
+
+        c_start_raw = str(
+            c.get("startsAt")
+            or c.get("fechaHoraInicio")
+            or c.get("startDateTime")
+            or c.get("startTime")
+            or ""
+        ).replace("Z", "").split(".")[0].replace(" ", "T")
+
+        c_end_raw = str(
+            c.get("endsAt")
+            or c.get("fechaHoraFin")
+            or c.get("endDateTime")
+            or c.get("endTime")
+            or ""
+        ).replace("Z", "").split(".")[0].replace(" ", "T")
+
+        if len(c_start_raw) <= 8 and ":" in c_start_raw:
+            c_start_raw = f"{fecha_target}T{c_start_raw}"
+        if len(c_end_raw) <= 8 and ":" in c_end_raw:
+            c_end_raw = f"{fecha_target}T{c_end_raw}"
+
+        if c_start_raw and c_start_raw[:10] == fecha_target:
+            try:
+                dt_c_start = datetime.fromisoformat(c_start_raw)
+                if c_end_raw and len(c_end_raw) >= 16:
+                    dt_c_end = datetime.fromisoformat(c_end_raw)
+                else:
+                    c_dur = int(c.get("durationMinutes") or duracion_servicio or 45)
+                    dt_c_end = dt_c_start + timedelta(minutes=c_dur)
+                intervalos.append((dt_c_start, dt_c_end))
+            except Exception:
+                pass
+    return intervalos
+
+
+async def _turnos_por_profesional(
+    profesionales: List[Dict[str, Any]],
+    fecha: str,
+    servicio_id: Any,
+    duracion_servicio: int,
+) -> List[tuple]:
+    """[(prof_id, prof_nombre, slots HH:MM | None si no tiene horario)] libres para la fecha.
+
+    Respeta la regla del profesional, almuerzo 12-14, cierre 17:00, duración del servicio,
+    citas existentes y (si es hoy) un margen de 30 min.
+    """
+    iso_day = None
+    try:
+        iso_day = datetime.strptime(fecha[:10], "%Y-%m-%d").isoweekday()
+    except Exception:
+        pass
+
+    # Una sola consulta de citas del día (antes: por cada profesional)
+    fecha_target = str(fecha)[:10]
+    try:
+        citas_raw_shared = await dotnet_client.consultar_citas(fecha_target)
+        if not citas_raw_shared:
+            citas_raw_shared = await dotnet_client.consultar_citas("")
+    except Exception:
+        citas_raw_shared = None
+
+    try:
+        from zoneinfo import ZoneInfo
+        now_bogota = datetime.now(ZoneInfo("America/Bogota"))
+    except Exception:
+        now_bogota = datetime.now()
+
+    resultados = []
+    for prof in profesionales:
+        prof_id = _obtener_valor(prof, "id", "profesionalId", "professionalId")
+        prof_nombre = _obtener_valor(prof, "name", "nombre", "nombreCompleto")
+        if not prof_nombre:
+            prof_nombre = f"Dr. ID {prof_id}"
+
+        horarios = await dotnet_client.consultar_disponibilidad(
+            profesional_id=prof_id,
+            fecha=fecha,
+            servicio_id=servicio_id,
+        )
+        if not horarios:
+            resultados.append((prof_id, prof_nombre, None))
+            continue
+
+        slots = []
+        for h in horarios:
+            h_prof = str(_obtener_valor(h, "professionalId", "profesionalId") or "")
+            if h_prof and h_prof.lower() != str(prof_id).lower():
+                continue
+
+            start_day = _obtener_valor(h, "startDay", "diaInicio")
+            end_day = _obtener_valor(h, "endDay", "diaFin")
+            start_time = _obtener_valor(h, "startTime", "horaInicio")
+            end_time = _obtener_valor(h, "endTime", "horaFin")
+            lunch_start = _obtener_valor(h, "lunchStartTime", "horaAlmuerzoInicio")
+            lunch_end = _obtener_valor(h, "lunchEndTime", "horaAlmuerzoFin")
+
+            if start_day is not None and end_day is not None and start_time and end_time:
+                if iso_day is None or (int(start_day) <= iso_day <= int(end_day)):
+                    gen = _generar_slots_desde_regla(
+                        str(start_time), str(end_time), lunch_start, lunch_end, duracion_servicio
+                    )
+                    slots.extend(gen)
+            else:
+                inicio = _obtener_valor(h, "horaInicio", "fechaHoraInicio", "inicio", "startTime", "startsAt")
+                if inicio:
+                    if "T" in str(inicio):
+                        inicio = str(inicio).split("T")[1][:5]
+                    else:
+                        inicio = str(inicio)[:5]
+                    slots.append(inicio)
+
+        unique_slots = sorted(list(dict.fromkeys(slots)))
+
+        # Filtrar traslapes con citas existentes
+        try:
+            intervalos_ocupados = _intervalos_ocupados(
+                citas_raw_shared, prof_id, fecha_target, duracion_servicio
+            )
+            dur_eval = max(30, int(duracion_servicio or 30))
+            slots_libres = []
+            for s in unique_slots:
+                try:
+                    s_clean = s[:5]
+                    slot_start_dt = datetime.strptime(f"{fecha_target}T{s_clean}:00", "%Y-%m-%dT%H:%M:%S")
+                    slot_end_dt = slot_start_dt + timedelta(minutes=dur_eval)
+
+                    colision = any(
+                        slot_start_dt < c_end and slot_end_dt > c_start
+                        for c_start, c_end in intervalos_ocupados
+                    )
+                    if not colision:
+                        slots_libres.append(s_clean)
+                except Exception:
+                    slots_libres.append(s[:5])
+
+            unique_slots = slots_libres
+        except Exception as c_err:
+            logger.warning(f"[CatalogTools] Error consultando citas ocupadas: {c_err}")
+
+        if str(fecha)[:10] == now_bogota.strftime("%Y-%m-%d"):
+            min_hhmm = (now_bogota + timedelta(minutes=30)).strftime("%H:%M")
+            unique_slots = [s for s in unique_slots if s >= min_hhmm]
+
+        resultados.append((prof_id, prof_nombre, unique_slots))
+    return resultados
+
+
+async def turnos_disponibles(servicio: Dict[str, Any], fecha: str) -> List[tuple]:
+    """Turnos libres de un servicio del catálogo en una fecha YYYY-MM-DD: [(prof_id, prof_nombre, [HH:MM])]."""
+    especialidades = await dotnet_client.obtener_especialidades() or []
+    esp_id = None
+    cat_servicio = _obtener_valor(servicio, "category", "categoria", "Category") or ""
+    nombre_ser = _obtener_valor(servicio, "name", "nombre") or ""
+    for candidato in (cat_servicio, nombre_ser):
+        if not candidato:
+            continue
+        esp = _buscar_especialidad_por_texto(_normalizar_texto(str(candidato)), especialidades)
+        if esp:
+            esp_id = _obtener_valor(esp, "id", "especialidadId", "specialtyId")
+            break
+
+    profesionales = []
+    if esp_id:
+        profesionales = await dotnet_client.obtener_profesionales(especialidad_id=esp_id) or []
+    if not profesionales:
+        profesionales = await dotnet_client.obtener_profesionales() or []
+    if not profesionales:
+        return []
+
+    servicio_id = _obtener_valor(servicio, "id", "servicioId", "serviceId")
+    duracion = int(_obtener_valor(servicio, "durationMinutes", "duracionMinutos") or 60)
+    turnos = await _turnos_por_profesional(profesionales, fecha, servicio_id, duracion)
+    return [(pid, nombre, slots) for pid, nombre, slots in turnos if slots]
+
+
 async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
     """Consulta la disponibilidad real de turnos evitando recesos de almuerzo (12:00 a 14:00) y traslapes."""
     try:
@@ -105,169 +309,17 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: str) -> str:
         else:
             return _mensaje_catalogo_no_encontrado(especialidad, servicios)
 
-        iso_day = None
-        try:
-            iso_day = datetime.strptime(fecha[:10], "%Y-%m-%d").isoweekday()
-        except Exception:
-            pass
-
-        # Una sola consulta de citas del día (antes: por cada profesional)
-        fecha_target = str(fecha)[:10]
-        try:
-            citas_raw_shared = await dotnet_client.consultar_citas(fecha_target)
-            if not citas_raw_shared:
-                citas_raw_shared = await dotnet_client.consultar_citas("")
-        except Exception:
-            citas_raw_shared = None
-
         resultados = []
-        for prof in profesionales:
-            prof_id = _obtener_valor(prof, "id", "profesionalId", "professionalId")
-            prof_nombre = _obtener_valor(prof, "name", "nombre", "nombreCompleto")
-            if not prof_nombre:
-                prof_nombre = f"Dr. ID {prof_id}"
-
-            horarios = await dotnet_client.consultar_disponibilidad(
-                profesional_id=prof_id,
-                fecha=fecha,
-                servicio_id=servicio_id,
-            )
-
-            if horarios:
-                slots = []
-                for h in horarios:
-                    h_prof = str(_obtener_valor(h, "professionalId", "profesionalId") or "")
-                    if h_prof and h_prof.lower() != str(prof_id).lower():
-                        continue
-
-                    start_day = _obtener_valor(h, "startDay", "diaInicio")
-                    end_day = _obtener_valor(h, "endDay", "diaFin")
-                    start_time = _obtener_valor(h, "startTime", "horaInicio")
-                    end_time = _obtener_valor(h, "endTime", "horaFin")
-                    lunch_start = _obtener_valor(h, "lunchStartTime", "horaAlmuerzoInicio")
-                    lunch_end = _obtener_valor(h, "lunchEndTime", "horaAlmuerzoFin")
-
-                    if start_day is not None and end_day is not None and start_time and end_time:
-                        if iso_day is None or (int(start_day) <= iso_day <= int(end_day)):
-                            gen = _generar_slots_desde_regla(
-                                str(start_time), str(end_time), lunch_start, lunch_end, duracion_servicio
-                            )
-                            slots.extend(gen)
-                    else:
-                        inicio = _obtener_valor(h, "horaInicio", "fechaHoraInicio", "inicio", "startTime", "startsAt")
-                        if inicio:
-                            if "T" in str(inicio):
-                                inicio = str(inicio).split("T")[1][:5]
-                            else:
-                                inicio = str(inicio)[:5]
-                            slots.append(inicio)
-
-                unique_slots = sorted(list(dict.fromkeys(slots)))
-
-                # Filtrar traslapes con citas existentes
-                try:
-                    citas_raw = citas_raw_shared
-                    if isinstance(citas_raw, dict):
-                        citas_existentes = citas_raw.get("items", [])
-                    elif isinstance(citas_raw, list):
-                        citas_existentes = citas_raw
-                    else:
-                        citas_existentes = []
-
-                    intervalos_ocupados = []
-                    for c in citas_existentes:
-                        if not isinstance(c, dict):
-                            continue
-                        c_prof = str(
-                            c.get("professionalId")
-                            or c.get("profesionalId")
-                            or c.get("employeeId")
-                            or c.get("doctorId")
-                            or ""
-                        ).lower().strip()
-                        c_canc = c.get("cancelledAt") or c.get("cancelado")
-                        c_st_id = str(c.get("appointmentStatusId") or "").lower().strip()
-                        c_st_name = str(c.get("statusName") or c.get("status") or c.get("estado") or "").lower()
-
-                        if prof_id and c_prof and c_prof != str(prof_id).lower().strip():
-                            continue
-
-                        if c_canc or c_st_id == "10000000-0000-0000-0000-000000000005" or "cancel" in c_st_name:
-                            continue
-
-                        c_start_raw = str(
-                            c.get("startsAt")
-                            or c.get("fechaHoraInicio")
-                            or c.get("startDateTime")
-                            or c.get("startTime")
-                            or ""
-                        ).replace("Z", "").split(".")[0].replace(" ", "T")
-
-                        c_end_raw = str(
-                            c.get("endsAt")
-                            or c.get("fechaHoraFin")
-                            or c.get("endDateTime")
-                            or c.get("endTime")
-                            or ""
-                        ).replace("Z", "").split(".")[0].replace(" ", "T")
-
-                        if len(c_start_raw) <= 8 and ":" in c_start_raw:
-                            c_start_raw = f"{fecha_target}T{c_start_raw}"
-                        if len(c_end_raw) <= 8 and ":" in c_end_raw:
-                            c_end_raw = f"{fecha_target}T{c_end_raw}"
-
-                        if c_start_raw and c_start_raw[:10] == fecha_target:
-                            try:
-                                dt_c_start = datetime.fromisoformat(c_start_raw)
-                                if c_end_raw and len(c_end_raw) >= 16:
-                                    dt_c_end = datetime.fromisoformat(c_end_raw)
-                                else:
-                                    c_dur = int(c.get("durationMinutes") or duracion_servicio or 45)
-                                    dt_c_end = dt_c_start + timedelta(minutes=c_dur)
-                                intervalos_ocupados.append((dt_c_start, dt_c_end))
-                            except Exception:
-                                pass
-
-                    dur_eval = max(30, int(duracion_servicio or 30))
-                    slots_libres = []
-                    for s in unique_slots:
-                        try:
-                            s_clean = s[:5]
-                            slot_start_dt = datetime.strptime(f"{fecha_target}T{s_clean}:00", "%Y-%m-%dT%H:%M:%S")
-                            slot_end_dt = slot_start_dt + timedelta(minutes=dur_eval)
-
-                            colision = any(
-                                slot_start_dt < c_end and slot_end_dt > c_start
-                                for c_start, c_end in intervalos_ocupados
-                            )
-                            if not colision:
-                                slots_libres.append(s_clean)
-                        except Exception:
-                            slots_libres.append(s[:5])
-
-                    unique_slots = slots_libres
-                except Exception as c_err:
-                    logger.warning(f"[CatalogTools] Error consultando citas ocupadas: {c_err}")
-
-                try:
-                    from zoneinfo import ZoneInfo
-                    now_bogota = datetime.now(ZoneInfo("America/Bogota"))
-                except Exception:
-                    now_bogota = datetime.now()
-
-                if str(fecha)[:10] == now_bogota.strftime("%Y-%m-%d"):
-                    min_dt = now_bogota + timedelta(minutes=30)
-                    min_hhmm = min_dt.strftime("%H:%M")
-                    unique_slots = [s for s in unique_slots if s >= min_hhmm]
-
-                if unique_slots:
-                    slots_ampm = [_formatear_hora_ampm(s) for s in unique_slots]
-                    bloque_horarios = "   ⏰ " + ", ".join(slots_ampm)
-                    resultados.append(f"👨‍⚕️ *{prof_nombre}*:\n{bloque_horarios}")
-                else:
-                    resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin turnos disponibles para esta fecha.")
-            else:
+        for _prof_id, prof_nombre, slots in await _turnos_por_profesional(
+            profesionales, fecha, servicio_id, duracion_servicio
+        ):
+            if slots is None:
                 resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin horarios registrados.")
+            elif slots:
+                bloque_horarios = "   ⏰ " + ", ".join(_formatear_hora_ampm(s) for s in slots)
+                resultados.append(f"👨‍⚕️ *{prof_nombre}*:\n{bloque_horarios}")
+            else:
+                resultados.append(f"👨‍⚕️ *{prof_nombre}*: Sin turnos disponibles para esta fecha.")
 
         if not resultados:
             return f"No se encontraron espacios disponibles para *{servicio_nombre}* en la fecha `{fecha}`. ¿Deseas consultar otro día? 😊"

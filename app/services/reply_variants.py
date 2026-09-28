@@ -223,6 +223,179 @@ PEDIR_FECHA = (
     "Muy bien{nombre}. Para *{servicio}*, ¿qué día te queda cómodo y a qué hora más o menos?",
 )
 
+# ── Agenda sin LLM: fecha → horarios → confirmación ─────────────────────────
+# Identity re-asks keep "número de cédula" / "nombre completo" + "cita" (booking_flow detects them).
+PEDIR_NOMBRE_CITA = (
+    "Gracias. ¿Y tu *nombre completo* para la cita?",
+    "Listo, ya tengo la cédula. ¿Me regalas tu *nombre completo* para la cita?",
+    "Perfecto. Para dejar la cita a tu nombre, ¿cuál es tu *nombre completo*?",
+)
+
+PEDIR_CEDULA_CITA = (
+    "Gracias{nombre}. ¿Me pasas tu *número de cédula* para la cita?",
+    "Listo{nombre}. Me falta tu *número de cédula* para apartar la cita.",
+    "Perfecto{nombre}, ¿y tu *número de cédula*? Con eso te separo la cita.",
+)
+
+REPEDIR_IDENTIDAD = (
+    "Para seguir con la cita de *{servicio}* necesito tu *número de cédula* y tu *nombre completo*.",
+    "¿Me compartes tu *número de cédula* y tu *nombre completo*? Así te aparto la cita de *{servicio}*.",
+    "Me faltan tu *número de cédula* y tu *nombre completo* para la cita de *{servicio}*.",
+)
+
+REPEDIR_FECHA = (
+    "Perdona{nombre}, no te entendí bien el día. ¿Para cuándo te agendo *{servicio}*? "
+    "Por ejemplo «mañana en la tarde» o «el jueves a las 9».",
+    "¿Qué día te sirve para *{servicio}*{nombre}? Me puedes decir algo como «el viernes en la mañana».",
+    "Cuéntame qué día y más o menos a qué hora te queda bien para *{servicio}*, y te busco espacio.",
+    "Para buscarte espacio en *{servicio}*, dime un día (hoy, mañana, el sábado...) y si prefieres mañana o tarde.",
+)
+
+REPEDIR_IDENTIDAD_GENERAL = (
+    "Para apartarte la cita me faltan tu *número de cédula* y tu *nombre completo*.",
+    "¿Me regalas tu *número de cédula* y tu *nombre completo*? Con eso seguimos con la cita.",
+)
+
+REPEDIR_FECHA_GENERAL = (
+    "¿Qué día y a qué hora te queda bien para la cita? Por ejemplo «mañana en la tarde» o «el jueves a las 9».",
+    "Cuéntame qué día te sirve y si prefieres mañana o tarde, y te busco espacio.",
+)
+
+MOTIVO_DOMINGO = (
+    "Los domingos no abrimos.",
+    "El domingo la clínica está cerrada.",
+    "Ese día no atendemos, los domingos cerramos.",
+)
+
+MOTIVO_FECHA_PASADA = (
+    "Esa fecha ya pasó.",
+    "Ese día ya quedó atrás.",
+)
+
+MOTIVO_HORA_PASADA = (
+    "Las {hora} de hoy ya pasaron.",
+    "Para hoy a las {hora} ya no alcanzamos.",
+)
+
+MOTIVO_ALMUERZO = (
+    "A las {hora} estamos en el horario de almuerzo (de 12 a 2).",
+    "De 12:00 a 2:00 PM no hay citas porque es la hora de almuerzo.",
+)
+
+MOTIVO_FUERA_JORNADA = (
+    "A las {hora} no estamos atendiendo; la jornada es de 8:00 AM a 12:00 PM y de 2:00 PM a 5:00 PM.",
+    "Las {hora} quedan por fuera del horario (8 a 12 y 2 a 5).",
+)
+
+MOTIVO_SABADO_TARDE = (
+    "Los sábados solo atendemos en la mañana, hasta las 12.",
+    "El sábado la jornada es solo de 8:00 AM a 12:00 PM.",
+)
+
+MOTIVO_NO_CABE = (
+    "A las {hora} no alcanza a quedar completo el tratamiento antes del cierre.",
+    "Empezando a las {hora} el tratamiento no alcanza a terminar dentro de la jornada.",
+)
+
+MOTIVO_OCUPADO = (
+    "{dia_cap} a las {hora} ya está ocupado.",
+    "Ese espacio de las {hora} ya lo tomaron.",
+    "A las {hora} ya no me queda libre.",
+)
+
+MOTIVO_SIN_CUPO_DIA = (
+    "Para {dia} ya no me quedan espacios.",
+    "{dia_cap} ya está lleno.",
+    "{dia_cap} no tengo cupo.",
+)
+
+MOTIVO_SIN_CUPO_PERIODO = (
+    "{dia_cap} en la {periodo} ya está lleno.",
+    "En la {periodo} de {dia} no me queda espacio.",
+)
+
+OPCIONES_CERCANAS = (
+    "Lo más cercano que tengo para *{servicio}*:",
+    "Te puedo ofrecer estos espacios:",
+    "Mira, estas opciones te pueden servir:",
+    "Tengo disponible:",
+)
+
+OPCIONES_DIA = (
+    "Para {dia} tengo estos espacios{nombre}:",
+    "{dia_cap} me quedan libres:",
+    "Listo, {dia} tengo:",
+    "Te cuento lo que hay {dia}:",
+)
+
+ELEGIR_CIERRE = (
+    "¿Cuál te queda mejor?",
+    "¿Te sirve alguno?",
+    "Dime cuál prefieres y te la aparto.",
+    "¿Con cuál nos quedamos?",
+)
+
+ELEGIR_SLOT_REPROMPT = (
+    "¿Cuál de estos te sirve{nombre}?\n{opciones}",
+    "Dale, ¿con cuál te quedas?\n{opciones}",
+    "Solo dime cuál de estos prefieres:\n{opciones}",
+)
+
+CONFIRMAR_CITA = (
+    "Te cuento cómo quedaría{nombre}:\n\n{resumen}\n\n¿Te la dejo agendada?",
+    "Perfecto. Así quedaría la cita:\n\n{resumen}\n\n¿La confirmo?",
+    "Listo{nombre}, tengo este espacio:\n\n{resumen}\n\n¿Te la aparto?",
+    "Me queda así:\n\n{resumen}\n\n¿Confirmamos?",
+)
+
+REPEDIR_CONFIRMACION = (
+    "¿Te la dejo agendada entonces?\n\n{resumen}\n\nDime sí, o si prefieres otro día u hora.",
+    "Solo me falta tu confirmación{nombre}:\n\n{resumen}\n\n¿La aparto?",
+)
+
+NO_CONFIRMA = (
+    "Sin problema{nombre}. ¿Qué otro día u hora te sirve?",
+    "Listo, no la agendo todavía. ¿Prefieres otro día u otra hora?",
+    "Dale, la dejamos quieta. ¿Qué día te acomoda mejor?",
+)
+
+CITA_AGENDADA = (
+    "¡Listo{nombre}! Tu cita quedó agendada:",
+    "Hecho{nombre}, ya quedó tu cita:",
+    "Perfecto{nombre}, te quedó agendada así:",
+    "¡Quedó{nombre}! Estos son los datos de tu cita:",
+)
+
+CITA_DESPEDIDA = (
+    "Te esperamos en la Calle 100 # 15-20. Si necesitas algo, me escribes por aquí.",
+    "Nos vemos en la clínica (Calle 100 # 15-20). Cualquier cosa me cuentas.",
+    "Te esperamos. Si te surge algo, por aquí mismo lo cambiamos.",
+)
+
+MISMA_PERSONA = (
+    "Veo que la cédula {cedula} está registrada a nombre de *{registrado}*. ¿Eres tú? "
+    "Si es así, dime «sí» y te la agendo.",
+    "Esa cédula ({cedula}) la tengo a nombre de *{registrado}*. ¿Confirmas que eres tú?",
+)
+
+MISMA_PERSONA_NO = (
+    "Entendido. Revisemos los datos: ¿me pasas de nuevo tu *número de cédula* y tu *nombre completo* para la cita?",
+    "Listo, corrijamos. ¿Cuál es tu *número de cédula* y tu *nombre completo* para la cita?",
+)
+
+SIN_CUPOS = (
+    "Por ahora no veo espacios para *{servicio}* en los próximos días. Si quieres, llámanos al "
+    "*+57 324 6030217* y te buscamos un hueco.",
+    "En los próximos días está todo lleno para *{servicio}*. ¿Te sirve otra fecha más adelante? "
+    "También puedes llamarnos al *+57 324 6030217*.",
+)
+
+SEGUIMOS_CITA = (
+    "Cuando quieras seguimos con la cita de *{servicio}*: ¿qué día te sirve?",
+    "Y para la cita de *{servicio}*, ¿qué día te acomoda?",
+    "Si quieres seguimos con *{servicio}*: dime el día y la hora que prefieras.",
+)
+
 # Cola de una frase ("Para buscarte el turno, {pedir}") → minúscula inicial.
 PEDIR_TRATAMIENTO_CORTO = (
     "¿qué tratamiento necesitas?",

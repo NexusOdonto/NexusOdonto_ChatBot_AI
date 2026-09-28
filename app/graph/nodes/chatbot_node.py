@@ -376,8 +376,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             prev_ai_msg = str(m.content).strip().lower()
 
     # Prefer identity on the current turn if present
+    asked_identity = prev_asked_for_booking_identity(prev_ai_msg)
     if last_user_msg:
-        turn_id = parse_identity_from_text(last_user_msg)
+        turn_id = parse_identity_from_text(last_user_msg, allow_name_only=asked_identity)
         if turn_id.cedula:
             cedula_detectada = turn_id.cedula
         if turn_id.nombre:
@@ -394,7 +395,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
         norm_user = last_user_msg.lower()
-        turn_id = parse_identity_from_text(last_user_msg)
+        turn_id = parse_identity_from_text(last_user_msg, allow_name_only=asked_identity)
         if same_day and not turn_id.cedula:
             context_str += _same_day_hint(same_day, now, bool(cedula_detectada))
         elif re.match(r"^\d{7,12}$", last_user_msg) and any(
@@ -440,6 +441,17 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 "\n[ACCIÓN] Inicio de agendamiento sin cédula: responde en texto pidiendo "
                 "número de cédula y nombre completo. PROHIBIDO invocar herramientas en este turno."
             )
+
+    booking_flow = str(uc.get("booking_flow") or "").strip()
+    if booking_flow:
+        context_str += (
+            f"\n[CITA EN CURSO] {booking_flow}. El último mensaje del paciente responde a esa "
+            "pregunta pendiente: continúa desde ahí aunque tenga errores de tipeo. PROHIBIDO reiniciar, "
+            "volver a pedir datos ya dados o preguntar «¿en qué te ayudo?» / «¿es para agendar...?». "
+            "Horarios reales con consultar_disponibilidad_tool (servicio + fecha YYYY-MM-DD); "
+            "si el día está cerrado u ocupado, dilo natural y ofrece 2-4 turnos cercanos. "
+            "Solo tras un «sí» explícito crea la cita con agendar_cita_tool."
+        )
 
     combined_system_message = SystemMessage(
         content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO]\n{context_str}"

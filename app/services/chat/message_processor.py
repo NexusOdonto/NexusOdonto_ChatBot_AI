@@ -102,9 +102,10 @@ def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
 
 
 def _fallback_reply(phone: Optional[str], mensaje_texto: str = "") -> str:
+    from app.services.booking_assistant import reprompt_pending_question
     from app.services.info_replies import build_generic_reply
 
-    return build_generic_reply(mensaje_texto, phone=phone)
+    return (phone and reprompt_pending_question(phone)) or build_generic_reply(mensaje_texto, phone=phone)
 
 
 def _ensure_portal_reminder_after_booking(
@@ -636,12 +637,24 @@ async def process_whatsapp_message(
         except Exception as hist_err:
             logger.debug("[Processor] No se pudo leer historial para booking: %s", hist_err)
 
-        hist_identity = extract_identity_from_history_newest_first(history_msgs)
-        msg_identity = parse_identity_from_text(mensaje_texto)
-        known_cedula = msg_identity.cedula or hist_identity.cedula
-        known_nombre = msg_identity.nombre or hist_identity.nombre
+        from app.services.booking_flow import describe_session_for_llm, get_session, sync_session_identity
+
         awaiting_id = is_awaiting_booking_identity(numero_paciente) or prev_asked_for_booking_identity(
             prev_ai_text
+        )
+        booking_session = get_session(numero_paciente)
+        hist_identity = extract_identity_from_history_newest_first(history_msgs)
+        msg_identity = parse_identity_from_text(mensaje_texto, allow_name_only=awaiting_id)
+        known_cedula = (
+            msg_identity.cedula
+            or (booking_session.cedula if booking_session else None)
+            or hist_identity.cedula
+        )
+        # A name only comes from this message in the identity step; otherwise keep the one we have.
+        known_nombre = (
+            (msg_identity.nombre if (awaiting_id or msg_identity.cedula) else None)
+            or (booking_session.nombre if booking_session else None)
+            or hist_identity.nombre
         )
 
         # Caché semántico (⚡ 0 tokens) — booking-aware
@@ -652,19 +665,30 @@ async def process_whatsapp_message(
             is_fast_path_candidate,
         )
 
+        from app.services.booking_assistant import handle_booking_turn, nudge_for_active_booking
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+
+        now_local = _dt.now(ZoneInfo(settings.reminder_timezone or "America/Bogota"))
         identity_known = bool(known_cedula and known_nombre)
-        cached_response = await build_service_booking_reply(
-            mensaje_texto,
-            phone=numero_paciente,
-            prev_ai_text=prev_ai_text,
-            nombre=known_nombre,
-            identity_known=identity_known,
-        )
+        cached_response = await handle_booking_turn(numero_paciente, mensaje_texto, now=now_local)
         if cached_response:
-            logger.info(f"[InfoReplies] ⚡ Agenda con servicio elegido sin LLM para {numero_paciente}")
-            if not identity_known:
-                mark_awaiting_booking_identity(numero_paciente)
+            logger.info(f"[BookingAssistant] ⚡ Paso de agenda sin LLM para {numero_paciente}")
         else:
+            cached_response = await build_service_booking_reply(
+                mensaje_texto,
+                phone=numero_paciente,
+                prev_ai_text=prev_ai_text,
+                nombre=known_nombre,
+                identity_known=identity_known,
+            )
+            if cached_response:
+                logger.info(f"[InfoReplies] ⚡ Agenda con servicio elegido sin LLM para {numero_paciente}")
+                if identity_known:
+                    sync_session_identity(numero_paciente, known_cedula, known_nombre)
+                else:
+                    mark_awaiting_booking_identity(numero_paciente)
+        if not cached_response:
             cached_response = await buscar_en_cache(
                 mensaje_texto,
                 known_cedula=known_cedula,
@@ -679,6 +703,9 @@ async def process_whatsapp_message(
                 )
                 if cached_response:
                     logger.info(f"[InfoReplies] ⚡ Respuesta informativa sin LLM para {numero_paciente}")
+                    nudge = nudge_for_active_booking(numero_paciente)
+                    if nudge:
+                        cached_response = f"{cached_response}\n\n{nudge}"
         spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
             # Track booking identity step vs continue-to-service
@@ -793,6 +820,7 @@ async def process_whatsapp_message(
             "is_registered": bool(known_cedula),
             "phone": numero_paciente,
             "push_name": push_name.strip() if push_name else "",
+            "booking_flow": describe_session_for_llm(numero_paciente),
         }
 
         invoke_input = {
@@ -833,7 +861,9 @@ async def process_whatsapp_message(
                 f"err={timeout_exc!s} (respuesta sin LLM) "
                 + " ".join(f"{k}={v:.3f}s" for k, v in spans.items() if k != "queue_wait_total")
             )
-            await _send_degraded_reply(numero_paciente, mensaje_texto, bool(known_cedula), known_nombre)
+            await _send_degraded_reply(
+                numero_paciente, mensaje_texto, bool(known_cedula), known_nombre, prev_ai_text
+            )
             return
         finally:
             end_turn_budget(budget_token)
@@ -902,6 +932,14 @@ async def process_whatsapp_message(
             respuesta_texto = _ensure_portal_reminder_after_booking(
                 respuesta_texto, mensajes_resultado, phone=numero_paciente
             )
+            if any(
+                getattr(m, "name", "") == "agendar_cita_tool"
+                and "confirmada con éxito" in str(m.content or "").lower()
+                for m in _tool_messages_this_turn(mensajes_resultado)
+            ):
+                from app.services.booking_flow import clear_pending_service
+
+                clear_pending_service(numero_paciente)
 
         t_send = time.perf_counter()
         await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
@@ -931,6 +969,7 @@ async def process_whatsapp_message(
                 mensaje_texto,
                 bool(locals().get("known_cedula")),
                 locals().get("known_nombre"),
+                locals().get("prev_ai_text") or "",
             )
     except asyncio.CancelledError:
         raise
@@ -946,6 +985,7 @@ async def process_whatsapp_message(
             mensaje_texto,
             bool(locals().get("known_cedula")),
             locals().get("known_nombre"),
+            locals().get("prev_ai_text") or "",
         )
 
 
@@ -954,16 +994,29 @@ async def _send_degraded_reply(
     mensaje_texto: str,
     cedula_conocida: bool,
     nombre: Optional[str] = None,
+    prev_ai_text: str = "",
 ) -> None:
-    """Answer without the LLM: booking step, real catalog info, or a human follow-up question."""
-    respuesta = _reply_without_llm(mensaje_texto, cedula_conocida, numero_paciente)
-    if not respuesta:
-        try:
-            from app.services.info_replies import build_info_reply
+    """Answer without the LLM, always relative to the pending question when there is one.
 
-            respuesta = await build_info_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
-        except Exception as err:
-            logger.warning(f"[Processor] Respuesta informativa sin LLM falló: {err}")
+    Order: real catalog info (plus a nudge back to the booking) → re-ask the pending booking
+    question → same-day/booking-start step → human follow-up (only with no context at all).
+    """
+    from app.services.booking_assistant import nudge_for_active_booking, reprompt_pending_question
+
+    respuesta = None
+    try:
+        from app.services.info_replies import build_info_reply
+
+        respuesta = await build_info_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
+        nudge = nudge_for_active_booking(numero_paciente) if respuesta else None
+        if nudge:
+            respuesta = f"{respuesta}\n\n{nudge}"
+    except Exception as err:
+        logger.warning(f"[Processor] Respuesta informativa sin LLM falló: {err}")
+    if not respuesta:
+        respuesta = reprompt_pending_question(numero_paciente, prev_ai_text)
+    if not respuesta:
+        respuesta = _reply_without_llm(mensaje_texto, cedula_conocida, numero_paciente)
     if not respuesta:
         from app.services.info_replies import build_generic_reply
 

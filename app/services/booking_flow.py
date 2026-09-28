@@ -11,7 +11,8 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Iterable, Optional
 
 from app.services import reply_variants
@@ -20,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 # In-memory pending booking identity capture (phone → expiry monotonic).
 _PENDING_BOOKING_IDENTITY: dict[str, float] = {}
-# Service the patient already chose (phone → (label, expiry monotonic)).
-_PENDING_SERVICE: dict[str, tuple[str, float]] = {}
+# Booking in progress per phone (service, identity, offered slots, proposal).
+_SESSIONS: dict[str, "BookingSession"] = {}
 _PENDING_TTL_SECONDS = 15 * 60.0
 
 _BOOKING_START_RE = re.compile(
@@ -128,8 +129,12 @@ def parse_same_day_time(text: str) -> Optional[tuple[int, int]]:
     return None
 
 
-def parse_identity_from_text(text: str) -> PatientIdentity:
-    """Parse cédula and/or full name from a user message."""
+def parse_identity_from_text(text: str, *, allow_name_only: bool = False) -> PatientIdentity:
+    """Parse cédula and/or full name from a user message.
+
+    A name without a cédula is only taken when `allow_name_only` (the bot just asked for it);
+    otherwise casual replies like "pues bueno el domingo" would become the patient's name.
+    """
     raw = (text or "").strip()
     if not raw:
         return PatientIdentity()
@@ -150,7 +155,12 @@ def parse_identity_from_text(text: str) -> PatientIdentity:
         remainder = re.sub(r"\s+", " ", remainder).strip()
         if remainder and _looks_like_person_name(remainder):
             nombre = _clean_name(remainder)
-    elif _looks_like_person_name(raw) and len(raw.split()) >= 2 and not any(ch.isdigit() for ch in raw):
+    elif (
+        allow_name_only
+        and _looks_like_person_name(raw)
+        and len(raw.split()) >= 2
+        and not any(ch.isdigit() for ch in raw)
+    ):
         nombre = _clean_name(raw)
 
     return PatientIdentity(cedula=ced, nombre=nombre)
@@ -161,29 +171,32 @@ def _clean_name(name: str) -> str:
     return " ".join(p.title() for p in parts)
 
 
+_NAME_STOPWORDS = frozenset(
+    """
+    pues bueno buena buenas buenos listo lista ok okay oka vale dale si no sip nop hola gracias
+    claro perfecto perfecta mejor seria sería entonces porfa favor por please gusto igual tal vez
+    quiero quisiera necesito deseo agendar agenda cita citas una uno un para hoy manana mañana
+    pasado proximo próximo proxima próxima siguiente tarde noche temprano semana dia día hora horas
+    lunes martes miercoles miércoles jueves viernes sabado sábado domingo el en a al
+    am pm tipo como sobre despues después antes que qué cual cuál cuando cuándo donde dónde
+    limpieza profilaxis resina calza blanqueamiento injerto encia encía valoracion valoración
+    doctor doctora dra dr odontologo odontólogo precio precios cuanto cuánto cuesta vale
+    """.split()
+)
+
+
 def _looks_like_person_name(text: str) -> bool:
     parts = [p for p in re.split(r"\s+", (text or "").strip()) if p]
     if len(parts) < 2 or len(parts) > 6:
         return False
-    skip = {
-        "quiero",
-        "agendar",
-        "cita",
-        "una",
-        "para",
-        "hoy",
-        "manana",
-        "mañana",
-        "limpieza",
-        "profilaxis",
-        "resina",
-        "blanqueamiento",
-        "doctor",
-        "doctora",
-    }
-    if any(p.lower() in skip for p in parts):
+    if any(p.lower().strip(".'-") in _NAME_STOPWORDS for p in parts):
         return False
     return all(re.fullmatch(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ.'-]+", p) for p in parts)
+
+
+def _asked_for_name(ai_text: str) -> bool:
+    low = (ai_text or "").lower()
+    return "nombre" in low and ("cédula" in low or "cedula" in low or "completo" in low or "llamas" in low)
 
 
 def extract_identity_from_messages(messages: Iterable[Any]) -> PatientIdentity:
@@ -214,31 +227,40 @@ def extract_identity_from_messages(messages: Iterable[Any]) -> PatientIdentity:
     return PatientIdentity(cedula=cedula, nombre=nombre)
 
 
-def extract_identity_from_history_newest_first(messages: Iterable[Any]) -> PatientIdentity:
-    """Extract identity preferring the newest human message that has data."""
-    msgs = list(messages)
-    # Prefer newest complete identity
-    for msg in reversed(msgs):
+def _human_turns_with_prompt(messages: Iterable[Any]) -> list[tuple[str, str]]:
+    """[(human text, previous bot text)] in chronological order."""
+    turns: list[tuple[str, str]] = []
+    prev_ai = ""
+    for msg in messages:
         cls = type(msg).__name__
+        content = getattr(msg, "content", None)
+        if cls == "AIMessage" or getattr(msg, "type", None) == "ai":
+            if content:
+                prev_ai = str(content)
+            continue
         if cls != "HumanMessage" and getattr(msg, "type", None) != "human":
             continue
-        content = getattr(msg, "content", None)
-        if not content:
-            continue
-        parsed = parse_identity_from_text(str(content))
+        if content:
+            turns.append((str(content), prev_ai))
+    return turns
+
+
+def extract_identity_from_history_newest_first(messages: Iterable[Any]) -> PatientIdentity:
+    """Extract identity preferring the newest human message that has data.
+
+    Name-only messages count only when the bot had just asked for the name.
+    """
+    parsed_turns = [
+        parse_identity_from_text(text, allow_name_only=_asked_for_name(prev_ai))
+        for text, prev_ai in _human_turns_with_prompt(messages)
+    ]
+    for parsed in reversed(parsed_turns):
         if parsed.complete:
             return parsed
     # Fallback: merge fragments across recent human turns
     cedula = None
     nombre = None
-    for msg in reversed(msgs):
-        cls = type(msg).__name__
-        if cls != "HumanMessage" and getattr(msg, "type", None) != "human":
-            continue
-        content = getattr(msg, "content", None)
-        if not content:
-            continue
-        parsed = parse_identity_from_text(str(content))
+    for parsed in reversed(parsed_turns):
         if parsed.cedula and not cedula:
             cedula = parsed.cedula
         if parsed.nombre and not nombre:
@@ -304,28 +326,123 @@ def is_awaiting_booking_identity(phone: str) -> bool:
     return True
 
 
+@dataclass
+class Slot:
+    fecha: date
+    hhmm: str
+    prof_id: str
+    prof_nombre: str
+
+
+@dataclass
+class BookingSession:
+    """Booking in progress for one phone. Stages: identity → date → slot → confirm (→ confirm_identity)."""
+
+    servicio: str
+    cedula: Optional[str] = None
+    nombre: Optional[str] = None
+    stage: str = "identity"
+    offered: list[Slot] = field(default_factory=list)
+    proposed: Optional[Slot] = None
+    registered_name: Optional[str] = None
+    expires: float = 0.0
+
+    @property
+    def identity_complete(self) -> bool:
+        return bool(self.cedula and self.nombre)
+
+
+def _session_key(phone: str) -> str:
+    return (phone or "").strip()
+
+
+def get_session(phone: str) -> Optional[BookingSession]:
+    key = _session_key(phone)
+    session = _SESSIONS.get(key) if key else None
+    if session and time.monotonic() > session.expires:
+        _SESSIONS.pop(key, None)
+        return None
+    return session
+
+
+def save_session(phone: str, session: BookingSession) -> None:
+    key = _session_key(phone)
+    if key:
+        session.expires = time.monotonic() + _PENDING_TTL_SECONDS
+        _SESSIONS[key] = session
+
+
 def set_pending_service(phone: str, servicio: str) -> None:
-    key = (phone or "").strip()
-    if key and servicio:
-        _PENDING_SERVICE[key] = (servicio, time.monotonic() + _PENDING_TTL_SECONDS)
-        logger.info("[BookingFlow] servicio elegido para %s: %s", key, servicio)
+    """Start (or switch the service of) a booking; identity already captured is kept."""
+    key = _session_key(phone)
+    if not key or not servicio:
+        return
+    session = get_session(key) or BookingSession(servicio=servicio)
+    session.servicio = servicio
+    session.offered, session.proposed = [], None
+    session.stage = "date" if session.identity_complete else "identity"
+    save_session(key, session)
+    logger.info("[BookingFlow] servicio elegido para %s: %s", key, servicio)
 
 
 def get_pending_service(phone: str) -> Optional[str]:
-    key = (phone or "").strip()
-    entry = _PENDING_SERVICE.get(key) if key else None
-    if not entry:
-        return None
-    if time.monotonic() > entry[1]:
-        _PENDING_SERVICE.pop(key, None)
-        return None
-    return entry[0]
+    session = get_session(phone)
+    return session.servicio if session else None
 
 
 def clear_pending_service(phone: str) -> None:
-    key = (phone or "").strip()
+    key = _session_key(phone)
     if key:
-        _PENDING_SERVICE.pop(key, None)
+        _SESSIONS.pop(key, None)
+
+
+def sync_session_identity(phone: str, cedula: Optional[str], nombre: Optional[str]) -> None:
+    """Fill identity gaps of an active booking; a name already captured is never replaced by a guess."""
+    session = get_session(phone)
+    if not session:
+        return
+    if cedula and cedula != session.cedula:
+        session.cedula = cedula
+        session.nombre = nombre or None
+    elif nombre and not session.nombre:
+        session.nombre = nombre
+    if session.stage == "identity" and session.identity_complete:
+        session.stage = "date"
+    save_session(phone, session)
+
+
+def describe_session_for_llm(phone: str) -> str:
+    """One-line booking state for the LLM prompt ('' when no booking is in progress)."""
+    session = get_session(phone)
+    if not session:
+        return ""
+    from app.services.natural_datetime import dia_humano, hora_humana
+
+    today = reply_variants._now_bogota().date()
+    pendiente = {
+        "identity": "esperando cédula y nombre completo",
+        "date": "esperando qué día y hora prefiere",
+        "slot": "esperando que elija uno de los horarios ofrecidos",
+        "confirm": "esperando que confirme la cita propuesta",
+        "confirm_identity": "esperando que confirme si es la persona registrada con esa cédula",
+    }.get(session.stage, session.stage)
+    parts = [f"servicio={session.servicio}", f"pregunta pendiente: {pendiente}"]
+    if session.cedula:
+        parts.append(f"cédula={session.cedula}")
+    if session.nombre:
+        parts.append(f"nombre={session.nombre}")
+    if session.offered:
+        opciones = "; ".join(
+            f"{dia_humano(s.fecha, today)} {hora_humana(s.hhmm)} con {s.prof_nombre} ({s.fecha.isoformat()}T{s.hhmm})"
+            for s in session.offered
+        )
+        parts.append(f"horarios ofrecidos: {opciones}")
+    if session.proposed:
+        p = session.proposed
+        parts.append(
+            f"cita propuesta: {p.fecha.isoformat()}T{p.hhmm} con {p.prof_nombre} (profesional_id={p.prof_id})"
+        )
+    return " | ".join(parts)
 
 
 def build_ask_service_response(*, nombre: Optional[str] = None, phone: Optional[str] = None) -> str:
