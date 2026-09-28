@@ -30,6 +30,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+from app.core.log_redaction import install_log_redaction
+
+install_log_redaction()
 logger = logging.getLogger(__name__)
 
 # Importar los routers de la API

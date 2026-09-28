@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     gemini_attempt_timeout_seconds: float = 30.0
     # When every model is overloaded / rate-limited, wait up to this long for one to recover.
     gemini_quota_max_wait_seconds: float = 35.0
+    # Total Gemini time per chat turn (all calls, retries and waits) before answering without the LLM.
+    gemini_turn_budget_seconds: float = 14.0
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),

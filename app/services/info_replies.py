@@ -255,6 +255,116 @@ async def build_info_reply(
     return "\n\n".join(secciones)
 
 
+_WANT_OR_BOOK = re.compile(
+    r"\b(necesito|necesitaria|quiero|quisiera|me gustaria|deseo|busco|me interesa|hacerme|me hago"
+    r"|agendar|agendame|agenda|agendo|sacar|separar|separame|reservar|apartar|programar)\b"
+    r"|\b(una )?cita (para|de)\b"
+)
+_NOT_BOOKING = re.compile(r"\b(cancelar|cancela|reprogramar|modificar|cambiar|cuanto|precio|precios|costo)\b")
+# Last bot message offered the catalog or asked which treatment.
+_OFFER_MARKERS = (
+    "te interesa alguno",
+    "llama la atención",
+    "te separo una cita",
+    "te agende alguno",
+    "servicios y precios",
+    " — $",
+    "qué tratamiento",
+    "que tratamiento",
+)
+_SERVICE_SYNONYMS = {
+    "limpieza": ("limpieza", "profilaxis"),
+    "limpiar": ("limpieza", "profilaxis"),
+    "profilaxis": ("profilaxis",),
+    "blanqueamiento": ("blanqueamiento",),
+    "blanquear": ("blanqueamiento",),
+    "blanqueo": ("blanqueamiento",),
+    "resina": ("resina",),
+    "resinas": ("resina",),
+    "calza": ("calza", "resina"),
+    "calzas": ("calza", "resina"),
+    "injerto": ("injerto",),
+    "encia": ("injerto", "encia"),
+}
+_GENERIC_TOKENS = {"dental", "dentales", "clinico", "clinica", "estetica", "estetico", "general", "servicio"}
+
+
+def _service_tokens(servicio: dict) -> set[str]:
+    from app.agents.tools.agenda_helpers import _etiqueta_servicio
+
+    raw = f"{_etiqueta_servicio(servicio)} {servicio.get('name') or ''}"
+    return {t for t in _norm(raw).split() if len(t) >= 5 and t not in _GENERIC_TOKENS}
+
+
+def match_service(text: str, servicios: list[dict]) -> Optional[dict]:
+    """Catalog service named in the text (accent-insensitive, synonyms), or None."""
+    words = set(_norm(text).split())
+    wanted = set()
+    for w in words:
+        wanted.update(_SERVICE_SYNONYMS.get(w, ()))
+        if len(w) >= 5 and w not in _GENERIC_TOKENS:
+            wanted.add(w[:-1] if w.endswith("s") and len(w) > 5 else w)
+    best, best_score = None, 0
+    for servicio in servicios:
+        tokens = _service_tokens(servicio)
+        score = sum(1 for t in tokens if t in wanted or (t.endswith("s") and t[:-1] in wanted))
+        # Explicit synonym hits outrank incidental word overlap.
+        score += sum(2 for w in words for syn in _SERVICE_SYNONYMS.get(w, ())[:1] if syn in tokens)
+        if score > best_score:
+            best, best_score = servicio, score
+    return best
+
+
+def is_service_booking_intent(text: str, prev_ai_text: str = "") -> bool:
+    norm = _norm(text)
+    if not norm or _NOT_BOOKING.search(norm):
+        return False
+    if _WANT_OR_BOOK.search(norm):
+        return True
+    if _PAIN.search(norm):
+        return False
+    prev = (prev_ai_text or "").lower()
+    return len(norm.split()) <= 6 and any(m in prev for m in _OFFER_MARKERS)
+
+
+async def build_service_booking_reply(
+    text: str,
+    *,
+    phone: Optional[str] = None,
+    prev_ai_text: str = "",
+    nombre: Optional[str] = None,
+    identity_known: bool = False,
+) -> Optional[str]:
+    """Booking reply when the patient names a catalog service; stores the choice for later steps."""
+    if not is_service_booking_intent(text, prev_ai_text):
+        return None
+    servicios = await _servicios()
+    servicio = match_service(text, servicios) if servicios else None
+    if not servicio:
+        return None
+    from app.agents.tools.agenda_helpers import _etiqueta_servicio
+    from app.services.booking_flow import set_pending_service
+
+    etiqueta = _etiqueta_servicio(servicio)
+    if phone:
+        set_pending_service(phone, etiqueta)
+    precio = _precio(servicio.get("price"))
+    duracion = servicio.get("durationMinutes")
+    if identity_known:
+        pool, key = (SERVICIO_PEDIR_FECHA if precio and duracion else SERVICIO_PEDIR_FECHA_SIMPLE), "servicio_fecha"
+    else:
+        pool, key = (SERVICIO_PEDIR_DATOS if precio and duracion else SERVICIO_PEDIR_DATOS_SIMPLE), "servicio_datos"
+    return rv.pick(
+        key,
+        pool,
+        phone=phone,
+        nombre=nombre,
+        servicio=etiqueta,
+        precio=precio or "",
+        duracion=str(duracion or ""),
+    )
+
+
 def build_generic_reply(
     text: str = "", *, phone: Optional[str] = None, nombre: Optional[str] = None
 ) -> str:
@@ -357,6 +467,38 @@ CIERRE_GENERAL = (
     "¿Quieres que te separe una cita?",
     "Si quieres, te ayudo a agendar.",
     "¿Hay algo más en lo que te pueda ayudar{nombre}?",
+)
+
+# Must keep "número de cédula" + "nombre completo" + "cita": booking_flow detects the identity step by text.
+SERVICIO_PEDIR_DATOS = (
+    "¡Claro! *{servicio}* tiene un valor de *{precio}* y dura unos {duracion} minutos.\n\n"
+    "Para agendarte la cita, ¿me pasas tu *número de cédula* y tu *nombre completo*?",
+    "Perfecto, *{servicio}* ({precio}, aprox. {duracion} minutos).\n\n"
+    "Para separarte la cita necesito tu *número de cédula* y tu *nombre completo*.",
+    "Listo, te ayudo con *{servicio}*. Está en *{precio}* y toma cerca de {duracion} minutos.\n\n"
+    "¿Me regalas tu *número de cédula* y tu *nombre completo* para apartar la cita?",
+    "Con gusto. *{servicio}* cuesta *{precio}* (unos {duracion} minutos).\n\n"
+    "Para la cita, ¿me compartes tu *número de cédula* y tu *nombre completo*?",
+)
+
+SERVICIO_PEDIR_DATOS_SIMPLE = (
+    "¡Claro! Te ayudo con *{servicio}*.\n\n"
+    "Para agendarte la cita, ¿me pasas tu *número de cédula* y tu *nombre completo*?",
+    "Perfecto, *{servicio}*. Para separarte la cita necesito tu *número de cédula* y tu *nombre completo*.",
+)
+
+SERVICIO_PEDIR_FECHA = (
+    "Perfecto{nombre}. *{servicio}* está en *{precio}* (unos {duracion} minutos).\n\n"
+    "¿Qué día y a qué hora te gustaría venir?",
+    "Listo{nombre}, *{servicio}*: {precio}, cerca de {duracion} minutos.\n\n"
+    "¿Para qué fecha y hora te agendo la cita?",
+    "Claro{nombre}. *{servicio}* cuesta *{precio}* y dura unos {duracion} minutos.\n\n"
+    "¿Qué día te queda cómodo y a qué hora?",
+)
+
+SERVICIO_PEDIR_FECHA_SIMPLE = (
+    "Perfecto{nombre}, *{servicio}*. ¿Qué día y a qué hora te gustaría venir?",
+    "Listo{nombre}. ¿Para qué fecha y hora te agendo *{servicio}*?",
 )
 
 GENERICO = (

@@ -7,6 +7,7 @@ langchain-google-genai path that cannot pass Gemini 3 thinkingConfig.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -32,6 +33,28 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _async_client: Optional[httpx.AsyncClient] = None
+
+# Monotonic deadline shared by every Gemini call of the current chat turn.
+_TURN_DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "gemini_turn_deadline", default=None
+)
+
+
+class GeminiUnavailableError(RuntimeError):
+    """Every Gemini model is cooling down or the turn budget ran out: answer without the LLM."""
+
+
+def start_turn_budget(seconds: Optional[float] = None) -> contextvars.Token:
+    budget = float(seconds if seconds is not None else settings.gemini_turn_budget_seconds or 0)
+    return _TURN_DEADLINE.set(time.monotonic() + budget if budget > 0 else None)
+
+
+def end_turn_budget(token: contextvars.Token) -> None:
+    _TURN_DEADLINE.reset(token)
+
+
+def _request_headers(api_key: str) -> dict[str, str]:
+    return {"x-goog-api-key": api_key}
 
 
 def _get_async_client(timeout: float) -> httpx.AsyncClient:
@@ -244,29 +267,48 @@ class FastGeminiChat(BaseChatModel):
                 chain.append(m)
         return chain
 
-    def _attempt_timeout(self, is_last: bool) -> float:
-        """Non-final models get a shorter budget so an overloaded model that hangs doesn't stall the reply."""
-        if is_last:
-            return self.timeout
-        return min(self.timeout, float(settings.gemini_attempt_timeout_seconds or self.timeout))
+    def _attempt_timeout(self, is_last: bool, deadline: float) -> float:
+        """Non-final models get a shorter budget; no attempt may outlive the turn deadline."""
+        base = self.timeout if is_last else min(
+            self.timeout, float(settings.gemini_attempt_timeout_seconds or self.timeout)
+        )
+        return max(1.0, min(base, deadline - time.monotonic()))
+
+    def _deadline(self) -> float:
+        turn = _TURN_DEADLINE.get()
+        if turn is not None:
+            return turn
+        budget = float(settings.gemini_turn_budget_seconds or 0)
+        return time.monotonic() + (budget if budget > 0 else self.timeout)
+
+    def _plan_attempts(self, rnd: int, deadline: float) -> list[str]:
+        if time.monotonic() >= deadline:
+            raise GeminiUnavailableError("[FastGemini] turn budget exhausted")
+        chain = _ready_models(self._model_chain())
+        if not chain and rnd == 0:
+            raise GeminiUnavailableError("[FastGemini] all Gemini models cooling down")
+        return chain
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        api_key = self.google_api_key or settings.gemini_api_key
+        headers = _request_headers(self.google_api_key or settings.gemini_api_key)
         base_body = self._build_body(messages)
         t0 = time.perf_counter()
+        deadline = self._deadline()
         last_exc: Optional[Exception] = None
         with httpx.Client(timeout=self.timeout) as client:
             for rnd in range(2):
-                chain = _ready_models(self._model_chain())
+                chain = self._plan_attempts(rnd, deadline)
                 for i, model in enumerate(chain):
+                    if time.monotonic() >= deadline:
+                        break
                     body = json.loads(json.dumps(base_body))
-                    url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
-                    attempt_timeout = self._attempt_timeout(i == len(chain) - 1)
+                    url = f"{_GEMINI_BASE}/models/{model}:generateContent"
+                    attempt_timeout = self._attempt_timeout(i == len(chain) - 1, deadline)
                     try:
-                        resp = client.post(url, json=body, timeout=attempt_timeout)
+                        resp = client.post(url, json=body, headers=headers, timeout=attempt_timeout)
                         if resp.status_code == 400:
                             body["generationConfig"].pop("thinkingConfig", None)
-                            resp = client.post(url, json=body, timeout=attempt_timeout)
+                            resp = client.post(url, json=body, headers=headers, timeout=attempt_timeout)
                         resp.raise_for_status()
                         return self._parse_response(resp.json(), time.perf_counter() - t0, model)
                     except (httpx.HTTPStatusError, httpx.TransportError) as exc:
@@ -275,33 +317,36 @@ class FastGeminiChat(BaseChatModel):
                             raise
                         _mark_cooldown(model, exc)
                         logger.warning(f"[FastGemini] {model} unavailable ({_describe(exc)}); trying next model")
-                wait = _wait_before_retry(self._model_chain(), rnd)
+                wait = _wait_before_retry(self._model_chain(), rnd, deadline)
                 if wait is None:
                     break
                 time.sleep(wait)
-        raise last_exc or RuntimeError("[FastGemini] all Gemini models cooling down")
+        raise _final_error(last_exc)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        api_key = self.google_api_key or settings.gemini_api_key
+        headers = _request_headers(self.google_api_key or settings.gemini_api_key)
         base_body = self._build_body(messages)
         t0 = time.perf_counter()
+        deadline = self._deadline()
         client = _get_async_client(self.timeout)
         last_exc: Optional[Exception] = None
         for rnd in range(2):
-            chain = _ready_models(self._model_chain())
+            chain = self._plan_attempts(rnd, deadline)
             for i, model in enumerate(chain):
+                if time.monotonic() >= deadline:
+                    break
                 body = json.loads(json.dumps(base_body))
-                url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
-                attempt_timeout = self._attempt_timeout(i == len(chain) - 1)
+                url = f"{_GEMINI_BASE}/models/{model}:generateContent"
+                attempt_timeout = self._attempt_timeout(i == len(chain) - 1, deadline)
                 try:
-                    resp = await client.post(url, json=body, timeout=attempt_timeout)
+                    resp = await client.post(url, json=body, headers=headers, timeout=attempt_timeout)
                     if resp.status_code == 400:
                         logger.warning(
                             f"[FastGemini] HTTP 400 with thinkingConfig on {model}; retrying without. "
                             f"body={resp.text[:200]}"
                         )
                         body["generationConfig"].pop("thinkingConfig", None)
-                        resp = await client.post(url, json=body, timeout=attempt_timeout)
+                        resp = await client.post(url, json=body, headers=headers, timeout=attempt_timeout)
                     resp.raise_for_status()
                     return self._parse_response(resp.json(), time.perf_counter() - t0, model)
                 except (httpx.HTTPStatusError, httpx.TransportError) as exc:
@@ -310,11 +355,11 @@ class FastGeminiChat(BaseChatModel):
                         raise
                     _mark_cooldown(model, exc)
                     logger.warning(f"[FastGemini] {model} unavailable ({_describe(exc)}); trying next model")
-            wait = _wait_before_retry(self._model_chain(), rnd)
+            wait = _wait_before_retry(self._model_chain(), rnd, deadline)
             if wait is None:
                 break
             await asyncio.sleep(wait)
-        raise last_exc or RuntimeError("[FastGemini] all Gemini models cooling down")
+        raise _final_error(last_exc)
 
 
 # model → monotonic time until which it is skipped (overloaded / quota exhausted).
@@ -345,13 +390,16 @@ def _mark_cooldown(model: str, exc: Exception) -> None:
     _MODEL_COOLDOWN[model] = time.monotonic() + seconds
 
 
-def _wait_before_retry(chain: list[str], rnd: int) -> Optional[float]:
+def _wait_before_retry(chain: list[str], rnd: int, deadline: Optional[float] = None) -> Optional[float]:
     """Seconds to wait for the first model to leave cooldown, or None if we should give up."""
     if rnd > 0:
         return None
     now = time.monotonic()
     wait = max(0.0, min(_MODEL_COOLDOWN.get(m, 0.0) for m in chain) - now)
     if wait > float(settings.gemini_quota_max_wait_seconds or 0):
+        return None
+    # Leave at least a couple of seconds for the retried call itself.
+    if deadline is not None and now + wait + 2.0 > deadline:
         return None
     logger.warning(f"[FastGemini] all models busy; retrying in {wait:.1f}s")
     return wait
@@ -364,6 +412,14 @@ def _is_transient(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _TRANSIENT_STATUS
     return isinstance(exc, httpx.TransportError)
+
+
+def _final_error(last_exc: Optional[Exception]) -> Exception:
+    """400/403 stay HTTPStatusError so the chatbot node can retry without tools."""
+    if isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code in (400, 403):
+        return last_exc
+    detail = _describe(last_exc) if last_exc else "cooling down"
+    return GeminiUnavailableError(f"[FastGemini] Gemini unavailable ({detail})")
 
 
 def _describe(exc: Exception) -> str:

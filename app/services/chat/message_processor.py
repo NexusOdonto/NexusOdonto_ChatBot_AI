@@ -232,8 +232,9 @@ async def reset_conversation(phone_number: str) -> None:
 
     dotnet_client.limpiar_cache_conversacion(phone_number)
     try:
-        from app.services.booking_flow import clear_awaiting_booking_identity
+        from app.services.booking_flow import clear_awaiting_booking_identity, clear_pending_service
         clear_awaiting_booking_identity(phone_number)
+        clear_pending_service(phone_number)
     except Exception:
         pass
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
@@ -598,8 +599,9 @@ async def process_whatsapp_message(
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
             inactivity_service.cancel(numero_paciente)
             try:
-                from app.services.booking_flow import clear_awaiting_booking_identity
+                from app.services.booking_flow import clear_awaiting_booking_identity, clear_pending_service
                 clear_awaiting_booking_identity(numero_paciente)
+                clear_pending_service(numero_paciente)
             except Exception:
                 pass
 
@@ -644,16 +646,33 @@ async def process_whatsapp_message(
 
         # Caché semántico (⚡ 0 tokens) — booking-aware
         t_cache = time.perf_counter()
-        cached_response = await buscar_en_cache(
-            mensaje_texto,
-            known_cedula=known_cedula,
-            known_nombre=known_nombre,
-            awaiting_booking_identity=awaiting_id,
-            phone=numero_paciente,
+        from app.services.info_replies import (
+            build_info_reply,
+            build_service_booking_reply,
+            is_fast_path_candidate,
         )
-        if not cached_response and not awaiting_id:
-            from app.services.info_replies import build_info_reply, is_fast_path_candidate
 
+        identity_known = bool(known_cedula and known_nombre)
+        cached_response = await build_service_booking_reply(
+            mensaje_texto,
+            phone=numero_paciente,
+            prev_ai_text=prev_ai_text,
+            nombre=known_nombre,
+            identity_known=identity_known,
+        )
+        if cached_response:
+            logger.info(f"[InfoReplies] ⚡ Agenda con servicio elegido sin LLM para {numero_paciente}")
+            if not identity_known:
+                mark_awaiting_booking_identity(numero_paciente)
+        else:
+            cached_response = await buscar_en_cache(
+                mensaje_texto,
+                known_cedula=known_cedula,
+                known_nombre=known_nombre,
+                awaiting_booking_identity=awaiting_id,
+                phone=numero_paciente,
+            )
+        if not cached_response and not awaiting_id:
             if is_fast_path_candidate(mensaje_texto):
                 cached_response = await build_info_reply(
                     mensaje_texto, phone=numero_paciente, nombre=known_nombre
@@ -783,6 +802,9 @@ async def process_whatsapp_message(
         }
 
         t_graph = time.perf_counter()
+        from app.core.fast_gemini import end_turn_budget, start_turn_budget
+
+        budget_token = start_turn_budget()
         try:
             timeout_s = float(settings.graph_timeout_seconds or 0)
             if timeout_s > 0:
@@ -813,6 +835,8 @@ async def process_whatsapp_message(
             )
             await _send_degraded_reply(numero_paciente, mensaje_texto, bool(known_cedula), known_nombre)
             return
+        finally:
+            end_turn_budget(budget_token)
         spans["graph_total"] = time.perf_counter() - t_graph
         spans["queue_wait_total"] = graph_queue_wait_total()
 
@@ -911,7 +935,12 @@ async def process_whatsapp_message(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
+        from app.core.fast_gemini import GeminiUnavailableError
+
+        if isinstance(exc, GeminiUnavailableError):
+            logger.warning(f"[Processor] {exc} → respuesta sin LLM para {numero_paciente}")
+        else:
+            logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
         await _send_degraded_reply(
             numero_paciente,
             mensaje_texto,

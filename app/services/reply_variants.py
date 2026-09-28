@@ -213,6 +213,16 @@ PEDIR_SERVICIO = (
     "¿Qué tratamiento buscas? Si quieres te cuento los *servicios y precios* que manejamos.",
 )
 
+# Tras recibir cédula + nombre cuando ya eligió servicio: no volver a preguntar el tratamiento.
+PEDIR_FECHA = (
+    "Listo{nombre}, ya tengo tus datos para *{servicio}*.\n\n"
+    "¿Qué día y a qué hora te queda bien? Atendemos de lunes a viernes de 8:00 AM a 12:00 PM "
+    "y de 2:00 PM a 5:00 PM, y los sábados de 8:00 AM a 12:00 PM.",
+    "Perfecto{nombre}, anotado: *{servicio}*.\n\n¿Qué fecha y hora prefieres para la cita?",
+    "Gracias{nombre}. ¿Para qué día agendamos *{servicio}*? Dime también si te sirve más en la mañana o en la tarde.",
+    "Muy bien{nombre}. Para *{servicio}*, ¿qué día te queda cómodo y a qué hora más o menos?",
+)
+
 # Cola de una frase ("Para buscarte el turno, {pedir}") → minúscula inicial.
 PEDIR_TRATAMIENTO_CORTO = (
     "¿qué tratamiento necesitas?",

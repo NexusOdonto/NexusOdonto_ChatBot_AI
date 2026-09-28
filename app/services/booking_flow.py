@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 # In-memory pending booking identity capture (phone → expiry monotonic).
 _PENDING_BOOKING_IDENTITY: dict[str, float] = {}
+# Service the patient already chose (phone → (label, expiry monotonic)).
+_PENDING_SERVICE: dict[str, tuple[str, float]] = {}
 _PENDING_TTL_SECONDS = 15 * 60.0
 
 _BOOKING_START_RE = re.compile(
@@ -302,8 +304,40 @@ def is_awaiting_booking_identity(phone: str) -> bool:
     return True
 
 
+def set_pending_service(phone: str, servicio: str) -> None:
+    key = (phone or "").strip()
+    if key and servicio:
+        _PENDING_SERVICE[key] = (servicio, time.monotonic() + _PENDING_TTL_SECONDS)
+        logger.info("[BookingFlow] servicio elegido para %s: %s", key, servicio)
+
+
+def get_pending_service(phone: str) -> Optional[str]:
+    key = (phone or "").strip()
+    entry = _PENDING_SERVICE.get(key) if key else None
+    if not entry:
+        return None
+    if time.monotonic() > entry[1]:
+        _PENDING_SERVICE.pop(key, None)
+        return None
+    return entry[0]
+
+
+def clear_pending_service(phone: str) -> None:
+    key = (phone or "").strip()
+    if key:
+        _PENDING_SERVICE.pop(key, None)
+
+
 def build_ask_service_response(*, nombre: Optional[str] = None, phone: Optional[str] = None) -> str:
-    """Deterministic next booking step after identity is known — never invents slots."""
+    """Deterministic next booking step after identity is known — never invents slots.
+
+    If the patient already picked a service, skip straight to date/time.
+    """
+    servicio = get_pending_service(phone) if phone else None
+    if servicio:
+        return reply_variants.pick(
+            "pedir_fecha", reply_variants.PEDIR_FECHA, phone=phone, nombre=nombre, servicio=servicio
+        )
     return reply_variants.pick(
         "pedir_servicio", reply_variants.PEDIR_SERVICIO, phone=phone, nombre=nombre
     )
