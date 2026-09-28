@@ -706,6 +706,34 @@ def _parsear_fecha_hora_flexible(texto: str) -> Optional[datetime]:
     return None
 
 
+def franjas_restantes_hoy(now: datetime, margen_min: int = 30) -> str:
+    """Jornada que aún queda hoy en texto natural (ej. 'de 10:30 AM a 12:00 PM y de 2:00 PM a 5:00 PM').
+
+    Vacío si ya no queda jornada hoy. Son franjas de atención, no turnos confirmados.
+    """
+    wd = now.weekday()
+    if wd == 6:
+        return ""
+    jornadas = [(time(8, 0), time(12, 0))] if wd == 5 else [(time(8, 0), time(12, 0)), (time(14, 0), time(17, 0))]
+    earliest = now.replace(tzinfo=None, second=0, microsecond=0) + timedelta(minutes=margen_min)
+    if earliest.minute not in (0, 30):
+        extra = 30 - (earliest.minute % 30)
+        earliest += timedelta(minutes=extra)
+    base = earliest.replace(hour=0, minute=0)
+    if earliest.date() != now.date():
+        return ""
+    franjas = []
+    for ini, fin in jornadas:
+        ini_dt = base.replace(hour=ini.hour, minute=ini.minute)
+        fin_dt = base.replace(hour=fin.hour, minute=fin.minute)
+        start = max(ini_dt, earliest)
+        if start + timedelta(minutes=30) <= fin_dt:
+            franjas.append(
+                f"de {_formatear_hora_ampm(start.strftime('%H:%M'))} a {_formatear_hora_ampm(fin_dt.strftime('%H:%M'))}"
+            )
+    return " y ".join(franjas)
+
+
 def _validar_horario_cita(
     dt: datetime,
     duracion_min: int = 30,
@@ -781,10 +809,18 @@ def _validar_horario_cita(
     if dt.date() == now_bogota.date():
         dt_check = dt.replace(tzinfo=now_bogota.tzinfo) if dt.tzinfo is None and now_bogota.tzinfo else dt
         if dt_check <= now_bogota:
+            restantes = franjas_restantes_hoy(now_bogota)
+            if restantes:
+                return (
+                    False,
+                    f"Las *{hora_sol}* de hoy ya pasaron. Hoy todavía atendemos {restantes}. "
+                    "Consulta la disponibilidad de hoy (consultar_disponibilidad_tool) y ofrece "
+                    "los turnos libres más cercanos, o mañana si lo prefiere.",
+                )
             return (
                 False,
-                f"Las *{hora_sol}* de hoy ya pasaron. Con gusto te busco el turno más cercano "
-                "que quede disponible hoy o, si prefieres, para mañana. ¿Te consulto los horarios?",
+                f"Las *{hora_sol}* de hoy ya pasaron y por hoy ya cerramos la jornada. "
+                "Ofrece consultar la disponibilidad del próximo día hábil.",
             )
         if dt_check < now_bogota + timedelta(minutes=15):
             return (

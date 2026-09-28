@@ -89,6 +89,41 @@ def is_booking_start_intent(text: str) -> bool:
     return False
 
 
+_HOY_RE = re.compile(r"\bhoy\b")
+_HORA_RE = re.compile(
+    r"(?:\ba\s+las?\s+|\blas\s+)?\b(\d{1,2})(?:[:.h](\d{2}))?\s*"
+    r"(a\s*\.?\s*m\b\.?|p\s*\.?\s*m\b\.?|de\s+la\s+manana|de\s+la\s+tarde|del\s+mediodia)?"
+)
+
+
+def parse_same_day_time(text: str) -> Optional[tuple[int, int]]:
+    """(hour24, minute) when the user asks for a specific time *today*, e.g. 'hoy a las 9AM'."""
+    import unicodedata
+
+    norm = "".join(
+        c for c in unicodedata.normalize("NFD", (text or "").lower()) if unicodedata.category(c) != "Mn"
+    )
+    if not norm or not _HOY_RE.search(norm):
+        return None
+    for m in _HORA_RE.finditer(norm):
+        prefix = m.group(0).lstrip().startswith(("a la", "las"))
+        suffix = (m.group(3) or "").replace(" ", "").replace(".", "")
+        if not prefix and not suffix:
+            continue
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        if hour > 23 or minute > 59:
+            continue
+        if suffix in ("pm", "delatarde") and hour < 12:
+            hour += 12
+        elif suffix in ("am", "delamanana") and hour == 12:
+            hour = 0
+        elif not suffix and 1 <= hour <= 6:
+            hour += 12
+        return hour, minute
+    return None
+
+
 def parse_identity_from_text(text: str) -> PatientIdentity:
     """Parse cédula and/or full name from a user message."""
     raw = (text or "").strip()

@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, HumanMessage
 from app.core.llm_factory import get_chat_llm
@@ -136,10 +136,33 @@ _ALL_TOOLS = (
 )
 
 
-def _select_tools(last_user_msg: str, prev_ai_msg: str, cedula: str | None) -> tuple:
+def _same_day_request(last_user_msg: str, now: datetime) -> tuple[datetime, bool] | None:
+    """(requested datetime, already_passed) for 'hoy a las X' requests; 15-min prep margin counts as passed."""
+    from app.services.booking_flow import parse_same_day_time
+
+    norm = (last_user_msg or "").lower()
+    if any(k in norm for k in ("cancelar", "anular", "reprogramar", "modificar")):
+        return None
+    hm = parse_same_day_time(last_user_msg)
+    if not hm:
+        return None
+    req = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+    return req, req < now + timedelta(minutes=15)
+
+
+def _select_tools(
+    last_user_msg: str,
+    prev_ai_msg: str,
+    cedula: str | None,
+    same_day: tuple[datetime, bool] | None = None,
+) -> tuple:
     """Bind only tools likely needed this turn — smaller schemas → faster Gemini TTFT."""
     norm = (last_user_msg or "").lower()
     prev = (prev_ai_msg or "").lower()
+
+    if same_day and not cedula:
+        # Past hour: may look up today's real slots if the service is known; valid hour: ask identity only.
+        return (consultar_disponibilidad_tool,) if same_day[1] else tuple()
 
     # Pure price / catalog questions
     if any(k in norm for k in ("precio", "precios", "vale", "cuesta", "cuanto", "tarif")) and not any(
@@ -205,8 +228,13 @@ def _bound_llm_for_tools(tool_names: tuple[str, ...]):
     return primary_llm.bind_tools(tools)
 
 
-def get_llm_with_tools(last_user_msg: str = "", prev_ai_msg: str = "", cedula: str | None = None):
-    selected = _select_tools(last_user_msg, prev_ai_msg, cedula)
+def get_llm_with_tools(
+    last_user_msg: str = "",
+    prev_ai_msg: str = "",
+    cedula: str | None = None,
+    same_day: tuple[datetime, bool] | None = None,
+):
+    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day)
     tool_names = tuple(t.name for t in selected)
     return _bound_llm_for_tools(tool_names), tool_names
 
@@ -252,6 +280,46 @@ def _trim_history(raw_msgs: list, *, is_gemini: bool) -> list:
     if len(chat_messages) > _MAX_HISTORY_MESSAGES:
         chat_messages = chat_messages[-_MAX_HISTORY_MESSAGES:]
     return chat_messages
+
+
+def _same_day_hint(same_day: tuple[datetime, bool], now: datetime, cedula_conocida: bool) -> str:
+    from app.agents.tools.agenda_helpers import (
+        _formatear_hora_ampm,
+        _validar_horario_cita,
+        franjas_restantes_hoy,
+    )
+
+    req, passed = same_day
+    hora_req = _formatear_hora_ampm(req.strftime("%H:%M"))
+    pedir_id = (
+        "" if cedula_conocida
+        else " Para apartarla pide su número de cédula y nombre completo (y el tratamiento si no lo ha dicho)."
+    )
+    if passed:
+        restantes = franjas_restantes_hoy(now)
+        if restantes:
+            return (
+                f"\n[ACCIÓN] Pidió hoy a las {hora_req}, pero esa hora ya pasó (son las "
+                f"{_formatear_hora_ampm(now.strftime('%H:%M'))}). Díselo con naturalidad, sin tono de error, "
+                f"y ofrécele lo que queda de hoy: atendemos {restantes}. Si ya sabes el tratamiento, usa "
+                "consultar_disponibilidad_tool con la fecha de HOY para darle turnos exactos; si no, pregunta "
+                f"qué hora de esas le sirve.{pedir_id}"
+            )
+        return (
+            f"\n[ACCIÓN] Pidió hoy a las {hora_req}, pero por hoy ya cerramos la jornada. Díselo con "
+            f"naturalidad y ofrécele el próximo día hábil.{pedir_id}"
+        )
+    ok, motivo = _validar_horario_cita(req.replace(tzinfo=None), 30)
+    if not ok and motivo:
+        return (
+            f"\n[ACCIÓN] Pidió hoy a las {hora_req}, pero no está dentro de la jornada: {motivo} "
+            f"Explícalo en corto y natural.{pedir_id}"
+        )
+    return (
+        f"\n[ACCIÓN] Pidió hoy a las {hora_req}: es una hora válida dentro de la jornada, continúa el "
+        "agendamiento con normalidad (no digas que ya pasó ni que no hay cupo sin consultar)."
+        + (pedir_id or " Confirma el tratamiento y consulta disponibilidad de hoy antes de proponer la cita.")
+    )
 
 
 async def chatbot_node(state: AgentState) -> dict[str, list]:
@@ -310,11 +378,15 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     if not nombre_detectado and uc.get("nombre"):
         nombre_detectado = str(uc.get("nombre")).strip() or None
 
+    same_day = _same_day_request(last_user_msg, now) if last_user_msg else None
+
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
         norm_user = last_user_msg.lower()
         turn_id = parse_identity_from_text(last_user_msg)
-        if re.match(r"^\d{7,12}$", last_user_msg) and any(
+        if same_day and not turn_id.cedula:
+            context_str += _same_day_hint(same_day, now, bool(cedula_detectada))
+        elif re.match(r"^\d{7,12}$", last_user_msg) and any(
             w in prev_ai_msg for w in ["reprogramar", "modificar", "cambiar", "cambio"]
         ):
             context_str += (
@@ -367,12 +439,15 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     messages = [combined_system_message, *chat_messages]
 
     prompt_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
-    llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada)
+    llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
     t_llm = time.perf_counter()
     response = await with_llm_slot(
         llm.ainvoke(messages),
         label="chatbot_ainvoke",
     )
+    if not str(response.content or "").strip() and not getattr(response, "tool_calls", None):
+        logger.warning("[Chatbot] Empty LLM reply; retrying once")
+        response = await with_llm_slot(llm.ainvoke(messages), label="chatbot_ainvoke_retry")
     llm_elapsed = time.perf_counter() - t_llm
     n_tools = len(getattr(response, "tool_calls", None) or [])
     logger.info(
