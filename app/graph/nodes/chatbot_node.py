@@ -229,6 +229,25 @@ def _cedula_from_summaries(raw_msgs: list) -> str | None:
 
 
 _BOOKING_WORDS = ("cita", "turno", "horario", "disponib", "agend", "a las", "hay", "puedo ir", "sirve")
+_CONFIRM_RE = re.compile(
+    r"\b(s[ií]|confirmo|dale|listo|ok|okay|perfecto|de acuerdo|correcto|h[aá]gale|ag[eé]nd[ae]la)\b"
+)
+_HORA_PEDIDA_RE = re.compile(
+    r"\ba\s+las?\s+(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|de la ma[ñn]ana|de la tarde)?"
+)
+
+
+def _hora_pedida(last_user_msg: str) -> str | None:
+    """'el martes a las 9' → '09:00'; bare 1-6 means afternoon (clinic hours)."""
+    m = _HORA_PEDIDA_RE.search((last_user_msg or "").lower())
+    if not m:
+        return None
+    h, mi, suf = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").replace(" ", "").replace(".", "")
+    if suf in ("pm", "delatarde") and h < 12:
+        h += 12
+    elif not suf and 1 <= h <= 6:
+        h += 12
+    return f"{h:02d}:{mi:02d}" if h <= 23 and mi <= 59 else None
 
 _UNBACKED_CONFIRMATION_NUDGE = (
     "[SISTEMA] Tu respuesta afirma que la cita quedó agendada/reprogramada/cancelada, pero en este turno "
@@ -322,15 +341,18 @@ def _select_tools(
     if "confirmar" in norm:
         return (confirmar_cita_tool,)
 
-    # Identity just provided (cédula + name) mid-booking: the slot may already be chosen, so
-    # agendar must be available (never consultar_cita_por_cedula here).
-    if re.search(r"\b\d{7,12}\b", norm) and any(
-        k in prev for k in ("cédula", "cedula", "nombre completo", "agendar")
+    # Identity provided mid-booking (never consultar_cita_por_cedula here). Sending cédula+nombre is
+    # not a "yes": without an explicit confirmation in the same message the bot must summarize and
+    # ask first, so agendar is only bound when the message also confirms.
+    if re.search(r"\b\d{7,12}\b", norm) and (
+        booking_active or any(k in prev for k in ("cédula", "cedula", "nombre completo", "agendar"))
     ):
-        return _BOOKING_TOOLS
+        if _CONFIRM_RE.search(norm):
+            return _BOOKING_TOOLS
+        return tuple(t for t in _BOOKING_TOOLS if t is not agendar_cita_tool)
 
     if booking_active:
-        return _BOOKING_TOOLS + (confirmar_cita_tool,)
+        return _BOOKING_TOOLS
 
     # Mid-booking / availability
     if any(k in norm for k in ("cita", "agendar", "disponib", "horario", "turno")) or cedula:
@@ -636,6 +658,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 "Usa EXACTAMENTE esa fecha en consultar_disponibilidad_tool y en agendar_cita_tool; "
                 "no reutilices fechas de mensajes anteriores."
             )
+        hora_pedida = _hora_pedida(last_user_msg) if requested else None
+        if hora_pedida:
+            context_str += (
+                f"\n[HORA PEDIDA] {hora_pedida}: pásala como hora='{hora_pedida}' en "
+                "consultar_disponibilidad_tool y responde según la línea [HORA PEDIDA] del resultado."
+            )
         if _is_clinical_question(norm_user) and not tool_results:
             context_str += (
                 "\n[ACCIÓN] Pregunta clínica: consulta clinical_knowledge_tool antes de responder "
@@ -712,7 +740,9 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             f"[Chatbot] Reply claims an agenda change without a successful tool result "
             f"(bound_tools={list(tool_names)}); retrying with booking tools"
         )
-        retry_llm = _bound_llm_for_tools(tuple(t.name for t in _BOOKING_TOOLS))
+        retry_llm = _bound_llm_for_tools(tuple(
+            t.name for t in _BOOKING_TOOLS if t is not agendar_cita_tool or t.name in tool_names
+        ))
         response = await with_llm_slot(
             retry_llm.ainvoke([*messages, HumanMessage(content=_UNBACKED_CONFIRMATION_NUDGE)]),
             label="chatbot_ainvoke_unbacked",

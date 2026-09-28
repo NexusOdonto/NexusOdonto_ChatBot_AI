@@ -183,7 +183,7 @@ async def _notify_staff_booking_not_done(
 
 _MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
-_INTERNAL_MARKER_RE = re.compile(r"\[(?:AGENDA SIN CAMBIOS|DÍA CERRADO|SIN CUPOS|CÓMO RESPONDER)[^\]]*\]\s*")
+_INTERNAL_MARKER_RE = re.compile(r"\[(?:AGENDA SIN CAMBIOS|DÍA CERRADO|SIN CUPOS|CÓMO RESPONDER|HORA PEDIDA)[^\]]*\]\s*")
 
 
 def _to_whatsapp_format(text: str) -> str:
@@ -271,17 +271,24 @@ KEYWORDS_RESUME = {
     "reiniciar", "hablar con bot", "continuar", "inicio", "/start", "/bot"
 }
 
+# Only explicit requests for a person hand the chat over; escalation silences the bot until
+# an advisor resumes it. Urgency/pain ("urgencia", "me duele") stays with the bot and the
+# emergency detector, otherwise a normal booking gets muted with nobody attending it.
 KEYWORDS_ESCALATION = {
-    "asesor", "humano", "recepcion", "recepcionista", "persona", "operador",
-    "agente", "atencion humana", "atención humana", "soporte", "escalar",
-    "escalamiento", "tomar caso", "alerta", "estado de alerta", "urgencia",
-    "emergencia", "pasar a un humano", "pasar a humano", "hablar con humano",
-    "hablar con persona", "atender persona"
+    "asesor", "asesora", "humano", "humana", "recepcionista", "operador", "operadora",
+    "atencion humana", "atención humana", "escalar", "escalamiento",
+    "pasar a un humano", "pasar a humano", "hablar con humano", "hablar con persona",
+    "atender persona",
 }
 
+_KEYWORDS_ESCALATION_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(kw) for kw in sorted(KEYWORDS_ESCALATION, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
 ESCALAMIENTO_RE = re.compile(
-    r"\b(hablar|comunicarme|contactar|atenderme)\b.*\b(persona|humano|asesor|recepcionista)\b|"
-    r"\b(persona|humano|asesor|recepcionista)\b.*\b(hablar|comunicarme|contactar|atenderme)\b",
+    r"\b(hablar|comunicarme|contactar|atenderme)\b.*\b(persona|humano|asesor|asesora|recepcionista|agente)\b|"
+    r"\b(persona|humano|asesor|asesora|recepcionista|agente)\b.*\b(hablar|comunicarme|contactar|atenderme)\b",
     re.IGNORECASE,
 )
 
@@ -333,7 +340,7 @@ def is_escalation_request(message: str) -> bool:
     normalized = " ".join(message.lower().split())
     if ESCALAMIENTO_RE.search(normalized):
         return True
-    return any(kw in normalized for kw in KEYWORDS_ESCALATION)
+    return bool(_KEYWORDS_ESCALATION_RE.search(normalized))
 
 
 async def reset_conversation(phone_number: str) -> None:

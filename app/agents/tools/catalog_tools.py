@@ -285,6 +285,36 @@ def _rangos_slots(slots: List[str]) -> str:
     return ", ".join(partes)
 
 
+def _normalizar_hora(hora: Optional[str]) -> Optional[str]:
+    """'9', '9:00 AM', '14:00', '2 pm' → 'HH:MM'. Bare 1-6 means afternoon (clinic hours)."""
+    import re
+    m = re.search(r"(\d{1,2})(?:[:.](\d{2}))?\s*([ap])?\.?\s*m?", str(hora or "").lower())
+    if not m:
+        return None
+    h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3)
+    if ap == "p" and h < 12:
+        h += 12
+    elif ap == "a" and h == 12:
+        h = 0
+    elif not ap and 1 <= h <= 6:
+        h += 12
+    if h > 23 or mi > 59:
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def _linea_hora_pedida(hhmm: str, turnos: List[tuple]) -> str:
+    libres = [nombre for nombre, slots in turnos if hhmm in slots]
+    if libres:
+        return f"[HORA PEDIDA] {hora_corta(hhmm)}: LIBRE con {', '.join(libres)}."
+    objetivo = int(hhmm[:2]) * 60 + int(hhmm[3:])
+    cercanas = sorted(
+        {(abs(int(s[:2]) * 60 + int(s[3:]) - objetivo), s, n) for n, slots in turnos for s in slots}
+    )[:3]
+    alternativas = ", ".join(f"{hora_corta(s)} con {n}" for _d, s, n in cercanas)
+    return f"[HORA PEDIDA] {hora_corta(hhmm)}: NO está libre ese día. Más cercanas: {alternativas}."
+
+
 def _bloque_dia(dia: datetime, turnos: List[tuple]) -> str:
     detalle = "; ".join(f"{nombre} {_rangos_slots(slots)}" for nombre, slots in turnos)
     return f"• {fecha_legible(dia)} ({dia.strftime('%Y-%m-%d')}): {detalle}"
@@ -293,15 +323,17 @@ def _bloque_dia(dia: datetime, turnos: List[tuple]) -> str:
 def _sugerencias(dias: List[tuple], maximo: int = 4) -> List[str]:
     """Up to `maximo` options mixing days and morning/afternoon, earliest first."""
     por_dia = []
+    uso: Dict[str, int] = {}
     for dia, turnos in dias:
         candidatos = []
         for franja in (lambda s: s < "12:00", lambda s: s >= "14:00"):
             mejor = min(
-                ((s, n) for n, slots in turnos for s in slots if franja(s)),
+                ((s, uso.get(n, 0), n) for n, slots in turnos for s in slots if franja(s)),
                 default=None,
             )
             if mejor:
-                candidatos.append((dia, *mejor))
+                uso[mejor[2]] = uso.get(mejor[2], 0) + 1
+                candidatos.append((dia, mejor[0], mejor[2]))
         por_dia.append(candidatos)
     elegidas: List[tuple] = []
     ronda = 0
@@ -363,7 +395,9 @@ def _texto_opciones(dias: List[tuple]) -> str:
     )
 
 
-async def _consultar_disponibilidad_impl(especialidad: str, fecha: Optional[str] = None) -> str:
+async def _consultar_disponibilidad_impl(
+    especialidad: str, fecha: Optional[str] = None, hora: Optional[str] = None
+) -> str:
     """Consulta la disponibilidad real de turnos evitando recesos de almuerzo (12:00 a 14:00) y traslapes."""
     try:
         norm_query = _normalizar_texto(especialidad)
@@ -475,9 +509,12 @@ async def _consultar_disponibilidad_impl(especialidad: str, fecha: Optional[str]
         turnos = await _turnos_por_profesional(profesionales, dia.strftime("%Y-%m-%d"), servicio_id, duracion_servicio)
         libres = [(nombre, slots) for _pid, nombre, slots in turnos if slots]
         if libres:
+            hhmm = _normalizar_hora(hora)
             return (
                 f"{cabecera}\nTurnos libres el {fecha_legible(dia)}:\n"
-                f"{_texto_opciones([(dia, libres)])}\n{_INSTRUCCION_OPCIONES}"
+                f"{_texto_opciones([(dia, libres)])}\n"
+                + (f"{_linea_hora_pedida(hhmm, libres)}\n" if hhmm else "")
+                + _INSTRUCCION_OPCIONES
             )
 
         dias = await _dias_con_turnos(profesionales, servicio_id, duracion_servicio, dia)
@@ -603,19 +640,22 @@ async def _consultar_servicios_impl() -> str:
 # ─── Herramientas LangChain (async nativas — ToolNode.ainvoke sin _run_sync/t.join) ─
 
 @tool
-async def consultar_disponibilidad_tool(especialidad: str, fecha: Optional[str] = None) -> str:
+async def consultar_disponibilidad_tool(
+    especialidad: str, fecha: Optional[str] = None, hora: Optional[str] = None
+) -> str:
     """
     Consulta los horarios disponibles para un servicio odontológico (o especialidad).
     - fecha (YYYY-MM-DD): el día que pidió el paciente. Si el día está cerrado (domingo/festivo)
       o lleno, devuelve el motivo y los días más cercanos con turnos.
     - Sin fecha: cuando pregunta qué días hay o no ha dicho día; devuelve los próximos días con
       turnos empezando desde hoy.
+    - hora (HH:MM, opcional): la hora que pidió el paciente; el resultado dice si está LIBRE y con quién.
     Cada fecha del resultado trae su día de la semana correcto: úsalo tal cual.
     IMPORTANTE: Usa SOLO nombres de servicios activos del catálogo (consultar_servicios_y_precios_tool).
     No inventes ni ofrezcas ejemplos de tratamientos que no hayan salido de esa herramienta.
     Si el paciente nombra una especialidad (p. ej. ortodoncia), esta herramienta listará los servicios activos relacionados.
     """
-    return await _consultar_disponibilidad_impl(especialidad, fecha)
+    return await _consultar_disponibilidad_impl(especialidad, fecha, hora)
 
 
 @tool
