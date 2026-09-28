@@ -443,7 +443,7 @@ async def redactar_aviso(data: Dict[str, Any], alternativas: List[Dict[str, Any]
                 with_llm_slot(llm.ainvoke(messages), label="schedule_change_notice"),
                 timeout=_LLM_BUDGET_S,
             )
-            texto = _to_whatsapp_format(extract_text_content(response.content).strip())
+            texto = re.sub(r"[ \t]+\n", "\n", _to_whatsapp_format(extract_text_content(response.content).strip()))
             if not texto:
                 ultimo_error = "respuesta vacía"
             elif _AUTO_REVEAL_RE.search(texto):
