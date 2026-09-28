@@ -336,8 +336,11 @@ def _mark_cooldown(model: str, exc: Exception) -> None:
         if code == 404:
             seconds = 600.0
         elif code == 429:
-            m = _RETRY_IN_RE.search(exc.response.text or "")
-            if m:
+            text = exc.response.text or ""
+            m = _RETRY_IN_RE.search(text)
+            if "PerDay" in text:
+                seconds = 3600.0
+            elif m:
                 seconds = float(m.group(1)) + 1.0
     _MODEL_COOLDOWN[model] = time.monotonic() + seconds
 

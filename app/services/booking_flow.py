@@ -314,6 +314,36 @@ def build_ask_service_response(*, nombre: Optional[str] = None) -> str:
     )
 
 
+def build_booking_reply_without_llm(text: str, now: Any, cedula_conocida: bool = False) -> Optional[str]:
+    """Deterministic booking reply for when the LLM is unavailable; None if the message isn't booking-related."""
+    from app.agents.tools.agenda_helpers import _formatear_hora_ampm, franjas_restantes_hoy
+
+    pedir = (
+        "¿qué tratamiento necesitas?"
+        if cedula_conocida
+        else "¿me pasas tu *número de cédula*, tu *nombre completo* y el tratamiento que necesitas?"
+    )
+    hm = parse_same_day_time(text)
+    if hm:
+        req = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+        hora = _formatear_hora_ampm(req.strftime("%H:%M")).lstrip("0")
+        if req.timestamp() < now.timestamp() + 15 * 60:
+            restantes = franjas_restantes_hoy(now)
+            if restantes:
+                return (
+                    f"Las {hora} de hoy ya pasaron, pero todavía atendemos {restantes}.\n\n"
+                    f"Para buscarte el turno más cercano, {pedir}"
+                )
+            return (
+                f"Las {hora} de hoy ya pasaron y por hoy ya cerramos la jornada. "
+                f"Con gusto te busco turno para el próximo día hábil, {pedir}"
+            )
+        return f"Listo, miramos para hoy a las {hora}.\n\nPara apartarla, {pedir}"
+    if is_booking_start_intent(text):
+        return build_agendar_inicio_response()
+    return None
+
+
 def build_agendar_inicio_response() -> str:
     return (
         "Claro, te ayudo a agendar.\n\n"

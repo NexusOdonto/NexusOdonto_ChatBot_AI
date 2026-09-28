@@ -728,9 +728,9 @@ def franjas_restantes_hoy(now: datetime, margen_min: int = 30) -> str:
         fin_dt = base.replace(hour=fin.hour, minute=fin.minute)
         start = max(ini_dt, earliest)
         if start + timedelta(minutes=30) <= fin_dt:
-            franjas.append(
-                f"de {_formatear_hora_ampm(start.strftime('%H:%M'))} a {_formatear_hora_ampm(fin_dt.strftime('%H:%M'))}"
-            )
+            ini_txt = _formatear_hora_ampm(start.strftime("%H:%M")).lstrip("0")
+            fin_txt = _formatear_hora_ampm(fin_dt.strftime("%H:%M")).lstrip("0")
+            franjas.append(f"de {ini_txt} a {fin_txt}")
     return " y ".join(franjas)
 
 

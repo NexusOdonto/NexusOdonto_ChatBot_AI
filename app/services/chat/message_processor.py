@@ -909,14 +909,38 @@ async def process_whatsapp_message(
         raise
     except Exception as exc:
         logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
+        respuesta = MENSAJE_FALLBACK_PACIENTE
+        degraded = _reply_without_llm(mensaje_texto, bool(locals().get("known_cedula")))
+        if degraded:
+            logger.warning(f"[Processor] LLM no disponible; respuesta de agenda sin LLM para {numero_paciente}")
+            respuesta = degraded
         try:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+            await evolution_client.enviar_mensaje(numero_paciente, respuesta)
             asyncio.create_task(
                 dotnet_client.registrar_mensaje(
                     chat_identifier=numero_paciente,
                     rol="CHATBOT",
-                    contenido=MENSAJE_FALLBACK_PACIENTE,
+                    contenido=respuesta,
                 )
             )
+            if degraded:
+                # The failed graph run already checkpointed the user's message; add only our reply.
+                await get_graph().aupdate_state(
+                    get_thread_config(numero_paciente), {"messages": [AIMessage(content=respuesta)]}
+                )
+                inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
         except Exception:
             pass
+
+
+def _reply_without_llm(mensaje_texto: str, cedula_conocida: bool) -> Optional[str]:
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from app.services.booking_flow import build_booking_reply_without_llm
+
+        now = datetime.now(ZoneInfo(settings.reminder_timezone or "America/Bogota"))
+        return build_booking_reply_without_llm(mensaje_texto, now, cedula_conocida)
+    except Exception as err:
+        logger.warning(f"[Processor] Respuesta sin LLM falló: {err}")
+        return None
