@@ -106,7 +106,10 @@ async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
         "- Es dolor o cita de una zona NO dental (rodilla, espalda, brazo, pie, etc.).\n"
         "- Solo dice 'me duele mucho' sin anclar a diente, muela, encía, boca o mandíbula.\n"
         "- Es broma, vulgaridad o falta de respeto.\n"
-        "- Es agendar cita, precios, ortodoncia u consulta rutinaria.\n\n"
+        "- Es agendar cita, precios, ortodoncia u consulta rutinaria.\n"
+        "- Solo pide que lo atiendan pronto o 'con urgencia' por un dolor de diente/muela común "
+        "(es una cita prioritaria). Si el dolor es insoportable/intolerable/'no aguanto', o hay "
+        "sangrado que no para, trauma, hinchazón facial o fiebre, sí es EMERGENCIA.\n\n"
         "Responde ESTRICTAMENTE con una sola palabra: EMERGENCIA o REGULAR."
     )
 
