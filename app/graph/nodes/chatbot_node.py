@@ -397,10 +397,15 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     dias_semana = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     dia_nombre = dias_semana[now.weekday()]
 
-    # Compact temporal block (rules already in SYSTEM_MESSAGE).
+    # Compact temporal block (rules already in SYSTEM_MESSAGE). The explicit calendar keeps the
+    # model from miscounting weekdays ("el sábado") into the wrong date.
+    proximos = ", ".join(
+        f"{dias_semana[d.weekday()]}={d.strftime('%Y-%m-%d')}"
+        for d in (now + timedelta(days=i) for i in range(1, 8))
+    )
     context_str = (
-        f"HOY={fecha_str} ({dia_nombre}) HORA_CO={hora_str}. "
-        "Usa esta fecha para 'hoy'/'mañana'. No ofrezcas horarios pasados. "
+        f"HOY={fecha_str} ({dia_nombre}) HORA_CO={hora_str}. PRÓXIMOS DÍAS: {proximos}. "
+        "Usa estas fechas exactas para 'hoy'/'mañana'/días de la semana. No ofrezcas horarios pasados. "
         "Disponibilidad solo con consultar_disponibilidad_tool."
     )
 
