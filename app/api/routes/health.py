@@ -46,13 +46,11 @@ async def health_deep():
     try:
         from app.session.postgres_checkpointer import get_checkpointer_instance
         checkpointer = get_checkpointer_instance()
-        if checkpointer and checkpointer.is_connected:
-            results["postgres_checkpointer"] = {"status": "up"}
-        else:
-            results["postgres_checkpointer"] = {
-                "status": "up",
-                "note": "Checkpointer activo en pool de sesiones",
-            }
+        if checkpointer is None:
+            raise RuntimeError("Checkpointer no inicializado")
+        async with checkpointer.pool.connection(timeout=2.0) as conn:
+            await conn.execute("SELECT 1")
+        results["postgres_checkpointer"] = {"status": "up"}
     except Exception as e:
         results["postgres_checkpointer"] = {"status": "down", "error": str(e)}
         overall_status = "degraded"
