@@ -66,10 +66,12 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
         if ai_seen >= 4:
             break
 
+    thread_id = (config or {}).get("configurable", {}).get("thread_id")
     guard_kind, guard_msg = evaluate_content_guard(
         user_text,
         avoid_reply=last_ai_text if prior_respect else None,
         prior_respect=prior_respect,
+        phone=thread_id,
     )
     if guard_kind and guard_msg:
         logger.info(
@@ -111,8 +113,11 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
         ])
         result = extract_text_content(response.content).strip().upper()
         if "INSEGURO" in result:
-            thread_id = config.get("configurable", {}).get("thread_id")
-            texto_bloqueo = "Solo puedo ayudarte con temas odontológicos de Nexus Odonto."
+            from app.services import reply_variants
+
+            texto_bloqueo = reply_variants.pick(
+                "solo_odontologia", reply_variants.SOLO_ODONTOLOGIA, phone=thread_id
+            )
             if thread_id:
                 await evolution_client.enviar_mensaje(numero=thread_id, texto=texto_bloqueo)
 

@@ -31,7 +31,7 @@ MENSAJE_INACTIVIDAD_CITA_INCOMPLETA = (
 )
 
 MENSAJE_INACTIVIDAD_GENERAL = (
-    "Te dejo por ahora por si estás ocupado/a.\n\n"
+    "Te dejo por ahora por si estás ocupado.\n\n"
     "Cuando quieras agendar, consultar un servicio o resolver una duda, aquí estoy."
 )
 
@@ -226,10 +226,18 @@ class InactivityService:
 
         # Determinar el mensaje de cierre adecuado
         cita_en_curso = await self._detect_incomplete_appointment(numero_paciente)
+        from app.services import reply_variants
+
         mensaje_cierre = (
-            MENSAJE_INACTIVIDAD_CITA_INCOMPLETA
+            reply_variants.pick(
+                "inactividad_cita",
+                reply_variants.INACTIVIDAD_CITA_INCOMPLETA,
+                phone=numero_paciente,
+            )
             if cita_en_curso
-            else MENSAJE_INACTIVIDAD_GENERAL
+            else reply_variants.pick(
+                "inactividad", reply_variants.INACTIVIDAD_GENERAL, phone=numero_paciente
+            )
         )
 
         logger.info(

@@ -14,7 +14,7 @@ MENSAJE_SEGURIDAD_CONTRASENAS = (
 )
 
 MENSAJE_FUERA_DE_DOMINIO = (
-    "Hola, soy de recepción de *Nexus Odonto*. "
+    "Hola, estás hablando con *Nexus Odonto*. "
     "Te puedo ayudar con temas odontológicos, servicios, horarios y citas. "
     "¿En qué te oriento?"
 )

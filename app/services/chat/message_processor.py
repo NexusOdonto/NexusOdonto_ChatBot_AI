@@ -23,23 +23,13 @@ from app.core.llm_concurrency import (
 from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
 from app.session.postgres_checkpointer import get_checkpointer_instance
-from app.services.audio_service import (
-    extraer_bytes_audio,
-    transcribir_audio,
-    MENSAJE_AUDIO_NO_ENTENDIDO,
-    MENSAJE_ERROR_PROCESANDO_AUDIO,
-)
+from app.services.audio_service import extraer_bytes_audio, transcribir_audio
 from app.services.semantic_cache import buscar_en_cache
 from app.services.inactivity_service import inactivity_service
+from app.services import reply_variants
 from app.core.llm_factory import extract_text_content
 
 logger = logging.getLogger(__name__)
-
-# Mensajes institucionales de contingencia y medios
-MENSAJE_FALLBACK_PACIENTE = (
-    "En este momento presentamos intermitencias temporales en el servicio. "
-    "Por favor, intenta nuevamente en unos momentos. ¡Disculpa las molestias!"
-)
 
 _DEFAULT_WEB_PORTAL_URL = "https://nexusodonto.chatcampuslands.com/login"
 _PRIMERA_VEZ_PORTAL_FLAG = "[primera_vez_portal]"
@@ -111,7 +101,13 @@ def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
     return should_remind, is_primera_vez
 
 
-def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str:
+def _fallback_reply(phone: Optional[str]) -> str:
+    return reply_variants.pick("intermitencias", reply_variants.INTERMITENCIAS, phone=phone)
+
+
+def _ensure_portal_reminder_after_booking(
+    respuesta: str, messages: list, phone: Optional[str] = None
+) -> str:
     """
     Reinject portal ONLY if this turn had a successful agendar/modificar/cancelar
     or a consult that listed appointments. Never append from older turns.
@@ -137,46 +133,28 @@ def _ensure_portal_reminder_after_booking(respuesta: str, messages: list) -> str
     web_url = os.getenv("WEB_PORTAL_URL", _DEFAULT_WEB_PORTAL_URL).strip() or _DEFAULT_WEB_PORTAL_URL
 
     if is_primera_vez and (not has_portal or not has_creds):
-        # Drop a bare portal block if present without credentials tip, then append full tip.
-        tip = (
-            "\n\nTambién puedes ver tu cita en la *plataforma virtual*:\n"
-            f"{web_url}\n"
-            "Tu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
-            "(acceso temporal). Al entrar, cámbiala por tu seguridad; "
-            "desde aquí no podemos modificar contraseñas."
-        )
         if has_portal and not has_creds:
-            # Append credentials rule only
-            tip = (
-                "\n\nTu *usuario* es tu número de cédula y la *contraseña* también es tu número de cédula "
-                "(acceso temporal). Al entrar, cámbiala por tu seguridad; "
-                "desde aquí no podemos modificar contraseñas."
+            tip = reply_variants.pick(
+                "portal_credenciales", reply_variants.PORTAL_SOLO_CREDENCIALES, phone=phone
             )
-        return text.rstrip() + tip
+        else:
+            tip = reply_variants.pick(
+                "portal_primera_vez", reply_variants.PORTAL_PRIMERA_VEZ, phone=phone, url=web_url
+            )
+        return text.rstrip() + "\n\n" + tip
 
     if has_portal:
         return text
 
-    reminder = (
-        "\n\nTambién puedes consultar tu cita en la *plataforma virtual*:\n"
-        f"{web_url}"
+    reminder = reply_variants.pick(
+        "portal_recordatorio", reply_variants.PORTAL_RECORDATORIO, phone=phone, url=web_url
     )
-    return text.rstrip() + reminder
+    return text.rstrip() + "\n\n" + reminder
 
 # Kept for logs/docs only — never send this to WhatsApp (users want real replies, not retry spam).
 MENSAJE_GRAPH_TIMEOUT = (
     "En este momento hay bastante movimiento y tu consulta está tardando un poco. "
     "¿Me reenvías el mensaje en un momentito? Con gusto te ayudo."
-)
-
-MENSAJE_ESCALAMIENTO = (
-    "Entiendo. Un asesor de la clínica revisará tu solicitud y te contactará pronto."
-)
-
-MENSAJE_MEDIOS_NO_SOPORTADOS = (
-    "Por aquí no alcanzo a ver fotos, videos ni documentos.\n\n"
-    "¿Me cuentas por texto o nota de voz qué necesitas "
-    "(síntoma, tratamiento u orden médica)? Así te ayudo mejor."
 )
 
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
@@ -258,9 +236,7 @@ async def reset_conversation(phone_number: str) -> None:
         pass
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     # Human persona: never say "asistente virtual" / bot / sistema on WhatsApp.
-    reset_msg = (
-        "Listo, empezamos de nuevo. Hola, soy de recepción de *Nexus Odonto*. ¿En qué te ayudo?"
-    )
+    reset_msg = reply_variants.pick("reinicio", reply_variants.REINICIO, phone=phone_number)
     await evolution_client.enviar_mensaje(phone_number, reset_msg)
     asyncio.create_task(
         dotnet_client.registrar_mensaje(phone_number, "CHATBOT", reset_msg)
@@ -385,9 +361,12 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
     inactivity_service.cancel(thread_id)
     inactivity_service.cancel(phone_number)
 
-    await evolution_client.enviar_mensaje(phone_number, MENSAJE_ESCALAMIENTO)
+    msg_escalamiento = reply_variants.pick(
+        "escalamiento", reply_variants.ESCALAMIENTO, phone=phone_number
+    )
+    await evolution_client.enviar_mensaje(phone_number, msg_escalamiento)
     asyncio.create_task(
-        dotnet_client.registrar_mensaje(phone_number, "CHATBOT", MENSAJE_ESCALAMIENTO)
+        dotnet_client.registrar_mensaje(phone_number, "CHATBOT", msg_escalamiento)
     )
     return True
 
@@ -470,8 +449,11 @@ async def process_whatsapp_unsupported_media(numero_paciente: str, caption: str 
                 await escalate_conversation(numero_paciente, numero_paciente, caption)
                 return
 
-        await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_MEDIOS_NO_SOPORTADOS)
-        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", MENSAJE_MEDIOS_NO_SOPORTADOS))
+        msg_medios = reply_variants.pick(
+            "medios", reply_variants.MEDIOS_NO_SOPORTADOS, phone=numero_paciente
+        )
+        await evolution_client.enviar_mensaje(numero_paciente, msg_medios)
+        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_medios))
     except Exception as e:
         logger.error(f"[Processor] Error respondiendo medio no soportado a {numero_paciente}: {e}", exc_info=True)
 
@@ -487,23 +469,28 @@ async def process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, r
 
         audio_info = await extraer_bytes_audio(raw_payload_data, raw_message)
         if not audio_info:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_ERROR_PROCESANDO_AUDIO)
-            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", MENSAJE_ERROR_PROCESANDO_AUDIO))
+            msg = reply_variants.pick("audio_error", reply_variants.AUDIO_ERROR, phone=numero_paciente)
+            await evolution_client.enviar_mensaje(numero_paciente, msg)
+            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
             return
 
         audio_bytes, mimetype = audio_info
         texto_transcrito = await transcribir_audio(audio_bytes, mimetype)
         if not texto_transcrito:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_AUDIO_NO_ENTENDIDO)
-            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", MENSAJE_AUDIO_NO_ENTENDIDO))
+            msg = reply_variants.pick(
+                "audio_no_entendido", reply_variants.AUDIO_NO_ENTENDIDO, phone=numero_paciente
+            )
+            await evolution_client.enviar_mensaje(numero_paciente, msg)
+            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
             return
 
         logger.info(f"[Audio] Nota de voz de {numero_paciente} transcrita: '{texto_transcrito}'")
         await process_whatsapp_message(numero_paciente, texto_transcrito, push_name=push_name)
     except Exception as e:
         logger.error(f"[Audio] Error procesando audio de {numero_paciente}: {e}", exc_info=True)
-        await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_ERROR_PROCESANDO_AUDIO)
-        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", MENSAJE_ERROR_PROCESANDO_AUDIO))
+        msg = reply_variants.pick("audio_error", reply_variants.AUDIO_ERROR, phone=numero_paciente)
+        await evolution_client.enviar_mensaje(numero_paciente, msg)
+        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
 
 
 async def process_whatsapp_message(
@@ -534,9 +521,8 @@ async def process_whatsapp_message(
 
         from app.services.chat.chat_orchestrator import ChatOrchestrator
         if ChatOrchestrator.is_nonsense_or_gibberish(mensaje_texto):
-            resp_gibberish = (
-                "No te entendí bien. ¿Me lo dices otra vez con palabras? "
-                "Por ejemplo: agendar, precios o servicios."
+            resp_gibberish = reply_variants.pick(
+                "no_entendi", reply_variants.NO_ENTENDI, phone=numero_paciente
             )
             t_send = time.perf_counter()
             await evolution_client.enviar_mensaje(numero_paciente, resp_gibberish)
@@ -661,6 +647,7 @@ async def process_whatsapp_message(
             known_cedula=known_cedula,
             known_nombre=known_nombre,
             awaiting_booking_identity=awaiting_id,
+            phone=numero_paciente,
         )
         spans["cache_lookup"] = time.perf_counter() - t_cache
         if cached_response:
@@ -719,7 +706,7 @@ async def process_whatsapp_message(
         # Extra safety: if cache missed but we just got identity mid-booking, do not greet.
         if awaiting_id and msg_identity.cedula and (msg_identity.nombre or known_nombre):
             cached_response = build_ask_service_response(
-                nombre=msg_identity.nombre or known_nombre
+                nombre=msg_identity.nombre or known_nombre, phone=numero_paciente
             )
             clear_awaiting_booking_identity(numero_paciente)
             logger.info(
@@ -853,12 +840,13 @@ async def process_whatsapp_message(
         # Solo escalar por baja confianza RAG cuando hubo score real de tool RAG
         if rag_conf is not None and rag_conf < settings.rag_min_confidence:
             if not await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+                fallback = _fallback_reply(numero_paciente)
+                await evolution_client.enviar_mensaje(numero_paciente, fallback)
                 asyncio.create_task(
                     dotnet_client.registrar_mensaje(
                         chat_identifier=numero_paciente,
                         rol="CHATBOT",
-                        contenido=MENSAJE_FALLBACK_PACIENTE,
+                        contenido=fallback,
                     )
                 )
             return
@@ -866,18 +854,18 @@ async def process_whatsapp_message(
         # Extraer respuesta final del bot
         mensajes_resultado = result.get("messages", [])
         if not mensajes_resultado:
-            await evolution_client.enviar_mensaje(numero_paciente, MENSAJE_FALLBACK_PACIENTE)
+            await evolution_client.enviar_mensaje(numero_paciente, _fallback_reply(numero_paciente))
             return
 
         ultimo_mensaje = mensajes_resultado[-1]
         respuesta_texto = extract_text_content(getattr(ultimo_mensaje, "content", "")).strip()
 
         if not respuesta_texto:
-            respuesta_texto = MENSAJE_FALLBACK_PACIENTE
+            respuesta_texto = _fallback_reply(numero_paciente)
         else:
             # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
             respuesta_texto = _ensure_portal_reminder_after_booking(
-                respuesta_texto, mensajes_resultado
+                respuesta_texto, mensajes_resultado, phone=numero_paciente
             )
 
         t_send = time.perf_counter()
@@ -909,11 +897,14 @@ async def process_whatsapp_message(
         raise
     except Exception as exc:
         logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
-        respuesta = MENSAJE_FALLBACK_PACIENTE
-        degraded = _reply_without_llm(mensaje_texto, bool(locals().get("known_cedula")))
+        degraded = _reply_without_llm(
+            mensaje_texto, bool(locals().get("known_cedula")), numero_paciente
+        )
         if degraded:
             logger.warning(f"[Processor] LLM no disponible; respuesta de agenda sin LLM para {numero_paciente}")
             respuesta = degraded
+        else:
+            respuesta = _fallback_reply(numero_paciente)
         try:
             await evolution_client.enviar_mensaje(numero_paciente, respuesta)
             asyncio.create_task(
@@ -933,14 +924,16 @@ async def process_whatsapp_message(
             pass
 
 
-def _reply_without_llm(mensaje_texto: str, cedula_conocida: bool) -> Optional[str]:
+def _reply_without_llm(
+    mensaje_texto: str, cedula_conocida: bool, phone: Optional[str] = None
+) -> Optional[str]:
     try:
         from datetime import datetime
         from zoneinfo import ZoneInfo
         from app.services.booking_flow import build_booking_reply_without_llm
 
         now = datetime.now(ZoneInfo(settings.reminder_timezone or "America/Bogota"))
-        return build_booking_reply_without_llm(mensaje_texto, now, cedula_conocida)
+        return build_booking_reply_without_llm(mensaje_texto, now, cedula_conocida, phone=phone)
     except Exception as err:
         logger.warning(f"[Processor] Respuesta sin LLM falló: {err}")
         return None

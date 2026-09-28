@@ -71,10 +71,9 @@ class ChatOrchestrator:
             if now - last_warn > SPAM_WARN_COOLDOWN:
                 _SPAM_WARNED_AT[phone] = now
                 logger.warning(f"[Anti-Spam] Ráfaga detectada para {phone}. Enviando advertencia.")
-                spam_msg = (
-                    "⚠️ Estás enviando muchos mensajes seguidos.\n"
-                    "Por favor espera un momento y escribe tu consulta en un solo mensaje para poder atenderte bien. 😊"
-                )
+                from app.services import reply_variants
+
+                spam_msg = reply_variants.pick("spam", reply_variants.SPAM, phone=phone)
                 asyncio.create_task(evolution_client.enviar_mensaje(phone, spam_msg))
             return True
         return False

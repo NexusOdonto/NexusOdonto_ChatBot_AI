@@ -6,7 +6,6 @@ para responder con tono humano de recepción, sin agendar ni escalar urgencias.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import unicodedata
 from typing import Optional, Sequence, Tuple
@@ -192,15 +191,14 @@ def detect_off_topic_non_dental(text: str) -> bool:
 def _pick_variant(
     pool: Sequence[str],
     *,
-    seed_text: str,
     avoid: Optional[str] = None,
     salt: str = "",
+    phone: Optional[str] = None,
 ) -> str:
-    """Elige una variante estable por hash; evita repetir `avoid` si hay otras opciones."""
-    candidates = [m for m in pool if m != avoid] or list(pool)
-    digest = hashlib.sha1(f"{salt}|{seed_text}".encode("utf-8")).hexdigest()
-    idx = int(digest[:8], 16) % len(candidates)
-    return candidates[idx]
+    """Variante aleatoria sin repetir las recientes del teléfono ni `avoid`."""
+    from app.services import reply_variants
+
+    return reply_variants.pick(f"respeto_{salt}", pool, phone=phone, avoid=avoid)
 
 
 def classify_disrespect_tone(text: str) -> str:
@@ -221,24 +219,20 @@ def build_respect_reply(
     *,
     avoid_reply: Optional[str] = None,
     prior_respect: bool = False,
+    phone: Optional[str] = None,
 ) -> str:
     """Arma una respuesta corta y natural de recepción (sin el mismo párrafo fijo)."""
     tone = classify_disrespect_tone(text)
     if tone == "apology_joke":
-        pool = _RESPETO_DISCULPA_BROMA
+        pool, salt = _RESPETO_DISCULPA_BROMA, tone
     elif tone == "vulgar_joke":
-        pool = _RESPETO_BROMA
+        pool, salt = _RESPETO_BROMA, tone
     elif prior_respect:
-        pool = _RESPETO_SEGUIDO
+        pool, salt = _RESPETO_SEGUIDO, "seguido"
     else:
-        pool = _RESPETO_INSULTO
+        pool, salt = _RESPETO_INSULTO, tone
 
-    return _pick_variant(
-        pool,
-        seed_text=normalize_text(text),
-        avoid=avoid_reply,
-        salt=tone,
-    )
+    return _pick_variant(pool, avoid=avoid_reply, salt=salt, phone=phone)
 
 
 def evaluate_content_guard(
@@ -246,6 +240,7 @@ def evaluate_content_guard(
     *,
     avoid_reply: Optional[str] = None,
     prior_respect: bool = False,
+    phone: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Evalúa guards en orden de prioridad.
 
@@ -257,7 +252,12 @@ def evaluate_content_guard(
             text,
             avoid_reply=avoid_reply,
             prior_respect=prior_respect,
+            phone=phone,
         )
     if detect_off_topic_non_dental(text):
-        return "off_topic", MENSAJE_FUERA_DE_ALCANCE
+        from app.services import reply_variants
+
+        return "off_topic", reply_variants.pick(
+            "fuera_de_alcance", reply_variants.FUERA_DE_ALCANCE, phone=phone, avoid=avoid_reply
+        )
     return None, None

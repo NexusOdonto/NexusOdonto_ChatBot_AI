@@ -11,6 +11,7 @@ from qdrant_client.http import models
 from app.agents.tools.qdrant_tool import get_embeddings, get_qdrant_client
 from app.core.config import settings
 from app.core.llm_concurrency import with_llm_slot
+from app.services import reply_variants
 
 logger = logging.getLogger(__name__)
 
@@ -18,38 +19,17 @@ logger = logging.getLogger(__name__)
 _L1_MEMORY_CACHE: Dict[str, str] = {}
 _MAX_L1_ENTRIES = 500
 
-# Respuestas pre-armadas deterministas de máxima velocidad (0 tokens, 0 red, 0ms)
-_FAST_RESPONSES: Dict[str, str] = {
-    "saludo": (
-        "¡Hola! Bienvenido/a a *Nexus Odonto* 😊\n\n"
-        "Soy de recepción. Dime en qué te ayudo: agendar, ver o cambiar una cita, "
-        "precios, especialistas o alguna duda odontológica."
-    ),
-    "horario": (
-        "Atendemos de *lunes a sábado* de 8:00 AM a 6:00 PM. "
-        "Domingos y festivos estamos cerrados.\n\n"
-        "¿Quieres que miremos disponibilidad para algún día?"
-    ),
-    "ubicacion": (
-        "Estamos en *Calle 100 # 15-20*, Centro Médico Odontológico.\n\n"
-        "¿Te ayudo a agendar o quieres saber algo más de la clínica?"
-    ),
-    "contacto": (
-        "Puedes escribirnos por aquí o llamar al *+57 324 6030217*.\n"
-        "También estamos en Calle 100 # 15-20 y el correo es soporte@nexusodonto.com "
-        "(lun-sáb 8:00 AM–6:00 PM).\n\n"
-        "¿En qué te puedo orientar?"
-    ),
-    "agradecimiento": (
-        "Con mucho gusto. Si necesitas algo más de *Nexus Odonto*, aquí estoy. ¡Que te vaya muy bien!"
-    ),
-    # Safe booking step-1 only: ask for cédula/nombre. Never invents appointments or assumes IDs.
-    "agendar_inicio": (
-        "Claro, te ayudo a agendar.\n\n"
-        "Para seguir, ¿me pasas tu *número de cédula* y tu *nombre completo* "
-        "(nombre y apellido)? Con eso miramos el tratamiento y los horarios."
-    ),
+# Respuestas pre-armadas de máxima velocidad (0 tokens, 0 red, 0ms); varían por teléfono.
+_FAST_RESPONSES: Dict[str, Tuple[str, ...]] = {
+    "saludo": reply_variants.SALUDO,
+    "horario": reply_variants.HORARIO,
+    "ubicacion": reply_variants.UBICACION,
+    "contacto": reply_variants.CONTACTO,
+    "agradecimiento": reply_variants.AGRADECIMIENTO,
 }
+
+# Última respuesta L1/L2 enviada por teléfono: no se repite literal al mismo usuario.
+_LAST_CACHE_REPLY: Dict[str, str] = {}
 
 # Mapeo de frases exactas / patrones hacia respuestas rápidas
 _FAST_MATCH_PATTERNS = [
@@ -90,6 +70,7 @@ def _get_fast_response(
     known_cedula: Optional[str] = None,
     known_nombre: Optional[str] = None,
     awaiting_booking_identity: bool = False,
+    phone: Optional[str] = None,
 ) -> Optional[str]:
     """Retorna una respuesta instantánea si el mensaje coincide con un patrón determinista común.
 
@@ -122,7 +103,7 @@ def _get_fast_response(
             "[Semantic Cache] ⚡ Booking identity captured → ask service (ced=%s)",
             identity_now.cedula,
         )
-        return build_ask_service_response(nombre=nombre)
+        return build_ask_service_response(nombre=nombre, phone=phone)
 
     # Booking start with identity already in session/history.
     if is_booking_start_intent(text) and has_known:
@@ -130,7 +111,7 @@ def _get_fast_response(
             "[Semantic Cache] ⚡ Booking start with known identity → ask service (ced=%s)",
             known_cedula,
         )
-        return build_ask_service_response(nombre=known_nombre)
+        return build_ask_service_response(nombre=known_nombre, phone=phone)
 
     for pattern, cat in _FAST_MATCH_PATTERNS:
         if not re.match(pattern, norm):
@@ -141,10 +122,28 @@ def _get_fast_response(
             return None
         if cat == "agendar_inicio":
             if has_known or identity_complete:
-                return build_ask_service_response(nombre=known_nombre or identity_now.nombre)
-            return build_agendar_inicio_response()
-        return _FAST_RESPONSES.get(cat)
+                return build_ask_service_response(
+                    nombre=known_nombre or identity_now.nombre, phone=phone
+                )
+            return build_agendar_inicio_response(phone=phone)
+        pool = _FAST_RESPONSES.get(cat)
+        if not pool:
+            return None
+        return reply_variants.pick(cat, pool, phone=phone, nombre=known_nombre)
     return None
+
+
+def _avoid_verbatim_repeat(phone: Optional[str], respuesta: str) -> Optional[str]:
+    """None si el mismo teléfono ya recibió esta respuesta de caché: mejor que la redacte el LLM."""
+    if not phone:
+        return respuesta
+    if _LAST_CACHE_REPLY.get(phone) == respuesta:
+        logger.info("[Semantic Cache] Skip cache hit repetido para %s (evita respuesta idéntica)", phone)
+        return None
+    if len(_LAST_CACHE_REPLY) >= 5000:
+        _LAST_CACHE_REPLY.clear()
+    _LAST_CACHE_REPLY[phone] = respuesta
+    return respuesta
 
 
 def _should_skip_l2_embed(text: str) -> bool:
@@ -305,6 +304,7 @@ async def buscar_en_cache(
     known_cedula: Optional[str] = None,
     known_nombre: Optional[str] = None,
     awaiting_booking_identity: bool = False,
+    phone: Optional[str] = None,
 ) -> Optional[str]:
     """Busca una respuesta en el sistema de caché en capas (L1 Memoria -> L2 Qdrant).
     
@@ -328,6 +328,7 @@ async def buscar_en_cache(
         known_cedula=known_cedula,
         known_nombre=known_nombre,
         awaiting_booking_identity=awaiting_booking_identity,
+        phone=phone,
     )
     if fast_resp:
         logger.info(f"[Semantic Cache] ⚡ Fast-Path HIT (0 tokens) para query: '{query[:40]}'")
@@ -338,7 +339,7 @@ async def buscar_en_cache(
     # 2. Caché L1 en memoria RAM
     if norm_key in _L1_MEMORY_CACHE:
         logger.info(f"[Semantic Cache] ⚡ L1 Memory Cache HIT para query: '{query[:40]}'")
-        return _L1_MEMORY_CACHE[norm_key]
+        return _avoid_verbatim_repeat(phone, _L1_MEMORY_CACHE[norm_key])
 
     if len(query) < 4:
         return None
@@ -382,7 +383,7 @@ async def buscar_en_cache(
                     # Guardar en L1 para futuros hits instantáneos
                     if len(_L1_MEMORY_CACHE) < _MAX_L1_ENTRIES:
                         _L1_MEMORY_CACHE[norm_key] = str(respuesta)
-                    return str(respuesta)
+                    return _avoid_verbatim_repeat(phone, str(respuesta))
 
             logger.debug(f"[Semantic Cache] Cache MISS (score: {score:.4f} < {settings.semantic_cache_threshold}) para query: '{query[:50]}...'")
 

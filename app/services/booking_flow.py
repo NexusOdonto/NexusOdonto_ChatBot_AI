@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from app.services import reply_variants
+
 logger = logging.getLogger(__name__)
 
 # In-memory pending booking identity capture (phone → expiry monotonic).
@@ -300,53 +302,53 @@ def is_awaiting_booking_identity(phone: str) -> bool:
     return True
 
 
-def build_ask_service_response(*, nombre: Optional[str] = None) -> str:
+def build_ask_service_response(*, nombre: Optional[str] = None, phone: Optional[str] = None) -> str:
     """Deterministic next booking step after identity is known — never invents slots."""
-    first = ""
-    if nombre:
-        first = nombre.strip().split()[0].title()
-    greet = f", {first}" if first else ""
-    return (
-        f"Listo{greet}, gracias.\n\n"
-        "¿Qué tratamiento te gustaría agendar? "
-        "Puedes decirme el nombre (por ejemplo *Profilaxis*, *Resina* o *Blanqueamiento*) "
-        "o pedirme la lista de *servicios y precios*."
+    return reply_variants.pick(
+        "pedir_servicio", reply_variants.PEDIR_SERVICIO, phone=phone, nombre=nombre
     )
 
 
-def build_booking_reply_without_llm(text: str, now: Any, cedula_conocida: bool = False) -> Optional[str]:
+def build_booking_reply_without_llm(
+    text: str, now: Any, cedula_conocida: bool = False, phone: Optional[str] = None
+) -> Optional[str]:
     """Deterministic booking reply for when the LLM is unavailable; None if the message isn't booking-related."""
     from app.agents.tools.agenda_helpers import _formatear_hora_ampm, franjas_restantes_hoy
 
-    pedir = (
-        "¿qué tratamiento necesitas?"
-        if cedula_conocida
-        else "¿me pasas tu *número de cédula*, tu *nombre completo* y el tratamiento que necesitas?"
-    )
     hm = parse_same_day_time(text)
     if hm:
+        pedir = (
+            reply_variants.pick("pedir_tratamiento", reply_variants.PEDIR_TRATAMIENTO_CORTO, phone=phone)
+            if cedula_conocida
+            else reply_variants.pick("pedir_datos", reply_variants.PEDIR_DATOS_Y_TRATAMIENTO, phone=phone)
+        )
         req = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
         hora = _formatear_hora_ampm(req.strftime("%H:%M")).lstrip("0")
         if req.timestamp() < now.timestamp() + 15 * 60:
             restantes = franjas_restantes_hoy(now)
             if restantes:
-                return (
-                    f"Las {hora} de hoy ya pasaron, pero todavía atendemos {restantes}.\n\n"
-                    f"Para buscarte el turno más cercano, {pedir}"
+                return reply_variants.pick(
+                    "hora_pasada",
+                    reply_variants.HORA_PASADA_CON_JORNADA,
+                    phone=phone,
+                    hora=hora,
+                    restantes=restantes,
+                    pedir=pedir,
                 )
-            return (
-                f"Las {hora} de hoy ya pasaron y por hoy ya cerramos la jornada. "
-                f"Con gusto te busco turno para el próximo día hábil, {pedir}"
+            return reply_variants.pick(
+                "hora_pasada_cerrado",
+                reply_variants.HORA_PASADA_SIN_JORNADA,
+                phone=phone,
+                hora=hora,
+                pedir=pedir,
             )
-        return f"Listo, miramos para hoy a las {hora}.\n\nPara apartarla, {pedir}"
+        return reply_variants.pick(
+            "hora_hoy", reply_variants.HORA_HOY_VALIDA, phone=phone, hora=hora, pedir=pedir
+        )
     if is_booking_start_intent(text):
-        return build_agendar_inicio_response()
+        return build_agendar_inicio_response(phone=phone)
     return None
 
 
-def build_agendar_inicio_response() -> str:
-    return (
-        "Claro, te ayudo a agendar.\n\n"
-        "Para seguir, ¿me pasas tu *número de cédula* y tu *nombre completo* "
-        "(nombre y apellido)? Con eso miramos el tratamiento y los horarios."
-    )
+def build_agendar_inicio_response(phone: Optional[str] = None) -> str:
+    return reply_variants.pick("agendar_inicio", reply_variants.AGENDAR_INICIO, phone=phone)
