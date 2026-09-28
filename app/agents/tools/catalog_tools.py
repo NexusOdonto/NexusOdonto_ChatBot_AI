@@ -92,6 +92,23 @@ def _intervalos_ocupados(citas_raw: Any, prof_id: Any, fecha_target: str, duraci
     return intervalos
 
 
+def _dentro_jornada_clinica(hhmm: str, iso_day: Optional[int], duracion: int) -> bool:
+    """Clinic hours win over a professional's rule: Mon-Fri 8-12/14-17, Sat 8-12, Sun closed."""
+    try:
+        h, m = (int(x) for x in str(hhmm)[:5].split(":"))
+    except ValueError:
+        return False
+    inicio = h * 60 + m
+    fin = inicio + max(30, int(duracion or 30))
+    if iso_day == 7:
+        return False
+    if iso_day == 6:
+        return 8 * 60 <= inicio and fin <= 12 * 60
+    en_manana = 8 * 60 <= inicio and fin <= 12 * 60
+    en_tarde = 14 * 60 <= inicio and fin <= 17 * 60
+    return en_manana or en_tarde
+
+
 async def _turnos_por_profesional(
     profesionales: List[Dict[str, Any]],
     fecha: str,
@@ -168,7 +185,9 @@ async def _turnos_por_profesional(
                         inicio = str(inicio)[:5]
                     slots.append(inicio)
 
-        unique_slots = sorted(list(dict.fromkeys(slots)))
+        unique_slots = [
+            s for s in sorted(dict.fromkeys(slots)) if _dentro_jornada_clinica(s, iso_day, duracion_servicio)
+        ]
 
         # Filtrar traslapes con citas existentes
         try:

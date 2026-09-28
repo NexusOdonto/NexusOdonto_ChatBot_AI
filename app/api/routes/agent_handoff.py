@@ -116,7 +116,7 @@ async def resume_conversation(request: ResumeConversationRequest):
                 if checkpointer:
                     await checkpointer.clear_thread(t)
                 try:
-                    await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+                    await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"}, as_node="chatbot")
                 except Exception:
                     pass
                 dotnet_client.limpiar_cache_conversacion(t)

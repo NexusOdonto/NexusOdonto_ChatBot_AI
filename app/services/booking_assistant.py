@@ -207,9 +207,12 @@ async def _alternativas(
         if not libres:
             continue
         dias_con_cupo += 1
+        cupo = 3 if d == base else 2
         if objetivo is not None:
             libres.sort(key=lambda s: abs(_minutos(s.hhmm) - objetivo))
-        elegidos += libres[: (3 if d == base else 2)]
+            elegidos += libres[:cupo]
+        else:
+            elegidos += _repartir(libres, cupo)
         if len(elegidos) >= _MAX_ALTERNATIVAS or dias_con_cupo >= 2:
             break
     elegidos = elegidos[:_MAX_ALTERNATIVAS + 1]
@@ -379,12 +382,10 @@ async def _crear(phone: str, session: BookingSession, now: datetime, confirmar_m
             cache[d] = await _slots_dia(servicio, d, today) if servicio else []
         return cache[d]
 
-    dia = dia_humano(slot.fecha, today)
-    motivo = rv.pick(
-        "motivo_ocupado", rv.MOTIVO_OCUPADO, phone=phone,
-        hora=hora_humana(slot.hhmm), dia=dia, dia_cap=_cap(dia),
-    )
-    req = DateTimeRequest(fecha=slot.fecha, hora=(int(slot.hhmm[:2]), int(slot.hhmm[3:5])))
+    hora = (int(slot.hhmm[:2]), int(slot.hhmm[3:5]))
+    duracion = int((servicio or {}).get("durationMinutes") or 30)
+    motivo = _motivo_hora(slot.fecha, hora, duracion, now, dia_humano(slot.fecha, today), phone)
+    req = DateTimeRequest(fecha=slot.fecha, hora=hora)
     opciones = await _alternativas(slot.fecha, req, today, slots_de, excluir=slot)
     if not opciones:
         session.stage, session.offered, session.proposed = "date", [], None

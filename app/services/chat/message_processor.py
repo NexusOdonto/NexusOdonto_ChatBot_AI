@@ -181,6 +181,15 @@ ESCALAMIENTO_RE = re.compile(
     re.IGNORECASE,
 )
 
+async def _update_thread_state(config: dict, values: dict) -> None:
+    """Write to the conversation checkpoint outside a graph run.
+
+    Without `as_node`, LangGraph rejects a second consecutive manual update ("Ambiguous update"),
+    which silently dropped fast-path replies from the history the next turn relies on.
+    """
+    await get_graph().aupdate_state(config, values, as_node="chatbot")
+
+
 _CHAT_LOCKS: dict[str, asyncio.Lock] = {}
 _CHAT_LOCKS_GUARD = asyncio.Lock()
 _USER_LAST_ACTIVE: dict[str, float] = {}
@@ -324,7 +333,7 @@ async def is_escalated(thread_id: str) -> bool:
         if not is_graph_escalated and dotnet_is_escalated:
             try:
                 config = get_thread_config(thread_id)
-                await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+                await _update_thread_state(config, {"conversation_status": "ESCALADA"})
             except Exception:
                 pass
         return True
@@ -332,7 +341,7 @@ async def is_escalated(thread_id: str) -> bool:
     if is_graph_escalated and not dotnet_is_escalated:
         try:
             config = get_thread_config(thread_id)
-            await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+            await _update_thread_state(config, {"conversation_status": "ACTIVA"})
         except Exception:
             pass
         return False
@@ -358,7 +367,7 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
 
     try:
         config = get_thread_config(thread_id)
-        await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+        await _update_thread_state(config, {"conversation_status": "ESCALADA"})
     except Exception as state_err:
         logger.warning(f"[Processor] Error actualizando estado en checkpointer: {state_err}")
 
@@ -390,7 +399,7 @@ async def registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> 
             await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ATENDIDA_HUMANO)
         try:
             config = get_thread_config(numero_paciente)
-            await get_graph().aupdate_state(
+            await _update_thread_state(
                 config,
                 {
                     "messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")],
@@ -427,7 +436,7 @@ async def _silent_resume_from_escalation(numero_paciente: str) -> None:
         if conv_id:
             await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ACTIVA)
         config = get_thread_config(numero_paciente)
-        await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"})
+        await _update_thread_state(config, {"conversation_status": "ACTIVA"})
     except Exception as e:
         logger.warning(f"[Processor] Silent resume state sync failed for {numero_paciente}: {e}")
 
@@ -733,7 +742,7 @@ async def process_whatsapp_message(
                 )
             )
             try:
-                await get_graph().aupdate_state(
+                await _update_thread_state(
                     config,
                     {
                         "messages": [
@@ -781,7 +790,7 @@ async def process_whatsapp_message(
                 )
             )
             try:
-                await get_graph().aupdate_state(
+                await _update_thread_state(
                     config,
                     {
                         "messages": [
@@ -894,7 +903,7 @@ async def process_whatsapp_message(
                 await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             else:
                 config = get_thread_config(numero_paciente)
-                await get_graph().aupdate_state(config, {"conversation_status": "ESCALADA"})
+                await _update_thread_state(config, {"conversation_status": "ESCALADA"})
             spans["total"] = time.perf_counter() - t_total
             logger.info(
                 f"[Latency] phone={numero_paciente} path=escalated "
@@ -1032,7 +1041,7 @@ async def _send_degraded_reply(
             )
         )
         # The failed graph run already checkpointed the user's message; add only our reply.
-        await get_graph().aupdate_state(
+        await _update_thread_state(
             get_thread_config(numero_paciente), {"messages": [AIMessage(content=respuesta)]}
         )
         inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
