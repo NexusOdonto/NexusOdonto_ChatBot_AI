@@ -105,7 +105,9 @@ def _fallback_reply(phone: Optional[str], mensaje_texto: str = "") -> str:
     from app.services.booking_assistant import reprompt_pending_question
     from app.services.info_replies import build_generic_reply
 
-    return (phone and reprompt_pending_question(phone)) or build_generic_reply(mensaje_texto, phone=phone)
+    return (phone and reprompt_pending_question(phone, text=mensaje_texto)) or build_generic_reply(
+        mensaje_texto, phone=phone
+    )
 
 
 def _ensure_portal_reminder_after_booking(
@@ -1023,7 +1025,7 @@ async def _send_degraded_reply(
     except Exception as err:
         logger.warning(f"[Processor] Respuesta informativa sin LLM falló: {err}")
     if not respuesta:
-        respuesta = reprompt_pending_question(numero_paciente, prev_ai_text)
+        respuesta = reprompt_pending_question(numero_paciente, prev_ai_text, mensaje_texto)
     if not respuesta:
         respuesta = _reply_without_llm(mensaje_texto, cedula_conocida, numero_paciente)
     if not respuesta:

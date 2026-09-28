@@ -485,8 +485,18 @@ async def handle_booking_turn(phone: str, text: str, *, now: datetime) -> Option
     return None
 
 
-def reprompt_pending_question(phone: str, prev_ai_text: str = "") -> Optional[str]:
-    """Re-ask whatever the conversation is waiting for (used when nothing else understood the message)."""
+def reprompt_pending_question(phone: str, prev_ai_text: str = "", text: str = "") -> Optional[str]:
+    """Re-ask whatever the conversation is waiting for (used when nothing else understood the message).
+
+    A side question during the booking gets a short acknowledgement first instead of being ignored.
+    """
+    reply = _reprompt(phone, prev_ai_text)
+    if reply and get_session(phone) and "?" in (text or ""):
+        return rv.pick("pregunta_en_cita", rv.PREGUNTA_EN_CITA, phone=phone) + " " + reply
+    return reply
+
+
+def _reprompt(phone: str, prev_ai_text: str) -> Optional[str]:
     session = get_session(phone)
     if session:
         today = rv._now_bogota().date()

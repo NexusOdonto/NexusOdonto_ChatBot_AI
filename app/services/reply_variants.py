@@ -390,6 +390,12 @@ SIN_CUPOS = (
     "También puedes llamarnos al *+57 324 6030217*.",
 )
 
+PREGUNTA_EN_CITA = (
+    "Eso te lo explican con calma en la consulta.",
+    "Buena pregunta; eso te lo confirman en la cita según lo que vean.",
+    "Eso depende de la valoración, allá te lo explican bien.",
+)
+
 SEGUIMOS_CITA = (
     "Cuando quieras seguimos con la cita de *{servicio}*: ¿qué día te sirve?",
     "Y para la cita de *{servicio}*, ¿qué día te acomoda?",
