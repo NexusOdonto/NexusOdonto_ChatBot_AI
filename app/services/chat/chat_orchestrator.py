@@ -1,7 +1,6 @@
-"""Orquestador de mensajes entrantes de chat: Anti-Spam, Debouncing (0.5s) y Filtro de Galimatías."""
+"""Orquestador de mensajes entrantes de chat: Anti-Spam y Debouncing (0.5s)."""
 
 import time
-import re
 import asyncio
 import logging
 from typing import Dict, List, Optional, Callable, Awaitable, Any
@@ -29,19 +28,6 @@ _USER_PUSH_NAMES: Dict[str, str] = {}
 _USER_PROCESSING: Dict[str, bool] = {}
 _USER_CALLBACKS: Dict[str, Any] = {}
 _USER_LAST_PROCESSED: Dict[str, tuple[str, float]] = {}
-
-KEYWORDS_CLINICA = {
-    "cita", "citas", "agendar", "agenda", "apartar", "programar", "horario", "horarios",
-    "doctor", "doctora", "odontologo", "odontologa", "precio", "precios", "costo",
-    "cuanto", "cuánto", "vale", "servicio", "servicios", "limpieza", "diseño",
-    "ortodoncia", "bracket", "brackets", "calza", "resina", "extraccion", "extracción",
-    "cordal", "cordales", "corona", "implante", "dolor", "urgencia", "emergencia",
-    "cedula", "cédula", "documento", "nombre", "hola", "buenos", "buenas", "tardes",
-    "dias", "días", "noches", "gracias", "cancelar", "modificar", "reprogramar",
-    "confirmar", "asistir", "consulta", "telefono", "teléfono", "direccion", "dirección",
-    "si", "sí", "no", "ok", "vale", "listo", "dale", "bien", "perfecto"
-}
-
 
 class ChatOrchestrator:
     """Gestiona la recepción de mensajes, filtrando spam y agrupando ráfagas continuas de WhatsApp."""
@@ -76,38 +62,6 @@ class ChatOrchestrator:
                 spam_msg = reply_variants.pick("spam", reply_variants.SPAM, phone=phone)
                 asyncio.create_task(evolution_client.enviar_mensaje(phone, spam_msg))
             return True
-        return False
-
-    @staticmethod
-    def is_nonsense_or_gibberish(texto: str) -> bool:
-        """Detecta aporreo de teclado, caracteres repetidos o galimatías sin significado clínico."""
-        raw = texto.strip()
-        if not raw:
-            return False
-
-        palabras_lower = [p.strip(".,;:!?()[]\"'").lower() for p in raw.split()]
-        if any(p in KEYWORDS_CLINICA for p in palabras_lower):
-            return False
-
-        solo_digitos = "".join(c for c in raw if c.isdigit())
-        chars_sin_separadores = raw.replace(" ", "").replace(".", "").replace("-", "")
-        if solo_digitos and len(solo_digitos) == len(chars_sin_separadores):
-            if 7 <= len(solo_digitos) <= 12 or solo_digitos in ("1", "2", "3", "4", "5"):
-                return False
-            return True
-
-        if len(palabras_lower) <= 3:
-            if re.search(r"(.)\1{3,}", raw, re.IGNORECASE):
-                return True
-            if re.search(r"^(.{2,4})\1{2,}$", raw.replace(" ", ""), re.IGNORECASE):
-                return True
-            for p in palabras_lower:
-                solo_letras = re.sub(r"[^a-záéíóúñ]", "", p)
-                if len(solo_letras) >= 6:
-                    vocales = len(re.findall(r"[aeiouáéíóú]", solo_letras))
-                    if vocales == 0 or (len(solo_letras) >= 8 and (vocales / len(solo_letras)) < 0.15):
-                        return True
-
         return False
 
     @classmethod

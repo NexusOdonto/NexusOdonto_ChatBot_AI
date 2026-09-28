@@ -1,9 +1,8 @@
-"""Booking identity continuity helpers.
+"""Booking context helpers for the LLM (no replies are produced here).
 
-Fixes two WhatsApp loops:
-A) "Quiero agendar" after cédula+nombre already in history must not re-ask identity.
-B) After the bot asks for cédula+nombre for agendar, capturing them must continue
-   to service selection — never reset to the welcome/menu greeting.
+- Parse cédula / full name from what the patient wrote, so Gemini never re-asks data already given.
+- Keep a light per-phone booking state (service being booked, identity) that is injected into
+  Gemini's prompt, built from the tools Gemini itself called.
 """
 
 from __future__ import annotations
@@ -11,19 +10,14 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass
 from typing import Any, Iterable, Optional
-
-from app.services import reply_variants
 
 logger = logging.getLogger(__name__)
 
-# In-memory pending booking identity capture (phone → expiry monotonic).
-_PENDING_BOOKING_IDENTITY: dict[str, float] = {}
-# Booking in progress per phone (service, identity, offered slots, proposal).
+# Booking in progress per phone (service + identity), fed to the LLM prompt.
 _SESSIONS: dict[str, "BookingSession"] = {}
-_PENDING_TTL_SECONDS = 15 * 60.0
+_SESSION_TTL_SECONDS = 15 * 60.0
 
 _BOOKING_START_RE = re.compile(
     r"^(quiero|deseo|necesito|quisiera|me gustaria)?\s*"
@@ -199,34 +193,6 @@ def _asked_for_name(ai_text: str) -> bool:
     return "nombre" in low and ("cédula" in low or "cedula" in low or "completo" in low or "llamas" in low)
 
 
-def extract_identity_from_messages(messages: Iterable[Any]) -> PatientIdentity:
-    """Scan recent human messages for the latest cédula + full name."""
-    cedula = None
-    nombre = None
-    for msg in messages:
-        content = getattr(msg, "content", None)
-        # LangChain HumanMessage / plain str
-        role_ok = False
-        cls = type(msg).__name__
-        if cls == "HumanMessage" or getattr(msg, "type", None) == "human":
-            role_ok = True
-        if isinstance(msg, str):
-            content = msg
-            role_ok = True
-        if not role_ok or not content:
-            continue
-        parsed = parse_identity_from_text(str(content))
-        if parsed.cedula and not cedula:
-            cedula = parsed.cedula
-        if parsed.nombre and (not nombre or len(parsed.nombre) > len(nombre)):
-            nombre = parsed.nombre
-        if cedula and nombre:
-            # Prefer the most recent complete pair; keep scanning newer→older
-            # callers should pass messages newest-first or we accumulate best.
-            pass
-    return PatientIdentity(cedula=cedula, nombre=nombre)
-
-
 def _human_turns_with_prompt(messages: Iterable[Any]) -> list[tuple[str, str]]:
     """[(human text, previous bot text)] in chronological order."""
     turns: list[tuple[str, str]] = []
@@ -299,52 +265,11 @@ def prev_asked_for_booking_identity(prev_ai: str) -> bool:
     return asks_id and bookingish
 
 
-def mark_awaiting_booking_identity(phone: str) -> None:
-    key = (phone or "").strip()
-    if not key:
-        return
-    _PENDING_BOOKING_IDENTITY[key] = time.monotonic() + _PENDING_TTL_SECONDS
-    logger.info("[BookingFlow] awaiting identity for %s", key)
-
-
-def clear_awaiting_booking_identity(phone: str) -> None:
-    key = (phone or "").strip()
-    if key:
-        _PENDING_BOOKING_IDENTITY.pop(key, None)
-
-
-def is_awaiting_booking_identity(phone: str) -> bool:
-    key = (phone or "").strip()
-    if not key:
-        return False
-    exp = _PENDING_BOOKING_IDENTITY.get(key)
-    if exp is None:
-        return False
-    if time.monotonic() > exp:
-        _PENDING_BOOKING_IDENTITY.pop(key, None)
-        return False
-    return True
-
-
-@dataclass
-class Slot:
-    fecha: date
-    hhmm: str
-    prof_id: str
-    prof_nombre: str
-
-
 @dataclass
 class BookingSession:
-    """Booking in progress for one phone. Stages: identity → date → slot → confirm (→ confirm_identity)."""
-
     servicio: str
     cedula: Optional[str] = None
     nombre: Optional[str] = None
-    stage: str = "identity"
-    offered: list[Slot] = field(default_factory=list)
-    proposed: Optional[Slot] = None
-    registered_name: Optional[str] = None
     expires: float = 0.0
 
     @property
@@ -365,29 +290,21 @@ def get_session(phone: str) -> Optional[BookingSession]:
     return session
 
 
-def save_session(phone: str, session: BookingSession) -> None:
+def _save_session(phone: str, session: BookingSession) -> None:
     key = _session_key(phone)
     if key:
-        session.expires = time.monotonic() + _PENDING_TTL_SECONDS
+        session.expires = time.monotonic() + _SESSION_TTL_SECONDS
         _SESSIONS[key] = session
 
 
 def set_pending_service(phone: str, servicio: str) -> None:
     """Start (or switch the service of) a booking; identity already captured is kept."""
-    key = _session_key(phone)
-    if not key or not servicio:
+    if not _session_key(phone) or not servicio:
         return
-    session = get_session(key) or BookingSession(servicio=servicio)
+    session = get_session(phone) or BookingSession(servicio=servicio)
     session.servicio = servicio
-    session.offered, session.proposed = [], None
-    session.stage = "date" if session.identity_complete else "identity"
-    save_session(key, session)
-    logger.info("[BookingFlow] servicio elegido para %s: %s", key, servicio)
-
-
-def get_pending_service(phone: str) -> Optional[str]:
-    session = get_session(phone)
-    return session.servicio if session else None
+    _save_session(phone, session)
+    logger.info("[BookingFlow] servicio en curso para %s: %s", phone, servicio)
 
 
 def clear_pending_service(phone: str) -> None:
@@ -406,9 +323,7 @@ def sync_session_identity(phone: str, cedula: Optional[str], nombre: Optional[st
         session.nombre = nombre or None
     elif nombre and not session.nombre:
         session.nombre = nombre
-    if session.stage == "identity" and session.identity_complete:
-        session.stage = "date"
-    save_session(phone, session)
+    _save_session(phone, session)
 
 
 def describe_session_for_llm(phone: str) -> str:
@@ -416,90 +331,14 @@ def describe_session_for_llm(phone: str) -> str:
     session = get_session(phone)
     if not session:
         return ""
-    from app.services.natural_datetime import dia_humano, hora_humana
-
-    today = reply_variants._now_bogota().date()
-    pendiente = {
-        "identity": "esperando cédula y nombre completo",
-        "date": "esperando qué día y hora prefiere",
-        "slot": "esperando que elija uno de los horarios ofrecidos",
-        "confirm": "esperando que confirme la cita propuesta",
-        "confirm_identity": "esperando que confirme si es la persona registrada con esa cédula",
-    }.get(session.stage, session.stage)
-    parts = [f"servicio={session.servicio}", f"pregunta pendiente: {pendiente}"]
+    pendiente = (
+        "falta elegir día/hora y confirmar la cita"
+        if session.identity_complete
+        else "faltan cédula y nombre completo"
+    )
+    parts = [f"servicio={session.servicio}", f"pendiente: {pendiente}"]
     if session.cedula:
         parts.append(f"cédula={session.cedula}")
     if session.nombre:
         parts.append(f"nombre={session.nombre}")
-    if session.offered:
-        opciones = "; ".join(
-            f"{dia_humano(s.fecha, today)} {hora_humana(s.hhmm)} con {s.prof_nombre} ({s.fecha.isoformat()}T{s.hhmm})"
-            for s in session.offered
-        )
-        parts.append(f"horarios ofrecidos: {opciones}")
-    if session.proposed:
-        p = session.proposed
-        parts.append(
-            f"cita propuesta: {p.fecha.isoformat()}T{p.hhmm} con {p.prof_nombre} (profesional_id={p.prof_id})"
-        )
     return " | ".join(parts)
-
-
-def build_ask_service_response(*, nombre: Optional[str] = None, phone: Optional[str] = None) -> str:
-    """Deterministic next booking step after identity is known — never invents slots.
-
-    If the patient already picked a service, skip straight to date/time.
-    """
-    servicio = get_pending_service(phone) if phone else None
-    if servicio:
-        return reply_variants.pick(
-            "pedir_fecha", reply_variants.PEDIR_FECHA, phone=phone, nombre=nombre, servicio=servicio
-        )
-    return reply_variants.pick(
-        "pedir_servicio", reply_variants.PEDIR_SERVICIO, phone=phone, nombre=nombre
-    )
-
-
-def build_booking_reply_without_llm(
-    text: str, now: Any, cedula_conocida: bool = False, phone: Optional[str] = None
-) -> Optional[str]:
-    """Deterministic booking reply for when the LLM is unavailable; None if the message isn't booking-related."""
-    from app.agents.tools.agenda_helpers import _formatear_hora_ampm, franjas_restantes_hoy
-
-    hm = parse_same_day_time(text)
-    if hm:
-        pedir = (
-            reply_variants.pick("pedir_tratamiento", reply_variants.PEDIR_TRATAMIENTO_CORTO, phone=phone)
-            if cedula_conocida
-            else reply_variants.pick("pedir_datos", reply_variants.PEDIR_DATOS_Y_TRATAMIENTO, phone=phone)
-        )
-        req = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-        hora = _formatear_hora_ampm(req.strftime("%H:%M")).lstrip("0")
-        if req.timestamp() < now.timestamp() + 15 * 60:
-            restantes = franjas_restantes_hoy(now)
-            if restantes:
-                return reply_variants.pick(
-                    "hora_pasada",
-                    reply_variants.HORA_PASADA_CON_JORNADA,
-                    phone=phone,
-                    hora=hora,
-                    restantes=restantes,
-                    pedir=pedir,
-                )
-            return reply_variants.pick(
-                "hora_pasada_cerrado",
-                reply_variants.HORA_PASADA_SIN_JORNADA,
-                phone=phone,
-                hora=hora,
-                pedir=pedir,
-            )
-        return reply_variants.pick(
-            "hora_hoy", reply_variants.HORA_HOY_VALIDA, phone=phone, hora=hora, pedir=pedir
-        )
-    if is_booking_start_intent(text):
-        return build_agendar_inicio_response(phone=phone)
-    return None
-
-
-def build_agendar_inicio_response(phone: Optional[str] = None) -> str:
-    return reply_variants.pick("agendar_inicio", reply_variants.AGENDAR_INICIO, phone=phone)

@@ -9,6 +9,8 @@ import re
 import asyncio
 import logging
 from typing import Any, Optional
+
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.clients.evolution_client import evolution_client
@@ -24,7 +26,6 @@ from app.graph.builder import get_graph
 from app.session.memory_store import get_thread_config
 from app.session.postgres_checkpointer import get_checkpointer_instance
 from app.services.audio_service import extraer_bytes_audio, transcribir_audio
-from app.services.semantic_cache import buscar_en_cache
 from app.services.inactivity_service import inactivity_service
 from app.services import reply_variants
 from app.core.llm_factory import extract_text_content
@@ -101,13 +102,80 @@ def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
     return should_remind, is_primera_vez
 
 
-def _fallback_reply(phone: Optional[str], mensaje_texto: str = "") -> str:
-    from app.services.booking_assistant import reprompt_pending_question
-    from app.services.info_replies import build_generic_reply
-
-    return (phone and reprompt_pending_question(phone, text=mensaje_texto)) or build_generic_reply(
-        mensaje_texto, phone=phone
+def _outage_message() -> str:
+    return (
+        "En este momento tenemos un problema técnico y no podemos atenderte por este medio. "
+        f"Por favor intenta más tarde o comunícate al {settings.clinic_phone}."
     )
+
+
+# phone → monotonic time of the last outage notice sent to it.
+_OUTAGE_NOTICE_SENT_AT: dict[str, float] = {}
+
+
+async def _send_outage_notice(numero_paciente: str, reason: str) -> None:
+    """The LLM could not answer this turn: tell the patient once per outage window, never improvise."""
+    logger.error(f"[Processor] LLM sin respuesta para {numero_paciente}: {reason}")
+    now = time.monotonic()
+    last = _OUTAGE_NOTICE_SENT_AT.get(numero_paciente)
+    if last is not None and now - last < settings.llm_outage_notice_window_seconds:
+        logger.warning(
+            f"[Processor] Aviso de falla ya enviado a {numero_paciente} hace {now - last:.0f}s; se omite"
+        )
+        return
+    _OUTAGE_NOTICE_SENT_AT[numero_paciente] = now
+    aviso = _outage_message()
+    try:
+        await evolution_client.enviar_mensaje(numero_paciente, aviso)
+        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", aviso))
+        asyncio.create_task(_notify_staff_outage(numero_paciente, reason))
+    except Exception as err:
+        logger.warning(f"[Processor] No se pudo enviar el aviso de falla a {numero_paciente}: {err}")
+
+
+async def _notify_staff_outage(numero_paciente: str, reason: str) -> None:
+    from app.core.log_redaction import redact
+
+    reason = redact(reason)
+    try:
+        conv_id = await dotnet_client.obtener_o_crear_conversacion(numero_paciente)
+        await dotnet_client.crear_notificacion(
+            titulo="Chatbot sin respuesta automática",
+            mensaje=(
+                f"El paciente {numero_paciente} escribió por WhatsApp y el asistente no pudo responder "
+                f"({reason[:160]}). Revisa la conversación y contáctalo."
+            ),
+            prioridad="ALTA",
+            conversation_id=conv_id,
+            telefono=numero_paciente,
+        )
+    except Exception as err:
+        logger.warning(f"[Processor] No se pudo notificar a recepción la falla de {numero_paciente}: {err}")
+
+
+def _update_booking_context(numero_paciente: str, messages: list, cedula: Optional[str], nombre: Optional[str]) -> None:
+    """Track the service Gemini is booking this turn so the next prompt keeps it."""
+    from app.services.booking_flow import clear_pending_service, set_pending_service, sync_session_identity
+
+    start = 0
+    for i, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            start = i + 1
+    for msg in messages[start:]:
+        if isinstance(msg, AIMessage):
+            for tc in getattr(msg, "tool_calls", None) or []:
+                if tc.get("name") == "consultar_disponibilidad_tool":
+                    servicio = str((tc.get("args") or {}).get("especialidad") or "").strip()
+                    if servicio:
+                        set_pending_service(numero_paciente, servicio)
+        elif (
+            isinstance(msg, ToolMessage)
+            and getattr(msg, "name", "") == "agendar_cita_tool"
+            and "confirmada con éxito" in str(msg.content or "").lower()
+        ):
+            clear_pending_service(numero_paciente)
+            return
+    sync_session_identity(numero_paciente, cedula, nombre)
 
 
 def _ensure_portal_reminder_after_booking(
@@ -155,12 +223,6 @@ def _ensure_portal_reminder_after_booking(
         "portal_recordatorio", reply_variants.PORTAL_RECORDATORIO, phone=phone, url=web_url
     )
     return text.rstrip() + "\n\n" + reminder
-
-# Kept for logs/docs only — never send this to WhatsApp (users want real replies, not retry spam).
-MENSAJE_GRAPH_TIMEOUT = (
-    "En este momento hay bastante movimiento y tu consulta está tardando un poco. "
-    "¿Me reenvías el mensaje en un momentito? Con gusto te ayudo."
-)
 
 COMMANDS_RESET = {"/clear", "/reset", "/reiniciar", "/limpiar", "/start", "/inicio"}
 
@@ -244,8 +306,7 @@ async def reset_conversation(phone_number: str) -> None:
 
     dotnet_client.limpiar_cache_conversacion(phone_number)
     try:
-        from app.services.booking_flow import clear_awaiting_booking_identity, clear_pending_service
-        clear_awaiting_booking_identity(phone_number)
+        from app.services.booking_flow import clear_pending_service
         clear_pending_service(phone_number)
     except Exception:
         pass
@@ -534,23 +595,6 @@ async def process_whatsapp_message(
             await reset_conversation(numero_paciente)
             return
 
-        from app.services.chat.chat_orchestrator import ChatOrchestrator
-        if ChatOrchestrator.is_nonsense_or_gibberish(mensaje_texto):
-            resp_gibberish = reply_variants.pick(
-                "no_entendi", reply_variants.NO_ENTENDI, phone=numero_paciente
-            )
-            t_send = time.perf_counter()
-            await evolution_client.enviar_mensaje(numero_paciente, resp_gibberish)
-            spans["send"] = time.perf_counter() - t_send
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=resp_gibberish,
-                )
-            )
-            return
-
         t_esc = time.perf_counter()
         escalated = await is_escalated(numero_paciente)
         spans["escalate_check"] = time.perf_counter() - t_esc
@@ -611,8 +655,7 @@ async def process_whatsapp_message(
             _USER_LAST_ACTIVE.pop(numero_paciente, None)
             inactivity_service.cancel(numero_paciente)
             try:
-                from app.services.booking_flow import clear_awaiting_booking_identity, clear_pending_service
-                clear_awaiting_booking_identity(numero_paciente)
+                from app.services.booking_flow import clear_pending_service
                 clear_pending_service(numero_paciente)
             except Exception:
                 pass
@@ -624,14 +667,11 @@ async def process_whatsapp_message(
             except Exception:
                 pass
 
-        # Booking continuity: reuse cédula+nombre from recent history / pending flag.
+        # Booking continuity: reuse cédula+nombre from recent history so Gemini never re-asks them.
         from app.services.booking_flow import (
-            build_ask_service_response,
-            clear_awaiting_booking_identity,
+            describe_session_for_llm,
             extract_identity_from_history_newest_first,
-            is_awaiting_booking_identity,
-            is_booking_start_intent,
-            mark_awaiting_booking_identity,
+            get_session,
             parse_identity_from_text,
             prev_asked_for_booking_identity,
         )
@@ -648,11 +688,7 @@ async def process_whatsapp_message(
         except Exception as hist_err:
             logger.debug("[Processor] No se pudo leer historial para booking: %s", hist_err)
 
-        from app.services.booking_flow import describe_session_for_llm, get_session, sync_session_identity
-
-        awaiting_id = is_awaiting_booking_identity(numero_paciente) or prev_asked_for_booking_identity(
-            prev_ai_text
-        )
+        awaiting_id = prev_asked_for_booking_identity(prev_ai_text)
         booking_session = get_session(numero_paciente)
         hist_identity = extract_identity_from_history_newest_first(history_msgs)
         msg_identity = parse_identity_from_text(mensaje_texto, allow_name_only=awaiting_id)
@@ -667,161 +703,6 @@ async def process_whatsapp_message(
             or (booking_session.nombre if booking_session else None)
             or hist_identity.nombre
         )
-
-        # Caché semántico (⚡ 0 tokens) — booking-aware
-        t_cache = time.perf_counter()
-        from app.services.info_replies import (
-            build_info_reply,
-            build_service_booking_reply,
-            is_fast_path_candidate,
-        )
-
-        from app.services.booking_assistant import handle_booking_turn, nudge_for_active_booking
-        from zoneinfo import ZoneInfo
-        from datetime import datetime as _dt
-
-        now_local = _dt.now(ZoneInfo(settings.reminder_timezone or "America/Bogota"))
-        identity_known = bool(known_cedula and known_nombre)
-        cached_response = await handle_booking_turn(numero_paciente, mensaje_texto, now=now_local)
-        if cached_response:
-            logger.info(f"[BookingAssistant] ⚡ Paso de agenda sin LLM para {numero_paciente}")
-        else:
-            cached_response = await build_service_booking_reply(
-                mensaje_texto,
-                phone=numero_paciente,
-                prev_ai_text=prev_ai_text,
-                nombre=known_nombre,
-                identity_known=identity_known,
-            )
-            if cached_response:
-                logger.info(f"[InfoReplies] ⚡ Agenda con servicio elegido sin LLM para {numero_paciente}")
-                if identity_known:
-                    sync_session_identity(numero_paciente, known_cedula, known_nombre)
-                else:
-                    mark_awaiting_booking_identity(numero_paciente)
-        if not cached_response:
-            cached_response = await buscar_en_cache(
-                mensaje_texto,
-                known_cedula=known_cedula,
-                known_nombre=known_nombre,
-                awaiting_booking_identity=awaiting_id,
-                phone=numero_paciente,
-            )
-        if not cached_response and not awaiting_id:
-            if is_fast_path_candidate(mensaje_texto):
-                cached_response = await build_info_reply(
-                    mensaje_texto, phone=numero_paciente, nombre=known_nombre
-                )
-                if cached_response:
-                    logger.info(f"[InfoReplies] ⚡ Respuesta informativa sin LLM para {numero_paciente}")
-                    nudge = nudge_for_active_booking(numero_paciente)
-                    if nudge:
-                        cached_response = f"{cached_response}\n\n{nudge}"
-        spans["cache_lookup"] = time.perf_counter() - t_cache
-        if cached_response:
-            # Track booking identity step vs continue-to-service
-            asks_identity = (
-                "número de cédula" in cached_response.lower()
-                or "numero de cedula" in cached_response.lower()
-            ) and "nombre completo" in cached_response.lower()
-            asks_service = "qué tratamiento o servicio" in cached_response.lower() or (
-                "tratamiento o servicio" in cached_response.lower()
-            )
-            if asks_identity and is_booking_start_intent(mensaje_texto):
-                mark_awaiting_booking_identity(numero_paciente)
-            elif asks_service or (awaiting_id and msg_identity.cedula):
-                clear_awaiting_booking_identity(numero_paciente)
-
-            logger.info(f"[Semantic Cache] Respondiendo a {numero_paciente} desde caché.")
-            t_send = time.perf_counter()
-            await evolution_client.enviar_mensaje(numero_paciente, cached_response)
-            spans["send"] = time.perf_counter() - t_send
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=cached_response,
-                )
-            )
-            try:
-                await _update_thread_state(
-                    config,
-                    {
-                        "messages": [
-                            HumanMessage(content=mensaje_texto),
-                            AIMessage(content=cached_response),
-                        ],
-                        "user_context": {
-                            "nombre": known_nombre or "",
-                            "primer_nombre": (known_nombre or "").split()[0] if known_nombre else "",
-                            "cedula": known_cedula,
-                            "is_registered": bool(known_cedula),
-                            "phone": numero_paciente,
-                            "push_name": push_name.strip() if push_name else "",
-                        },
-                    },
-                )
-            except Exception:
-                pass
-            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
-            spans["total"] = time.perf_counter() - t_total
-            logger.info(
-                f"[Latency] phone={numero_paciente} path=cache "
-                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
-            )
-            return
-
-        # Extra safety: if cache missed but we just got identity mid-booking, do not greet.
-        if awaiting_id and msg_identity.cedula and (msg_identity.nombre or known_nombre):
-            cached_response = build_ask_service_response(
-                nombre=msg_identity.nombre or known_nombre, phone=numero_paciente
-            )
-            clear_awaiting_booking_identity(numero_paciente)
-            logger.info(
-                "[BookingFlow] Identity mid-booking → ask service (cache miss fallback) phone=%s",
-                numero_paciente,
-            )
-            t_send = time.perf_counter()
-            await evolution_client.enviar_mensaje(numero_paciente, cached_response)
-            spans["send"] = time.perf_counter() - t_send
-            asyncio.create_task(
-                dotnet_client.registrar_mensaje(
-                    chat_identifier=numero_paciente,
-                    rol="CHATBOT",
-                    contenido=cached_response,
-                )
-            )
-            try:
-                await _update_thread_state(
-                    config,
-                    {
-                        "messages": [
-                            HumanMessage(content=mensaje_texto),
-                            AIMessage(content=cached_response),
-                        ],
-                        "user_context": {
-                            "nombre": msg_identity.nombre or known_nombre or "",
-                            "primer_nombre": (
-                                (msg_identity.nombre or known_nombre or "").split()[0]
-                                if (msg_identity.nombre or known_nombre)
-                                else ""
-                            ),
-                            "cedula": msg_identity.cedula or known_cedula,
-                            "is_registered": True,
-                            "phone": numero_paciente,
-                            "push_name": push_name.strip() if push_name else "",
-                        },
-                    },
-                )
-            except Exception:
-                pass
-            inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
-            spans["total"] = time.perf_counter() - t_total
-            logger.info(
-                f"[Latency] phone={numero_paciente} path=booking_identity "
-                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
-            )
-            return
 
         # Contexto del paciente: only from what the user already wrote (Habeas Data)
         user_context = {
@@ -854,28 +735,6 @@ async def process_whatsapp_message(
                 )
             else:
                 result = await get_graph().ainvoke(invoke_input, config)
-        except (GraphDeadlineExceeded, LLMCallTimeoutError) as timeout_exc:
-            # Never a retry/error copy: answer from the no-LLM layer instead.
-            spans["graph_total"] = time.perf_counter() - t_graph
-            spans["queue_wait_total"] = graph_queue_wait_total()
-            spans["total"] = time.perf_counter() - t_total
-            kind = (
-                "graph_timeout_silent"
-                if isinstance(timeout_exc, GraphDeadlineExceeded)
-                else "llm_call_timeout_silent"
-            )
-            logger.warning(
-                f"[Latency] {kind} phone={numero_paciente} "
-                f"limit={settings.graph_timeout_seconds}s "
-                f"llm_call_limit={settings.llm_call_timeout_seconds}s "
-                f"queue_wait_excluded={spans['queue_wait_total']:.3f}s "
-                f"err={timeout_exc!s} (respuesta sin LLM) "
-                + " ".join(f"{k}={v:.3f}s" for k, v in spans.items() if k != "queue_wait_total")
-            )
-            await _send_degraded_reply(
-                numero_paciente, mensaje_texto, bool(known_cedula), known_nombre, prev_ai_text
-            )
-            return
         finally:
             end_turn_budget(budget_token)
         spans["graph_total"] = time.perf_counter() - t_graph
@@ -915,42 +774,23 @@ async def process_whatsapp_message(
 
         # Solo escalar por baja confianza RAG cuando hubo score real de tool RAG
         if rag_conf is not None and rag_conf < settings.rag_min_confidence:
-            if not await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto):
-                fallback = _fallback_reply(numero_paciente, mensaje_texto)
-                await evolution_client.enviar_mensaje(numero_paciente, fallback)
-                asyncio.create_task(
-                    dotnet_client.registrar_mensaje(
-                        chat_identifier=numero_paciente,
-                        rol="CHATBOT",
-                        contenido=fallback,
-                    )
-                )
+            await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
             return
 
         # Extraer respuesta final del bot
         mensajes_resultado = result.get("messages", [])
-        if not mensajes_resultado:
-            await evolution_client.enviar_mensaje(numero_paciente, _fallback_reply(numero_paciente, mensaje_texto))
+        ultimo_mensaje = mensajes_resultado[-1] if mensajes_resultado else None
+        respuesta_texto = extract_text_content(getattr(ultimo_mensaje, "content", "")).strip()
+        if not respuesta_texto:
+            await _send_outage_notice(numero_paciente, "el LLM devolvió una respuesta vacía")
             return
 
-        ultimo_mensaje = mensajes_resultado[-1]
-        respuesta_texto = extract_text_content(getattr(ultimo_mensaje, "content", "")).strip()
-
-        if not respuesta_texto:
-            respuesta_texto = _fallback_reply(numero_paciente, mensaje_texto)
-        else:
-            # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
-            respuesta_texto = _ensure_portal_reminder_after_booking(
-                respuesta_texto, mensajes_resultado, phone=numero_paciente
-            )
-            if any(
-                getattr(m, "name", "") == "agendar_cita_tool"
-                and "confirmada con éxito" in str(m.content or "").lower()
-                for m in _tool_messages_this_turn(mensajes_resultado)
-            ):
-                from app.services.booking_flow import clear_pending_service
-
-                clear_pending_service(numero_paciente)
+        _OUTAGE_NOTICE_SENT_AT.pop(numero_paciente, None)
+        # Portal only if THIS turn succeeded agendar/modificar/cancelar or listed citas.
+        respuesta_texto = _ensure_portal_reminder_after_booking(
+            respuesta_texto, mensajes_resultado, phone=numero_paciente
+        )
+        _update_booking_context(numero_paciente, mensajes_resultado, known_cedula, known_nombre)
 
         t_send = time.perf_counter()
         await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
@@ -971,96 +811,19 @@ async def process_whatsapp_message(
             + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
         )
 
-    except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError) as timeout_exc:
-        # Never a retry/error copy. If the graph never produced a result, answer without LLM.
-        logger.warning(f"[Processor] Timeout para {numero_paciente}: {timeout_exc!s}")
-        if "result" not in locals():
-            await _send_degraded_reply(
-                numero_paciente,
-                mensaje_texto,
-                bool(locals().get("known_cedula")),
-                locals().get("known_nombre"),
-                locals().get("prev_ai_text") or "",
-            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         from app.core.fast_gemini import GeminiUnavailableError
 
-        if isinstance(exc, GeminiUnavailableError):
-            logger.warning(f"[Processor] {exc} → respuesta sin LLM para {numero_paciente}")
+        if isinstance(exc, (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError)):
+            reason = f"timeout ({type(exc).__name__}: {exc!s})"
+        elif isinstance(exc, GeminiUnavailableError):
+            reason = str(exc)
+        elif isinstance(exc, httpx.HTTPStatusError):
+            reason = f"Gemini HTTP {exc.response.status_code}: {exc.response.text[:200]}"
         else:
             logger.error(f"[Processor] Error procesando mensaje para {numero_paciente}: {exc}", exc_info=True)
-        await _send_degraded_reply(
-            numero_paciente,
-            mensaje_texto,
-            bool(locals().get("known_cedula")),
-            locals().get("known_nombre"),
-            locals().get("prev_ai_text") or "",
-        )
+            reason = f"{type(exc).__name__}: {exc!s}"
+        await _send_outage_notice(numero_paciente, reason)
 
-
-async def _send_degraded_reply(
-    numero_paciente: str,
-    mensaje_texto: str,
-    cedula_conocida: bool,
-    nombre: Optional[str] = None,
-    prev_ai_text: str = "",
-) -> None:
-    """Answer without the LLM, always relative to the pending question when there is one.
-
-    Order: real catalog info (plus a nudge back to the booking) → re-ask the pending booking
-    question → same-day/booking-start step → human follow-up (only with no context at all).
-    """
-    from app.services.booking_assistant import nudge_for_active_booking, reprompt_pending_question
-
-    respuesta = None
-    try:
-        from app.services.info_replies import build_info_reply
-
-        respuesta = await build_info_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
-        nudge = nudge_for_active_booking(numero_paciente) if respuesta else None
-        if nudge:
-            respuesta = f"{respuesta}\n\n{nudge}"
-    except Exception as err:
-        logger.warning(f"[Processor] Respuesta informativa sin LLM falló: {err}")
-    if not respuesta:
-        respuesta = reprompt_pending_question(numero_paciente, prev_ai_text, mensaje_texto)
-    if not respuesta:
-        respuesta = _reply_without_llm(mensaje_texto, cedula_conocida, numero_paciente)
-    if not respuesta:
-        from app.services.info_replies import build_generic_reply
-
-        respuesta = build_generic_reply(mensaje_texto, phone=numero_paciente, nombre=nombre)
-    logger.warning(f"[Processor] LLM no disponible; respuesta sin LLM para {numero_paciente}")
-    try:
-        await evolution_client.enviar_mensaje(numero_paciente, respuesta)
-        asyncio.create_task(
-            dotnet_client.registrar_mensaje(
-                chat_identifier=numero_paciente,
-                rol="CHATBOT",
-                contenido=respuesta,
-            )
-        )
-        # The failed graph run already checkpointed the user's message; add only our reply.
-        await _update_thread_state(
-            get_thread_config(numero_paciente), {"messages": [AIMessage(content=respuesta)]}
-        )
-        inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
-    except Exception:
-        pass
-
-
-def _reply_without_llm(
-    mensaje_texto: str, cedula_conocida: bool, phone: Optional[str] = None
-) -> Optional[str]:
-    try:
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        from app.services.booking_flow import build_booking_reply_without_llm
-
-        now = datetime.now(ZoneInfo(settings.reminder_timezone or "America/Bogota"))
-        return build_booking_reply_without_llm(mensaje_texto, now, cedula_conocida, phone=phone)
-    except Exception as err:
-        logger.warning(f"[Processor] Respuesta sin LLM falló: {err}")
-        return None

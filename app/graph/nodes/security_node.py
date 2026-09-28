@@ -37,7 +37,7 @@ async def security_check_node(state: AgentState, config: RunnableConfig) -> dict
     if not isinstance(user_text, str) or not user_text.strip():
         return {"conversation_status": "ACTIVA", "content_guard_triggered": False}
 
-    # 1) Respeto / fuera de alcance odontológico (0 tokens) — no agendar ni urgencia
+    # 1) Falta de respeto (0 tokens) — no agendar ni urgencia; fuera de alcance lo orienta el LLM
     # Evitar pegar el mismo párrafo si el paciente insiste: variar con el último turno.
     last_ai_text = None
     prior_respect = False

@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     gemini_attempt_timeout_seconds: float = 30.0
     # When every model is overloaded / rate-limited, wait up to this long for one to recover.
     gemini_quota_max_wait_seconds: float = 35.0
-    # Total Gemini time per chat turn (all calls, retries and waits) before answering without the LLM.
+    # Total Gemini time per chat turn (all calls, retries and waits) before sending the outage notice.
     gemini_turn_budget_seconds: float = 14.0
     embedding_provider: str = Field(
         default="gemini",
@@ -107,6 +107,9 @@ class Settings(BaseSettings):
         default=0.0,
         validation_alias=AliasChoices("LLM_CALL_TIMEOUT_SECONDS"),
     )
+    clinic_phone: str = "+57 324 6030217"
+    # When the LLM can't answer, the outage notice goes out at most once per phone in this window.
+    llm_outage_notice_window_seconds: int = 600
     postgres_checkpoint_url: str = "postgresql://bot_user:bot_password@localhost:5433/bot_memory"
     rag_min_confidence: float = 0.50
     rag_candidate_count: int = 4

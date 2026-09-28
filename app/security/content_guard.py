@@ -1,7 +1,7 @@
 """Guards de contenido para recepción WhatsApp: respeto y alcance odontológico.
 
-Detecta (0 tokens) bromas vulgares / falta de respeto y dolores fuera de odontología
-para responder con tono humano de recepción, sin agendar ni escalar urgencias.
+Detecta (0 tokens) bromas vulgares / falta de respeto (se bloquean con una respuesta corta)
+y dolores fuera de odontología (se marcan para que el LLM oriente sin agendar ni escalar).
 """
 
 from __future__ import annotations
@@ -242,10 +242,10 @@ def evaluate_content_guard(
     prior_respect: bool = False,
     phone: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Evalúa guards en orden de prioridad.
+    """Bloquea la falta de respeto; el resto (incluido fuera de alcance) lo redacta el LLM.
 
     Returns:
-        (kind, reply_message) where kind is 'disrespect' | 'off_topic' | None.
+        (kind, reply_message) where kind is 'disrespect' | None.
     """
     if detect_disrespect(text):
         return "disrespect", build_respect_reply(
@@ -253,11 +253,5 @@ def evaluate_content_guard(
             avoid_reply=avoid_reply,
             prior_respect=prior_respect,
             phone=phone,
-        )
-    if detect_off_topic_non_dental(text):
-        from app.services import reply_variants
-
-        return "off_topic", reply_variants.pick(
-            "fuera_de_alcance", reply_variants.FUERA_DE_ALCANCE, phone=phone, avoid=avoid_reply
         )
     return None, None

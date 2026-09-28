@@ -46,7 +46,7 @@ def security_router(state: AgentState) -> str:
 
 	Prioridades:
 	1. Si la conversación está BLOQUEADA o ESCALADA → finaliza.
-	2. Si content_guard respondió (respeto / fuera de alcance) → finaliza (mensaje ya en state).
+	2. Si content_guard respondió (falta de respeto) → finaliza (mensaje ya en state).
 	3. Si el historial supera SUMMARY_THRESHOLD → comprime antes del chatbot.
 	4. En cualquier otro caso → pasa directo al chatbot.
 	"""

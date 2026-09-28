@@ -15,6 +15,7 @@ from app.core.llm_factory import get_chat_llm
 from app.core.config import settings
 from app.core.llm_concurrency import with_llm_slot
 from app.graph.state import AgentState
+from app.security.content_guard import detect_off_topic_non_dental
 
 from app.agents.tools.clinical_rag_tool import clinical_knowledge_tool
 from app.agents.tools.catalog_tools import (
@@ -66,7 +67,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "Fuera de tema no odontológico: orienta amable al alcance de la clínica. "
         "NO cambies contraseñas: indica login web https://nexusodonto.chatcampuslands.com/login "
         "(cédula + contraseña temporal).\n\n"
-        "CONTACTO: +57 324 6030217 | Calle 100 # 15-20 | Lun-Sáb 8:00 AM–6:00 PM | soporte@nexusodonto.com\n\n"
+        "CONTACTO: +57 324 6030217 | Calle 100 # 15-20 | soporte@nexusodonto.com | "
+        "Lun-Vie 8:00 AM–12:00 PM y 2:00–5:00 PM; Sáb 8:00 AM–12:00 PM; Dom/festivos cerrado\n\n"
         "HABEAS DATA: NUNCA asumas nombre ni cédula. Pide SIEMPRE la cédula (mín. 7 dígitos) "
         "antes de ver/agendar/reprogramar/cancelar/confirmar. Si ya la escribió en este chat, no la vuelvas a pedir. "
         "PROHIBIDO inventar nombres (p. ej. 'Paciente Nexus').\n\n"
@@ -442,11 +444,19 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 "número de cédula y nombre completo. PROHIBIDO invocar herramientas en este turno."
             )
 
+    off_topic = bool(last_user_msg) and detect_off_topic_non_dental(last_user_msg)
+    if off_topic:
+        context_str += (
+            "\n[ACCIÓN] El paciente habla de un dolor o cita de una zona NO dental. En corto y con "
+            "amabilidad: Nexus Odonto solo atiende salud oral, sugiérele un médico general y ofrece "
+            "ayuda con algo dental. NO agendes ni lo trates como urgencia dental."
+        )
+
     booking_flow = str(uc.get("booking_flow") or "").strip()
     if booking_flow:
         context_str += (
-            f"\n[CITA EN CURSO] {booking_flow}. El último mensaje del paciente responde a esa "
-            "pregunta pendiente: continúa desde ahí aunque tenga errores de tipeo. PROHIBIDO reiniciar, "
+            f"\n[CITA EN CURSO] {booking_flow}. El último mensaje del paciente sigue esa cita: "
+            "continúa desde ahí aunque tenga errores de tipeo. PROHIBIDO reiniciar, "
             "volver a pedir datos ya dados o preguntar «¿en qué te ayudo?» / «¿es para agendar...?». "
             "Horarios reales con consultar_disponibilidad_tool (servicio + fecha YYYY-MM-DD); "
             "si el día está cerrado u ocupado, dilo natural y ofrece 2-4 turnos cercanos. "
@@ -462,7 +472,10 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     messages = [combined_system_message, *chat_messages]
 
     prompt_chars = sum(len(str(getattr(m, "content", "") or "")) for m in messages)
-    llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
+    if off_topic:
+        llm, tool_names = _bound_llm_for_tools(()), ()
+    else:
+        llm, tool_names = get_llm_with_tools(last_user_msg, prev_ai_msg, cedula_detectada, same_day)
     t_llm = time.perf_counter()
     try:
         response = await with_llm_slot(
