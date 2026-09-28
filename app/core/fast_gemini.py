@@ -233,36 +233,78 @@ class FastGeminiChat(BaseChatModel):
         msg = AIMessage(content="".join(text_bits), tool_calls=tool_calls)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
+    def _model_chain(self) -> list[str]:
+        primary = self.model or settings.gemini_model
+        chain = [primary]
+        for m in (settings.gemini_fallback_models or "").split(","):
+            m = m.strip()
+            if m and m not in chain:
+                chain.append(m)
+        return chain
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        model = self.model or settings.gemini_model
         api_key = self.google_api_key or settings.gemini_api_key
-        body = self._build_body(messages)
-        url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+        base_body = self._build_body(messages)
         t0 = time.perf_counter()
+        last_exc: Optional[Exception] = None
         with httpx.Client(timeout=self.timeout) as client:
-            resp = client.post(url, json=body)
-            if resp.status_code >= 400:
-                body["generationConfig"].pop("thinkingConfig", None)
-                resp = client.post(url, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        return self._parse_response(data, time.perf_counter() - t0, model)
+            for model in self._model_chain():
+                body = json.loads(json.dumps(base_body))
+                url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+                try:
+                    resp = client.post(url, json=body)
+                    if resp.status_code == 400:
+                        body["generationConfig"].pop("thinkingConfig", None)
+                        resp = client.post(url, json=body)
+                    resp.raise_for_status()
+                    return self._parse_response(resp.json(), time.perf_counter() - t0, model)
+                except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                    last_exc = exc
+                    if not _is_transient(exc):
+                        raise
+                    logger.warning(f"[FastGemini] {model} unavailable ({_describe(exc)}); trying next model")
+        assert last_exc is not None
+        raise last_exc
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-        model = self.model or settings.gemini_model
         api_key = self.google_api_key or settings.gemini_api_key
-        body = self._build_body(messages)
-        url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+        base_body = self._build_body(messages)
         t0 = time.perf_counter()
         client = _get_async_client(self.timeout)
-        resp = await client.post(url, json=body)
-        if resp.status_code >= 400:
-            logger.warning(
-                f"[FastGemini] HTTP {resp.status_code} with thinkingConfig; retrying without. "
-                f"body={resp.text[:200]}"
-            )
-            body["generationConfig"].pop("thinkingConfig", None)
-            resp = await client.post(url, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        return self._parse_response(data, time.perf_counter() - t0, model)
+        last_exc: Optional[Exception] = None
+        for model in self._model_chain():
+            body = json.loads(json.dumps(base_body))
+            url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={api_key}"
+            try:
+                resp = await client.post(url, json=body)
+                if resp.status_code == 400:
+                    logger.warning(
+                        f"[FastGemini] HTTP 400 with thinkingConfig on {model}; retrying without. "
+                        f"body={resp.text[:200]}"
+                    )
+                    body["generationConfig"].pop("thinkingConfig", None)
+                    resp = await client.post(url, json=body)
+                resp.raise_for_status()
+                return self._parse_response(resp.json(), time.perf_counter() - t0, model)
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                last_exc = exc
+                if not _is_transient(exc):
+                    raise
+                logger.warning(f"[FastGemini] {model} unavailable ({_describe(exc)}); trying next model")
+        assert last_exc is not None
+        raise last_exc
+
+
+_TRANSIENT_STATUS = {404, 429, 500, 502, 503, 504}
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _TRANSIENT_STATUS
+    return isinstance(exc, httpx.TransportError)
+
+
+def _describe(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__

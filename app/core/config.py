@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     )
     # Prefer flash-lite for chat+tools latency; override via GEMINI_MODEL in .env.
     gemini_model: str = "gemini-3.5-flash-lite"
+    # Comma-separated models tried in order when the primary returns 429/5xx (capacity spikes).
+    gemini_fallback_models: str = "gemini-3.6-flash,gemini-flash-latest,gemini-3.5-flash"
     embedding_provider: str = Field(
         default="gemini",
         validation_alias=AliasChoices("EMBEDDING_PROVIDER"),

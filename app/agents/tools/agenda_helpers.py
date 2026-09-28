@@ -780,6 +780,12 @@ def _validar_horario_cita(
 
     if dt.date() == now_bogota.date():
         dt_check = dt.replace(tzinfo=now_bogota.tzinfo) if dt.tzinfo is None and now_bogota.tzinfo else dt
+        if dt_check <= now_bogota:
+            return (
+                False,
+                f"Las *{hora_sol}* de hoy ya pasaron. Con gusto te busco el turno más cercano "
+                "que quede disponible hoy o, si prefieres, para mañana. ¿Te consulto los horarios?",
+            )
         if dt_check < now_bogota + timedelta(minutes=15):
             return (
                 False,
