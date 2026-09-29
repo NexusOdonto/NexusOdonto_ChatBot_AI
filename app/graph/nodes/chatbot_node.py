@@ -55,6 +55,9 @@ SYSTEM_MESSAGE = SystemMessage(
         "Nunca digas «soy un asistente», «he reactivado mi sistema» ni encabezados "
         "tipo «Asistente Virtual».\n"
         "- PROHIBIDO inventar datos, citas, horarios, precios o nombres.\n"
+        "- NUNCA anuncies acciones futuras ni pidas esperar («voy a verificar», «un momento», "
+        "«déjame revisar», «ya te confirmo», «en breve»): el paciente NO recibe un segundo mensaje. "
+        "Llama la herramienta en este mismo turno y responde ya con el resultado.\n"
         "- NUNCA hables de fallas, sistema caído, errores ni pidas «intenta más tarde»: si una herramienta "
         "no trae datos, sigue la conversación (ofrece otra opción, pide un dato o sugiere llamar al +57 324 6030217).\n\n"
         "FORMATO WHATSAPP: *negrita* con un solo asterisco (nunca **). "
@@ -125,6 +128,9 @@ SYSTEM_MESSAGE = SystemMessage(
         "DISPONIBILIDAD: ofrece solo 2-4 opciones (mezcla días y horas) y pregunta cuál prefiere; más "
         "horarios solo si los pide. Si el día pedido es domingo o festivo, di con naturalidad que ese día "
         "no atendemos y ofrece los días más cercanos (no digas «no hay turnos con ningún odontólogo»).\n"
+        "Si está agendando y nombra el servicio, llama consultar_disponibilidad_tool en ESE turno (sin fecha "
+        "si no dio día) y responde con opciones reales. Si el resultado trae [SERVICIO AMBIGUO], pregunta en "
+        "una línea cuál prefiere mostrando sus precios y da ya los horarios.\n"
         "PRECIOS: formato colombiano $960.000, sin «COP». Al dar precios no pidas cédula; pregunta si "
         "quiere agendar. Pide cédula y nombre UNA sola vez, cuando ya va a apartar.\n"
         "CONFIRMACIONES: PROHIBIDO decir que una cita quedó agendada, reprogramada o cancelada si en "
@@ -258,6 +264,53 @@ _UNBACKED_CONFIRMATION_NUDGE = (
 )
 
 
+_HOLD_RE = re.compile(
+    r"\bun\s+(?:momento|momentico|segundo|segundito|minuto)\b"
+    r"|\bdame\s+un\s+(?:momento|segundo|minuto)\b"
+    r"|\b(?:d[ée]jame|perm[ií]teme|voy\s+a|vamos\s+a)\s+(?:revisar|verificar|consultar|chequear|mirar|buscar|validar)\b"
+    r"|\bya\s+te\s+(?:confirmo|cuento|digo|aviso|reviso)\b"
+    r"|\b(?:estoy|estamos)\s+(?:verificando|revisando|consultando|buscando|validando)\b"
+    r"|\ben\s+breve\b|\benseguida\s+te\b|\b(?:esp[ée]rame|espera)\s+un\b",
+    re.IGNORECASE,
+)
+_HOLD_NUDGE = (
+    "[SISTEMA] Tu respuesta anuncia una acción futura («un momento», «voy a verificar»…) sin hacerla, y el "
+    "paciente NO recibirá otro mensaje. Llama AHORA la herramienta que necesitas y responde con el resultado "
+    "real en este mismo turno; si ya tienes los datos, dalos directamente. PROHIBIDO pedir que espere."
+)
+_HOLD_FALLBACK = (
+    "Ahora mismo no alcanzo a ver los turnos libres desde aquí. ¿Qué día te queda mejor? "
+    "También puedes llamarnos al +57 324 6030217 y te la apartamos de una."
+)
+
+
+def _strip_hold(text: str) -> str:
+    """Drops the sentences that put the patient on hold; keeps any real content."""
+    kept = [s for s in re.split(r"(?<=[.!?\n])\s*", text or "") if s.strip() and not _HOLD_RE.search(s)]
+    return " ".join(s.strip() for s in kept).strip()
+
+
+_BOOKING_INTENT_RE = re.compile(r"\b(cita|agend\w*|apart\w*|reserv\w*|turno)\b")
+_NOT_BOOKING_RE = re.compile(r"cancel|anul|reprogram|modific")
+_BOOKING_PROMPT_KEYS = (
+    "qué servicio", "que servicio", "qué tratamiento", "que tratamiento", "qué día", "que dia",
+    "qué horario", "que horario", "agendar", "disponibilidad",
+)
+_SERVICE_WORDS = (
+    "limpieza", "profilaxis", "blanqueamiento", "resina", "calza", "injerto", "valoraci",
+    "ortodoncia", "brackets", "extracci", "endodoncia", "conducto",
+)
+_PRICE_WORDS = ("precio", "vale", "cuesta", "cuanto", "cuánto", "tarif")
+
+
+def _booking_in_progress(raw_msgs: list, prev_ai_msg: str) -> bool:
+    """A booking started in this chat even before any booking tool ran (booking_flow only exists after one)."""
+    if any(k in (prev_ai_msg or "") for k in _BOOKING_PROMPT_KEYS):
+        return True
+    humans = [str(m.content).lower() for m in raw_msgs if isinstance(m, HumanMessage) and m.content][-6:]
+    return any(_BOOKING_INTENT_RE.search(h) and not _NOT_BOOKING_RE.search(h) for h in humans)
+
+
 def _tool_messages_this_turn(raw_msgs: list) -> list:
     out = []
     for msg in reversed(raw_msgs):
@@ -336,7 +389,8 @@ def _select_tools(
         k in norm for k in ("cita", "agendar", "disponib")
     ):
         if booking_active:
-            return _BOOKING_TOOLS
+            # Naming the service is not a "yes": availability yes, agendar not yet.
+            return tuple(t for t in _BOOKING_TOOLS if t is not agendar_cita_tool)
         return (consultar_servicios_y_precios_tool,)
 
     if any(k in norm for k in ("doctor", "doctora", "odontologo", "especialista", "especialistas")):
@@ -704,6 +758,22 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             "Solo tras un «sí» explícito crea la cita con agendar_cita_tool."
         )
 
+    booking_active = bool(booking_flow) or _booking_in_progress(raw_msgs, prev_ai_msg)
+    norm_last = last_user_msg.lower()
+    service_named_in_booking = (
+        booking_active
+        and not tool_results
+        and any(k in norm_last for k in _SERVICE_WORDS)
+        and not any(k in norm_last for k in _PRICE_WORDS)
+        and not _NOT_BOOKING_RE.search(norm_last)
+    )
+    if service_named_in_booking:
+        context_str += (
+            "\n[ACCIÓN] Está agendando y nombró el servicio: llama consultar_disponibilidad_tool con ese "
+            "servicio YA (con la fecha si dio día) y responde con 2-4 opciones reales. PROHIBIDO decir que "
+            "vas a verificar o pedir que espere."
+        )
+
     cita_afectada = str(uc.get("cita_afectada") or "")
     context_str += cita_afectada
 
@@ -724,7 +794,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             prev_ai_msg,
             cedula_detectada,
             same_day,
-            booking_active=bool(booking_flow),
+            booking_active=booking_active,
             cita_afectada=bool(cita_afectada),
         )
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
@@ -739,6 +809,13 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         ):
             # The patient named a day: answer from a fresh lookup of that date, never from memory
             # of earlier suggestions (that is how a free 9:00 AM was reported as taken).
+            llm = _bound_llm_for_tools(tool_names, tool_choice=consultar_disponibilidad_tool.name)
+        elif (
+            service_named_in_booking
+            and not is_gemini
+            and not cita_afectada
+            and consultar_disponibilidad_tool.name in tool_names
+        ):
             llm = _bound_llm_for_tools(tool_names, tool_choice=consultar_disponibilidad_tool.name)
     t_llm = time.perf_counter()
     try:
@@ -770,6 +847,25 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             retry_llm.ainvoke([*messages, HumanMessage(content=_UNBACKED_CONFIRMATION_NUDGE)]),
             label="chatbot_ainvoke_unbacked",
         )
+    if not getattr(response, "tool_calls", None) and _HOLD_RE.search(str(response.content or "")):
+        logger.warning(
+            f"[Chatbot] Hold reply without tool call (bound_tools={list(tool_names)}, "
+            f"tool_results={tool_results}): {str(response.content)[:160]!r}; retrying"
+        )
+        retry_llm = (
+            _bound_llm_for_tools(tool_names, tool_choice="required")
+            if tool_names and not tool_results and not is_gemini
+            else llm
+        )
+        response = await with_llm_slot(
+            retry_llm.ainvoke([*messages, HumanMessage(content=_HOLD_NUDGE)]),
+            label="chatbot_ainvoke_hold",
+        )
+        if not getattr(response, "tool_calls", None) and _HOLD_RE.search(str(response.content or "")):
+            logger.error(f"[Chatbot] Hold reply persisted after retry: {str(response.content)[:160]!r}")
+            response = response.model_copy(
+                update={"content": _strip_hold(str(response.content)) or _HOLD_FALLBACK}
+            )
     llm_elapsed = time.perf_counter() - t_llm
     n_tools = len(getattr(response, "tool_calls", None) or [])
     logger.info(

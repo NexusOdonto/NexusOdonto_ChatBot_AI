@@ -401,6 +401,41 @@ def _texto_opciones(dias: List[tuple]) -> str:
     )
 
 
+# Generic words that cover several catalog services ("limpieza dental" = Limpieza profunda or Profilaxis).
+_TERMINOS_GENERICOS = {
+    "limpieza": ("limpieza", "cleaning", "profilaxis", "prophylaxis", "higiene"),
+    "limpiezas": ("limpieza", "cleaning", "profilaxis", "prophylaxis", "higiene"),
+}
+_PALABRAS_RELLENO = {"dental", "dentales", "de", "la", "el", "una", "un", "los", "dientes"}
+
+
+def _nota_servicio_ambiguo(norm_query: str, servicios: List[Dict[str, Any]]) -> str:
+    tokens = [t for t in norm_query.split() if t not in _PALABRAS_RELLENO]
+    if len(tokens) != 1 or tokens[0] not in _TERMINOS_GENERICOS:
+        return ""
+    aliases = _TERMINOS_GENERICOS[tokens[0]]
+    candidatos = []
+    for s in _servicios_activos(servicios):
+        nombre = str(_obtener_valor(s, "name", "nombre") or "")
+        campos = " ".join(
+            _normalizar_texto(str(c or ""))
+            for c in (nombre, _etiqueta_servicio(s), _obtener_valor(s, "description", "descripcion"))
+        )
+        if any(a in campos for a in aliases):
+            candidatos.append(s)
+    if len(candidatos) < 2:
+        return ""
+    opciones = "; ".join(
+        f"{_etiqueta_servicio(s)} ({formatear_precio_cop(_obtener_valor(s, 'price', 'precio'))}, "
+        f"{_obtener_valor(s, 'durationMinutes', 'duracionMinutos') or '?'} min)"
+        for s in candidatos
+    )
+    return (
+        f"\n[SERVICIO AMBIGUO] «{norm_query}» puede ser: {opciones}. En una línea pregúntale cuál prefiere "
+        "mostrando esos precios, y ofrece ya los horarios de abajo (no lo hagas esperar)."
+    )
+
+
 async def _consultar_disponibilidad_impl(
     especialidad: str, fecha: Optional[str] = None, hora: Optional[str] = None
 ) -> str:
@@ -483,6 +518,7 @@ async def _consultar_disponibilidad_impl(
         precio = _obtener_valor(servicio_encontrado, "price", "precio")
         cabecera = f"Servicio: {servicio_nombre} ({duracion_servicio} min"
         cabecera += f", {formatear_precio_cop(precio)})" if precio not in (None, "") else ")"
+        cabecera += _nota_servicio_ambiguo(norm_query, servicios)
         hoy = _hoy_bogota()
 
         dia = None
