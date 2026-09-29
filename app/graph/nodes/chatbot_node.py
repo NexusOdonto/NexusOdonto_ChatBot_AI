@@ -863,8 +863,10 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         )
         if not getattr(response, "tool_calls", None) and _HOLD_RE.search(str(response.content or "")):
             logger.error(f"[Chatbot] Hold reply persisted after retry: {str(response.content)[:160]!r}")
-            response = response.model_copy(
-                update={"content": _strip_hold(str(response.content)) or _HOLD_FALLBACK}
+            response = AIMessage(
+                content=_strip_hold(str(response.content)) or _HOLD_FALLBACK,
+                id=response.id,
+                response_metadata=getattr(response, "response_metadata", None) or {},
             )
     llm_elapsed = time.perf_counter() - t_llm
     n_tools = len(getattr(response, "tool_calls", None) or [])
