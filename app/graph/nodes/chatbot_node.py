@@ -78,6 +78,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "Lun-Vie 8:00 AM–12:00 PM y 2:00–5:00 PM; Sáb 8:00 AM–12:00 PM; Dom/festivos cerrado\n\n"
         "HABEAS DATA: NUNCA asumas nombre ni cédula. Pide SIEMPRE la cédula (mín. 7 dígitos) "
         "antes de ver/agendar/reprogramar/cancelar/confirmar. Si ya la escribió en este chat, no la vuelvas a pedir. "
+        "ÚNICA EXCEPCIÓN: la cita del bloque [CITA AFECTADA POR CAMBIO DE HORARIO] se reprograma o cancela "
+        "con su cita_id, sin pedir cédula. "
         "PROHIBIDO inventar nombres (p. ej. 'Paciente Nexus').\n\n"
         "HERRAMIENTAS (usa solo cuando haga falta datos reales):\n"
         "1. consultar_doctores_tool\n"
@@ -89,8 +91,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "Si el paciente pidió un odontólogo por nombre (ej: Ana Sofía), pasa ESE nombre en profesional_id; "
         "PROHIBIDO sustituirlo por Laura Gómez u otro por defecto/cabecera.\n"
         "5. consultar_cita_por_cedula_tool — VER citas. NO usar para agendar ni reprogramar\n"
-        "6. modificar_cita_tool(cedula, nueva_fecha_hora opcional) — reprogramar\n"
-        "7. cancelar_cita_tool(cedula, cita_id opcional)\n"
+        "6. modificar_cita_tool(cedula, nueva_fecha_hora opcional) — reprogramar (cita afectada: cita_id sin cédula)\n"
+        "7. cancelar_cita_tool(cedula, cita_id opcional) (cita afectada: cita_id sin cédula)\n"
         "8. confirmar_cita_tool(cedula)\n"
         "9. buscar_conocimiento_clinico — dudas clínicas (sin mezclar con agenda)\n\n"
         "AGENDAR — primera respuesta si pide cita y falta cédula: "
@@ -859,6 +861,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
 
     cita_afectada = str(uc.get("cita_afectada") or "")
     context_str += cita_afectada
+    if cita_afectada and last_user_msg and not tool_results:
+        context_str += (
+            "\n[ACCIÓN] Si el paciente responde al aviso de cambio de horario eligiendo una opción o un "
+            "día, hora u odontólogo concretos, llama modificar_cita_tool con el cita_id del bloque YA. "
+            "PROHIBIDO pedir la cédula para esa cita."
+        )
 
     combined_system_message = SystemMessage(
         content=f"{SYSTEM_MESSAGE.content}\n\n[CONTEXTO]\n{context_str}"
