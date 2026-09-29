@@ -19,24 +19,14 @@ MENSAJE_EMERGENCIA_URGENCIAS = (
     "Escalamos tu caso al equipo humano con prioridad crítica."
 )
 
-# Solo emergencias odontológicas / maxilofaciales reales.
-# El dolor genérico ("me duele mucho") NO es emergencia por sí solo.
+# Solo red flags odontológicas / maxilofaciales reales: sangrado que no para, hinchazón con
+# fiebre o compromiso para respirar/tragar, trauma. El dolor dental (aunque sea fuerte), la
+# sensibilidad, un diente partido o un sangrado leve son una CITA PRIORITARIA que agenda el bot.
 EMERGENCY_PATTERNS = [
-    # Alerta / urgencia explícita con ancla dental o médica oral
-    (r"\b(alerta\s+odontologica|urgencia\s+odontologica|emergencia\s+odontologica)\b", "URGENCIA_ODONTOLOGICA"),
+    (r"\b(alerta\s+odontologica|emergencia\s+odontologica)\b", "URGENCIA_ODONTOLOGICA"),
     (r"\b(alerta\s+medica|estado\s+de\s+alerta|emergencia\s+medica)\b", "ESTADO_DE_ALERTA"),
-
-    # Dolor extremo anclado a cavidad oral / dental
-    (r"\b(me\s+)?duele\s+(mucho|demasiado|bastante)\s+(el|la|los|las)?\s*(diente|dientes|muela|muelas|encia|encias|boca|mandibula)\b", "DOLOR_AGUDO_DENTAL"),
-    (r"\bdolor\s+(fuerte|severo|agudo|terrible|horrible|inaguantable|muy\s+fuerte|insoportable|extremo)\s+(de|en|en\s+la|en\s+el|de\s+la|de\s+el)?\s*(diente|dientes|muela|muelas|encia|encias|boca|mandibula|dental)\b", "DOLOR_SEVERO_DENTAL"),
-    (r"\bno\s+(aguanto|soporto)\s+(el|este)\s+dolor\s+(de|en|en\s+la|en\s+el)?\s*(diente|muela|encia|boca|mandibula)\b", "DOLOR_INSOPORTABLE_DENTAL"),
-    (r"\bno\s+puedo\s+abrir\s+la\s+boca\s+del\s+dolor\b", "TRISMUS_SEVERO"),
-
-    # Sangrado / infección / inflamación oral
-    (r"\b(sangrado|sangre)\s+(en\s+la\s+boca|en\s+la\s+encia|en\s+las\s+encias|de\s+la\s+muela|de\s+la\s+boca)\b", "SANGRADO_DENTAL"),
-    (r"\b(pus|mucha\s+pus|supuraci[oó]n)\s+(en\s+la\s+boca|en\s+la\s+encia|de\s+la\s+muela|dental)?\b", "SUPURACION_DENTAL"),
-    (r"\b(cara|mejilla|enc[ií]a|labio)\s+(hinchada|inflamada|deforme)\b", "INFLAMACION_SEVERA"),
-    (r"\b(diente|muela)\s+(rot[oa]|partid[oa]|quebrad[oa]|floj[oa]\s+por\s+golpe)\b", "TRAUMA_DENTAL"),
+    (r"\b(diente|dientes|muela|muelas)\s+(floj[oa]s?|rot[oa]s?|partid[oa]s?)\s+por\s+(un\s+)?golpe\b", "TRAUMA_DENTAL"),
+    (r"\b(no\s+puedo|dificultad\s+para)\s+tragar\b", "DIFICULTAD_DEGLUCION"),
 
     # Criterios de riesgo vital / maxilofacial
     (r"\bsangrado\s+que\s+no\s+para\b", "SANGRADO_QUE_NO_PARA"),
@@ -98,18 +88,17 @@ async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
 
     sys_prompt = (
         "Eres un clasificador de triage para el consultorio odontológico Nexus Odonto. "
-        "Decide si el mensaje describe una EMERGENCIA ODONTOLÓGICA O MAXILOFACIAL SEVERA "
-        "(hemorragia oral que no para, traumatismo dental/mandibular, flemón/absceso con "
-        "fiebre o dificultad respiratoria, hinchazón facial/cuello que compromete vía aérea, "
-        "dolor dental extremo e intolerable claramente de diente/muela/encía/boca).\n\n"
-        "Clasifica como REGULAR (NO emergencia) si:\n"
+        "Decide si el mensaje describe una EMERGENCIA ODONTOLÓGICA O MAXILOFACIAL SEVERA: "
+        "hemorragia oral que no para, traumatismo por golpe/caída/accidente en dientes o mandíbula, "
+        "flemón/absceso o hinchazón de cara/cuello con fiebre o dificultad para respirar o tragar.\n\n"
+        "Clasifica como REGULAR (NO emergencia; es una cita prioritaria que se agenda) si:\n"
+        "- Es dolor de diente, muela, encía o boca, aunque sea muy fuerte o insoportable, "
+        "o sensibilidad, o pide que lo atiendan pronto/'con urgencia'.\n"
+        "- Se le partió, despicó o aflojó un diente sin golpe, con o sin un sangrado leve.\n"
+        "- Encía inflamada o que sangra un poco, sin fiebre ni dificultad para respirar/tragar.\n"
         "- Es dolor o cita de una zona NO dental (rodilla, espalda, brazo, pie, etc.).\n"
-        "- Solo dice 'me duele mucho' sin anclar a diente, muela, encía, boca o mandíbula.\n"
         "- Es broma, vulgaridad o falta de respeto.\n"
-        "- Es agendar cita, precios, ortodoncia u consulta rutinaria.\n"
-        "- Solo pide que lo atiendan pronto o 'con urgencia' por un dolor de diente/muela común "
-        "(es una cita prioritaria). Si el dolor es insoportable/intolerable/'no aguanto', o hay "
-        "sangrado que no para, trauma, hinchazón facial o fiebre, sí es EMERGENCIA.\n\n"
+        "- Es agendar cita, precios, ortodoncia u consulta rutinaria.\n\n"
         "Responde ESTRICTAMENTE con una sola palabra: EMERGENCIA o REGULAR."
     )
 
@@ -130,10 +119,9 @@ async def classify_emergency_llm(text: str) -> Tuple[bool, Optional[str]]:
 
 # Términos que justifican triage LLM (nunca por "duele" solo en zona no dental)
 SUSPICIOUS_EMERGENCY_TERMS = {
-    "alerta", "sangr", "infect", "urgenc", "emerg", "hinch", "asfix", "respir",
+    "alerta", "sangr", "infect", "emerg", "hinch", "asfix", "respir",
     "fractur", "trauma", "grave", "absces", "flemon", "arranc", "desmay",
-    "fiebre", "morir", "auxilio", "insoportable", "inaguantable",
-    "hemorrag", "accidente", "golpe", "partio", "parti",
+    "fiebre", "morir", "auxilio", "hemorrag", "accidente", "golpe", "caida", "tragar",
 }
 
 
@@ -154,13 +142,7 @@ async def detect_severe_emergency(text: str) -> Tuple[bool, Optional[str]]:
         return True, reason
 
     norm_text = normalize_text(text)
-    has_suspicious_term = any(term in norm_text for term in SUSPICIOUS_EMERGENCY_TERMS)
-    # Dolor fuerte solo dispara LLM si hay ancla dental
-    has_severe_pain_word = any(
-        w in norm_text
-        for w in ("insoportable", "inaguantable", "no aguanto", "no soporto", "hemorrag")
-    )
-    if not has_suspicious_term and not (has_severe_pain_word and has_dental_context(text)):
+    if not any(term in norm_text for term in SUSPICIOUS_EMERGENCY_TERMS):
         return False, None
 
     # Sin contexto dental ni síntoma vital, no gastar tokens

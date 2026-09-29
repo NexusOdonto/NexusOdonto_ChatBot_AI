@@ -286,14 +286,14 @@ CONOCIMIENTO_CLINICO_COMPLETO: List[Dict[str, str]] = [
         ),
     },
     {
-        "titulo": "Atención de Dolor Agudo Dental y Urgencias sin Cita Previa (Sobrecupo)",
+        "titulo": "Atención de Dolor Agudo Dental y Urgencias: Cita Prioritaria",
         "categoria": "urgencias_y_dolor",
         "especialidad": "Odontología General y Urgencias",
         "contenido": (
-            "Protocolo de Atención ante Dolor Agudo sin Disponibilidad en Agenda:\n"
-            "- Empatía y Validación: Un dolor dental agudo es una prioridad clínica humana. Ningún paciente debe aguantarse el dolor por falta de citas en el calendario regular.\n"
-            "- Atención Prioritaria por Sobrecupo: Si la agenda del día está completa, el paciente con dolor puede acudir directamente a la sede de Nexus Odonto (Calle 100 # 15-20) para ser valorado entre turnos por el odontólogo de turno para alivio del dolor y estabilización dental.\n"
-            "- Medidas de Alivio Inmediato en Casa (mientras acude a la clínica):\n"
+            "Protocolo de Atención ante Dolor Dental Agudo:\n"
+            "- Empatía y Validación: Un dolor dental agudo es una prioridad clínica humana y sí se atiende en Nexus Odonto.\n"
+            "- Cita Prioritaria: se aparta el turno más temprano disponible en la agenda (hoy o el siguiente día hábil) con cualquier odontólogo; el odontólogo evalúa la molestia en la cita. Si hoy no quedan turnos, se ofrece el más cercano y la línea +57 324 6030217.\n"
+            "- Medidas de Alivio Inmediato en Casa (mientras llega la cita):\n"
             "  1. Aplicar compresas frías sobre la mejilla externa (10 minutos con descanso) para desinflamar.\n"
             "  2. Enjuagues suaves con agua tibia y media cucharadita de sal.\n"
             "  3. NUNCA colocar aspirinas, alcohol ni remedios caseros abrasivos directamente sobre el diente o la encía, ya que causan quemaduras químicas severas.\n"

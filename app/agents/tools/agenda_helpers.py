@@ -453,8 +453,48 @@ def _servicios_activos(servicios: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [s for s in servicios if _es_servicio_activo(s)]
 
 
+_URGENCIA_QUERY_RE = re.compile(
+    r"\b(urgen\w*|emergen\w*|valoraci\w*|evaluaci\w*|prioritari\w*|dolor\w*|duele\w*)\b"
+)
+_SERVICIO_VALORACION_RE = re.compile(r"valoraci|urgen|emergen|evaluaci|assessment|consulta general")
+_SERVICIO_URGENCIA_PREFERENCIA = (
+    re.compile(r"resina|calza|composite|obtura|filling"),
+    re.compile(r"profilaxis|prophylaxis|limpieza|cleaning"),
+)
+
+
+def es_consulta_urgencia(norm_query: str) -> bool:
+    """'urgencia', 'valoración', 'dolor de muela'… (not a named treatment)."""
+    return bool(_URGENCIA_QUERY_RE.search(norm_query or ""))
+
+
+def servicio_para_urgencia(servicios: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """(servicio, es_sustituto): the catalog's valoración/urgencia service, else the closest general one.
+
+    Without this, 'urgencia' fuzzy-matches unrelated services (it hit 'Injerto de encía').
+    """
+    activos = _servicios_activos(servicios)
+    for ser in activos:
+        campos = " ".join(
+            _normalizar_texto(str(_obtener_valor(ser, k) or ""))
+            for k in ("name", "nombre", "displayName", "code", "codigo")
+        )
+        if _SERVICIO_VALORACION_RE.search(f"{campos} {_normalizar_texto(_etiqueta_servicio(ser))}"):
+            return ser, False
+    for pref in _SERVICIO_URGENCIA_PREFERENCIA:
+        for ser in activos:
+            nombre = _normalizar_texto(f"{_obtener_valor(ser, 'name', 'nombre') or ''} {_etiqueta_servicio(ser)}")
+            if pref.search(nombre):
+                return ser, True
+    return (activos[0], True) if activos else (None, True)
+
+
 def _buscar_servicio_por_texto(norm_query: str, servicios: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Busca un servicio activo por nombre, código, descripción o categoría."""
+    if es_consulta_urgencia(norm_query):
+        ser, _ = servicio_para_urgencia(servicios)
+        if ser:
+            return ser
     for variante in _variantes_busqueda_servicio(norm_query):
         for ser in servicios:
             if not _es_servicio_activo(ser):

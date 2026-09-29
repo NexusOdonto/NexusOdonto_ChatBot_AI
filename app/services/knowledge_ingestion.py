@@ -127,7 +127,7 @@ async def sincronizar_catalogo_dotnet_a_qdrant() -> int:
                 f"- Duración estimada en clínica: {duracion} minutos\n"
                 f"- Valor oficial de la consulta/tratamiento: ${precio:,.0f} COP\n"
                 f"- Descripción clínica: {desc_oficial}\n"
-                "- Recomendación de agendamiento: Requiere cita previa o valoración por sobrecupo en caso de urgencia."
+                "- Recomendación de agendamiento: Requiere cita previa; en caso de dolor o urgencia se aparta el turno más temprano disponible."
             )
 
             doc = Document(

@@ -27,6 +27,8 @@ from app.agents.tools.agenda_helpers import (
     formatear_precio_cop,
     hora_corta,
     motivo_dia_cerrado,
+    es_consulta_urgencia,
+    servicio_para_urgencia,
 )
 
 logger = logging.getLogger(__name__)
@@ -393,6 +395,21 @@ _INSTRUCCION_OPCIONES = (
 )
 
 
+def _mas_tempranos(dias: List[tuple], por_dia: int = 2, max_dias: int = 2) -> List[str]:
+    """Earliest distinct start times across all doctors on the first open days, in order."""
+    out = []
+    for dia, turnos in dias[:max_dias]:
+        vistos: List[str] = []
+        for s, nombre in sorted((s, n) for n, slots in turnos for s in slots):
+            if s in vistos:
+                continue
+            vistos.append(s)
+            out.append(f"{fecha_legible(dia, con_anio=False)} a las {hora_corta(s)} con {nombre}")
+            if len(vistos) >= por_dia:
+                break
+    return out
+
+
 def _texto_opciones(dias: List[tuple]) -> str:
     sugeridas = _sugerencias(dias)
     return (
@@ -518,7 +535,16 @@ async def _consultar_disponibilidad_impl(
         precio = _obtener_valor(servicio_encontrado, "price", "precio")
         cabecera = f"Servicio: {servicio_nombre} ({duracion_servicio} min"
         cabecera += f", {formatear_precio_cop(precio)})" if precio not in (None, "") else ")"
-        cabecera += _nota_servicio_ambiguo(norm_query, servicios)
+        if es_consulta_urgencia(norm_query):
+            _ser, sustituto = servicio_para_urgencia(servicios)
+            if sustituto and _ser is servicio_encontrado:
+                cabecera += (
+                    f"\n[URGENCIA] El catálogo no tiene un servicio de valoración/urgencia: se aparta como "
+                    f"«{servicio_nombre}» y el odontólogo evalúa la molestia en la cita (dilo así en una línea). "
+                    f"Usa «{servicio_nombre}» como servicio en agendar_cita_tool."
+                )
+        else:
+            cabecera += _nota_servicio_ambiguo(norm_query, servicios)
         hoy = _hoy_bogota()
 
         dia = None
@@ -534,6 +560,16 @@ async def _consultar_disponibilidad_impl(
             dias = await _dias_con_turnos(profesionales, servicio_id, duracion_servicio, hoy)
             if not dias:
                 return f"{cabecera}\nNo hay turnos libres en los próximos 14 días. Sugiere llamar al +57 324 6030217."
+            if es_consulta_urgencia(norm_query):
+                sin_hoy = (
+                    "" if dias[0][0].date() == hoy.date()
+                    else " HOY YA NO QUEDAN TURNOS: dilo, da la línea +57 324 6030217 y ofrece estos."
+                )
+                return (
+                    f"{cabecera}\n[MÁS TEMPRANOS] {' | '.join(_mas_tempranos(dias))}\n"
+                    "[CÓMO RESPONDER] Es una cita prioritaria: ofrece ESTOS turnos en este orden (el primero es "
+                    f"el más pronto), nombrando el día tal como aparece, y pregunta cuál toma.{sin_hoy}"
+                )
             return (
                 f"{cabecera}\nHoy es {fecha_legible(hoy)}. Próximos días con turnos libres:\n"
                 f"{_texto_opciones(dias)}\n{_INSTRUCCION_OPCIONES}"

@@ -5,15 +5,38 @@ flemones con fiebre o traumatismos maxilofaciales graves.
 
 import asyncio
 import logging
+import re
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.agents.tools.catalog_tools import _consultar_disponibilidad_impl
 from app.clients.dotnet_client import dotnet_client
 from app.clients.evolution_client import evolution_client
 from app.security.emergency_detector import detect_severe_emergency, MENSAJE_EMERGENCIA_URGENCIAS
 from app.graph.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+_SLOT_LOOKUP_TIMEOUT_S = 8
+
+
+async def _mensaje_turno_mas_cercano() -> str:
+    """Earliest real slot for a dental urgency, or '' when the agenda can't be read."""
+    try:
+        texto = await asyncio.wait_for(
+            _consultar_disponibilidad_impl("urgencia dental"), timeout=_SLOT_LOOKUP_TIMEOUT_S
+        )
+    except Exception as e:
+        logger.warning(f"[Emergency Detector] No se pudo consultar el turno más cercano: {e!r}")
+        return ""
+    m = re.search(r"^\[MÁS TEMPRANOS\]\s*(.+)$", texto or "", re.MULTILINE)
+    if not m:
+        return ""
+    primero = m.group(1).split(" | ")[0].strip()
+    return (
+        f"Si puedes acercarte a Nexus Odonto, el turno más cercano en la clínica es el *{primero}*. "
+        "Nuestro equipo te escribe para apartarlo."
+    )
 
 
 async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dict:
@@ -45,6 +68,15 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
             except Exception as e:
                 logger.error(f"[Emergency Detector] Error enviando alerta por WhatsApp a {thread_id}: {e}")
 
+        # 1b. Además de la alerta, el turno real más cercano (sin frenar el aviso de arriba)
+        turno_msg = await _mensaje_turno_mas_cercano()
+        if thread_id and turno_msg:
+            try:
+                await evolution_client.enviar_mensaje(numero=thread_id, texto=turno_msg)
+                asyncio.create_task(dotnet_client.registrar_mensaje(thread_id, "CHATBOT", turno_msg))
+            except Exception as e:
+                logger.error(f"[Emergency Detector] Error enviando turno más cercano a {thread_id}: {e}")
+
         # 2. Escalar ticket a nivel CRÍTICO, crear notificación y actualizar estado en .NET
         if thread_id:
             try:
@@ -66,7 +98,9 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
             except Exception as e:
                 logger.warning(f"[Emergency Detector] Error registrando ticket/notificación CRÍTICA en .NET para {thread_id}: {e}")
 
-        emergency_message = AIMessage(content=MENSAJE_EMERGENCIA_URGENCIAS)
+        emergency_message = AIMessage(
+            content=f"{MENSAJE_EMERGENCIA_URGENCIAS}\n\n{turno_msg}" if turno_msg else MENSAJE_EMERGENCIA_URGENCIAS
+        )
         return {
             "messages": [emergency_message],
             "conversation_status": "ESCALADA",

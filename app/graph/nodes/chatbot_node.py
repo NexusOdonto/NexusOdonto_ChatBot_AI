@@ -63,8 +63,10 @@ SYSTEM_MESSAGE = SystemMessage(
         "FORMATO WHATSAPP: *negrita* con un solo asterisco (nunca **). "
         "Si usas viñetas, máximo 3-4 y con •.\n\n"
         "ALCANCE: solo odontología / citas / servicios / precios / doctores / cuidados. "
-        "Si el dolor es de otra parte del cuerpo (rodilla, espalda, etc.): explica con amabilidad "
-        "que Nexus Odonto solo atiende salud oral; NO inventes urgencia dental ni agendes esa cita. "
+        "Dolor o molestia de muela, diente, encía, mandíbula, boca, labio o lengua (sensibilidad, flemón, "
+        "diente partido…) SIEMPRE es odontológico y es justo lo que atendemos: agéndalo como cita prioritaria, "
+        "nunca digas que no se agenda. Solo si el dolor es de otra parte del cuerpo (rodilla, espalda, "
+        "estómago, etc.): explica con amabilidad que Nexus Odonto solo atiende salud oral y no agendes esa cita. "
         "Si hay vulgaridad, broma ofensiva o falta de respeto (ej. 'muela del ano'): pide respeto "
         "en corto y natural (no un sermón largo ni el mismo párrafo cada vez). "
         "Si se disculpa pero sigue con la broma: reconoce el perdón y pide un caso dental real. "
@@ -136,13 +138,15 @@ SYSTEM_MESSAGE = SystemMessage(
         "CONFIRMACIONES: PROHIBIDO decir que una cita quedó agendada, reprogramada o cancelada si en "
         "ESTE turno no recibiste el resultado exitoso de la herramienta. Fecha, hora y odontólogo de la "
         "confirmación: cópialos del resultado de la herramienta.\n\n"
-        "DOLOR DENTAL / SIN CUPOS: solo si el dolor es de diente, muela, encía o boca — "
-        "empatía + sobrecupo presencial + línea +57 324 6030217 + paliativos seguros "
-        "(compresa fría, enjuague salino; NUNCA aspirina sobre el diente). "
-        "Sin diagnósticos invasivos. Urgencias dentales severas reales (sangrado oral que no para, "
-        "trauma, hinchazón con dificultad respiratoria) → orientar a centro médico; "
-        "NO dispares alerta de urgencia por cualquier 'duele' ni por zonas no dentales. "
-        "Máximo 0-1 emoji; sin spam de sirenas ni banners."
+        "DOLOR / URGENCIA DENTAL = CITA PRIORITARIA: en ESE mismo turno llama "
+        "consultar_disponibilidad_tool(especialidad='urgencia dental') y ofrece los turnos MÁS TEMPRANOS "
+        "de hoy (y del siguiente día hábil) con cualquier odontólogo. Empatía en una frase y como máximo "
+        "UN tip corto de alivio (compresa fría o enjuague con agua tibia y sal; NUNCA aspirina sobre el "
+        "diente); nada de listas de remedios caseros. Sin diagnósticos. PROHIBIDO inventar sobrecupos, "
+        "atención sin cita o falta de cupos: solo si la herramienta muestra que hoy no hay turnos, dilo, "
+        "ofrece el turno más cercano y la línea +57 324 6030217. Sangrado que no para, hinchazón de "
+        "cara con fiebre o dificultad para respirar/tragar, o golpe fuerte → que acuda a urgencias YA "
+        "y además ofrece el turno más temprano. Máximo 0-1 emoji; sin spam de sirenas ni banners."
     )
 )
 
@@ -197,6 +201,61 @@ _WEEKDAY_WORDS = {
 def _is_clinical_question(norm: str) -> bool:
     return any(k in norm for k in _CLINICAL_KEYWORDS) and not any(
         k in norm for k in ("cita", "agendar", "cancelar", "modificar", "reprogramar")
+    )
+
+
+_DENTAL_AREA_RE = re.compile(
+    r"\b(muelas?|dientes?|encias?|boca|mandibula|quijada|cordal(es)?|molar(es)?|colmillos?|flemon)\b"
+)
+_DENTAL_SYMPTOM_RE = re.compile(
+    r"\b(duel\w*|dolor\w*|molest\w*|sensib\w*|sangr\w*|partio|partid[oa]s?|parti|rot[oa]s?|quebr\w*|"
+    r"despic\w*|fractur\w*|hinch\w*|inflam\w*|flemon|absces\w*|pus|infecc\w*|urgen\w*|punzad\w*)\b"
+)
+# Follow-ups like "¿me quedo con el dolor todo el día?" right after a dental urgency.
+_URGENCY_FOLLOWUP_RE = re.compile(r"\b(dolor\w*|duel\w*|atiend\w*|atender|urgen\w*|cita|agend\w*|aguant\w*)\b")
+_CLINICAL_ONLY_RE = re.compile(
+    r"\b(es normal|por que|cuanto (dura|tiempo)|que (puedo|debo) (tomar|comer)|despues de (la|una|el|mi))\b"
+)
+_ATTEND_RE = re.compile(r"\b(atiend\w*|atender|urgen\w*|cita|agend\w*|hoy|pronto|ya)\b")
+
+
+def _direct_dental_urgency(norm: str) -> bool:
+    if not (_DENTAL_AREA_RE.search(norm) and _DENTAL_SYMPTOM_RE.search(norm)):
+        return False
+    return not (_CLINICAL_ONLY_RE.search(norm) and not _ATTEND_RE.search(norm))
+
+
+def _is_dental_urgency(last_user_msg: str, raw_msgs: list) -> bool:
+    """Dental pain / urgency (this message or a follow-up of one): a priority booking, never out of scope."""
+    from app.security.content_guard import is_non_dental_only, normalize_text
+
+    norm = normalize_text(last_user_msg)
+    if not norm or is_non_dental_only(last_user_msg) or _NOT_BOOKING_RE.search(norm):
+        return False
+    if _direct_dental_urgency(norm):
+        return True
+    if not _URGENCY_FOLLOWUP_RE.search(norm):
+        return False
+    humans = [normalize_text(str(m.content)) for m in raw_msgs if isinstance(m, HumanMessage) and m.content]
+    return any(_direct_dental_urgency(h) for h in humans[-4:-1])
+
+
+def _dental_urgency_hint(now: datetime, cedula: str | None, nombre: str | None) -> str:
+    ident = (
+        f"Identidad ya conocida (cédula={cedula}, nombre={nombre}): NO la pidas; que elija turno y confirme."
+        if cedula and nombre
+        else f"Ya dio la cédula {cedula}: pide solo el nombre completo para apartarla."
+        if cedula
+        else "En la misma respuesta pide cédula y nombre completo para apartarla."
+    )
+    return (
+        f"\n[URGENCIA DENTAL] Dolor/urgencia dental = CITA PRIORITARIA (sí la agendamos). Llama YA "
+        f"consultar_disponibilidad_tool(especialidad='urgencia dental') sin fecha y ofrece 2-3 de los turnos "
+        f"MÁS TEMPRANOS: primero hoy {now.strftime('%Y-%m-%d')} (después de las "
+        f"{now.strftime('%I:%M %p')}) y luego el siguiente día hábil, con cualquier odontólogo. {ident} "
+        "Empatía en una frase + máximo un tip corto de alivio. PROHIBIDO sobrecupo, atención sin cita, "
+        "decir que no hay cupo o mandar a llamar sin que el resultado lo muestre. Solo tras un «sí» "
+        "explícito llama agendar_cita_tool con el servicio que indique el resultado."
     )
 
 
@@ -307,8 +366,13 @@ def _booking_in_progress(raw_msgs: list, prev_ai_msg: str) -> bool:
     """A booking started in this chat even before any booking tool ran (booking_flow only exists after one)."""
     if any(k in (prev_ai_msg or "") for k in _BOOKING_PROMPT_KEYS):
         return True
+    from app.security.content_guard import normalize_text
+
     humans = [str(m.content).lower() for m in raw_msgs if isinstance(m, HumanMessage) and m.content][-6:]
-    return any(_BOOKING_INTENT_RE.search(h) and not _NOT_BOOKING_RE.search(h) for h in humans)
+    return any(
+        (_BOOKING_INTENT_RE.search(h) or _direct_dental_urgency(normalize_text(h))) and not _NOT_BOOKING_RE.search(h)
+        for h in humans
+    )
 
 
 def _tool_messages_this_turn(raw_msgs: list) -> list:
@@ -356,6 +420,7 @@ def _select_tools(
     same_day: tuple[datetime, bool] | None = None,
     booking_active: bool = False,
     cita_afectada: bool = False,
+    dental_urgency: bool = False,
 ) -> tuple:
     """Bind only tools likely needed this turn — smaller schemas → fewer input tokens.
 
@@ -372,6 +437,12 @@ def _select_tools(
     if same_day and not cedula:
         # Identity step first: the hint already carries today's remaining hours, no lookup needed.
         return tuple()
+
+    if dental_urgency:
+        # Priority booking: availability now; agendar only once the patient says yes.
+        if _CONFIRM_RE.search(norm):
+            return _BOOKING_TOOLS
+        return tuple(t for t in _BOOKING_TOOLS if t is not agendar_cita_tool)
 
     # Pure price / catalog questions
     if any(k in norm for k in ("precio", "precios", "vale", "cuesta", "cuanto", "tarif")) and not any(
@@ -456,8 +527,11 @@ def get_llm_with_tools(
     same_day: tuple[datetime, bool] | None = None,
     booking_active: bool = False,
     cita_afectada: bool = False,
+    dental_urgency: bool = False,
 ):
-    selected = _select_tools(last_user_msg, prev_ai_msg, cedula, same_day, booking_active, cita_afectada)
+    selected = _select_tools(
+        last_user_msg, prev_ai_msg, cedula, same_day, booking_active, cita_afectada, dental_urgency
+    )
     tool_names = tuple(t.name for t in selected)
     return _bound_llm_for_tools(tool_names), tool_names
 
@@ -660,6 +734,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
     same_day = _same_day_request(last_user_msg, now) if last_user_msg else None
     tool_results = _tool_results_this_turn(raw_msgs)
     requested = None
+    dental_urgency = bool(last_user_msg) and _is_dental_urgency(last_user_msg, raw_msgs)
 
     # Inyección contextual de acción inmediata para evitar desvíos o alucinaciones
     if last_user_msg:
@@ -703,6 +778,8 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 "explícita, llama agendar_cita_tool ahora. Si falta el servicio o el horario, pregúntalo. "
                 "No digas que quedó agendada sin el resultado exitoso de agendar_cita_tool."
             )
+        elif dental_urgency:
+            context_str += _dental_urgency_hint(now, cedula_detectada, nombre_detectado)
         elif is_booking_start_intent(last_user_msg) and cedula_detectada and nombre_detectado:
             # Bug A: booking start with identity already in history.
             context_str += (
@@ -733,7 +810,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
                 f"\n[HORA PEDIDA] {hora_pedida}: pásala como hora='{hora_pedida}' en "
                 "consultar_disponibilidad_tool y responde según la línea [HORA PEDIDA] del resultado."
             )
-        if _is_clinical_question(norm_user) and not tool_results:
+        if _is_clinical_question(norm_user) and not tool_results and not dental_urgency:
             context_str += (
                 f"\n[ACCIÓN] Pregunta clínica: consulta {clinical_knowledge_tool.name} antes de responder "
                 "y basa tu respuesta en lo que devuelva."
@@ -759,6 +836,12 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         )
 
     booking_active = bool(booking_flow) or _booking_in_progress(raw_msgs, prev_ai_msg)
+    if booking_active and cedula_detectada and nombre_detectado and not dental_urgency:
+        # The message with the identity may already be outside the trimmed history window.
+        context_str += (
+            f"\n[PACIENTE] Ya dio en este chat cédula={cedula_detectada} y nombre={nombre_detectado}: "
+            "NO los pidas otra vez; úsalos en agendar_cita_tool."
+        )
     norm_last = last_user_msg.lower()
     service_named_in_booking = (
         booking_active
@@ -796,6 +879,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             same_day,
             booking_active=booking_active,
             cita_afectada=bool(cita_afectada),
+            dental_urgency=dental_urgency,
         )
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
             # Stops tool loops (same lookup repeated) — answer with the data already gathered.
@@ -811,7 +895,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             # of earlier suggestions (that is how a free 9:00 AM was reported as taken).
             llm = _bound_llm_for_tools(tool_names, tool_choice=consultar_disponibilidad_tool.name)
         elif (
-            service_named_in_booking
+            (service_named_in_booking or (dental_urgency and tool_results == 0))
             and not is_gemini
             and not cita_afectada
             and consultar_disponibilidad_tool.name in tool_names
