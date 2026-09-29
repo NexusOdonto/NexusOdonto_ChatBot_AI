@@ -649,6 +649,27 @@ def _mensaje_catalogo_no_encontrado(consulta: str, servicios: List[Dict[str, Any
     )
 
 
+def horario_vigente_en(fila: Dict[str, Any], fecha: str) -> bool:
+    """True si la fila de Availabilities aplica el día `fecha` (YYYY-MM-DD).
+
+    Un cambio de horario rige desde el día siguiente: las filas viejas terminan hoy
+    (effectiveTo inclusive) y las nuevas empiezan mañana (effectiveFrom). Sin fechas = abierta.
+    """
+    activo = _obtener_valor(fila, "isActive", "IsActive")
+    if activo is False:
+        return False
+    dia = str(fecha or "")[:10]
+    if not dia:
+        return True
+    desde = str(_obtener_valor(fila, "effectiveFrom", "EffectiveFrom") or "")[:10]
+    hasta = str(_obtener_valor(fila, "effectiveTo", "EffectiveTo") or "")[:10]
+    if desde and dia < desde:
+        return False
+    if hasta and dia > hasta:
+        return False
+    return True
+
+
 def _generar_slots_desde_regla(
     start_time_str: str,
     end_time_str: str,

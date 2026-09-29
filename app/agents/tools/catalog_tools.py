@@ -26,6 +26,7 @@ from app.agents.tools.agenda_helpers import (
     fecha_legible,
     formatear_precio_cop,
     hora_corta,
+    horario_vigente_en,
     motivo_dia_cerrado,
     es_consulta_urgencia,
     servicio_para_urgencia,
@@ -159,6 +160,7 @@ async def _turnos_por_profesional(
             fecha=fecha,
             servicio_id=servicio_id,
         )
+        horarios = [h for h in (horarios or []) if horario_vigente_en(h, fecha_target)]
         if not horarios:
             resultados.append((prof_id, prof_nombre, None))
             continue
