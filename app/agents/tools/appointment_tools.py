@@ -169,8 +169,8 @@ async def _agendar_cita_impl(
         cedula = (cedula or "").strip()
         if not cedula:
             return (
-                "Para poder registrar tu cita en el sistema necesito tu *número de cédula* 🆔 para vincular tu historial. "
-                "¿Me la podrías indicar por favor? 😊"
+                "Para poder registrar tu cita en el sistema necesito tu *número de cédula* para vincular tu historial. "
+                "¿Me la podrías indicar por favor?"
             )
 
         error_cedula = _validar_cedula(cedula)
@@ -207,13 +207,13 @@ async def _agendar_cita_impl(
                     # Same cédula but unrelated name → ask before attaching the booking.
                     # Never create a second person; cédula remains the identity key.
                     return (
-                        f"⚠️ Encontré un paciente registrado con la cédula *{cedula}* a nombre de "
+                        f"Encontré un paciente registrado con la cédula *{cedula}* a nombre de "
                         f"*{nombre_bd}*, pero el nombre que indicaste (*{nombre_clean}*) no coincide "
                         f"con ninguna parte de ese registro.\n\n"
                         f"¿Confirmas que *eres la misma persona*? "
                         f"Si es así, responde *sí, soy yo* y continúo con el agendamiento "
                         f"(se reutilizará el mismo historial; no se crea otra ficha). "
-                        f"Si no, verifica la cédula e inténtalo de nuevo. 😊"
+                        f"Si no, verifica la cédula e inténtalo de nuevo."
                     )
 
             if not bd_es_placeholder:
@@ -240,8 +240,8 @@ async def _agendar_cita_impl(
         if not paciente_id:
             if es_placeholder:
                 return (
-                    "Para poder registrar tu cita en el sistema y crear tu ficha clínica, necesito obligatoriamente tu *nombre completo* (nombre y apellido) 👤.\n\n"
-                    "¿Me podrías indicar cómo te llamas por favor? 😊"
+                    "Para poder registrar tu cita en el sistema y crear tu ficha clínica, necesito obligatoriamente tu *nombre completo* (nombre y apellido).\n\n"
+                    "¿Me podrías indicar cómo te llamas por favor?"
                 )
 
             logger.info(f"[Agenda] Documento {cedula} ({tipo_documento}) no encontrado. Creando paciente con nombre: '{nombre_display}'...")
@@ -272,9 +272,9 @@ async def _agendar_cita_impl(
 
             if not paciente_id:
                 return (
-                    "⚠️ No pude registrar tus datos en el sistema. "
+                    "No pude registrar tus datos en el sistema. "
                     "Por favor comunícate con recepción al *+57 324 6030217* "
-                    "o acércate a *Calle 100 # 15-20* para que te atiendan. 😊"
+                    "o acércate a *Calle 100 # 15-20* para que te atiendan."
                 )
 
         # First-time = new account OR no prior appointments for this patient
@@ -347,7 +347,7 @@ async def _agendar_cita_impl(
         raw = str(fecha_hora_inicio or "").strip()
         if not raw or raw.lower() in ("none", "null", "n/a", ""):
             return (
-                f"Con gusto te ayudo a agendar tu cita de *{serv_nombre_display}* con *{prof_nombre_display}* 😊.\n\n"
+                f"Con gusto te ayudo a agendar tu cita de *{serv_nombre_display}* con *{prof_nombre_display}*.\n\n"
                 "¿Qué día y horario te quedaría mejor? O si prefieres, dime la fecha y con gusto te muestro los turnos disponibles."
             )
 
@@ -355,7 +355,7 @@ async def _agendar_cita_impl(
         if not starts_dt:
             return (
                 f"No pude interpretar la fecha y hora *'{raw}'* para agendar tu cita.\n\n"
-                "Por favor indícame la fecha y hora deseada (ej: *2026-09-20 10:00 AM* o *mañana a las 2:00 PM*). 😊"
+                "Por favor indícame la fecha y hora deseada (ej: *2026-09-20 10:00 AM* o *mañana a las 2:00 PM*)."
             )
 
         horario_valido, msg_horario = _validar_horario_cita(starts_dt, duracion_min, prof_nombre_display)
@@ -422,29 +422,29 @@ async def _agendar_cita_impl(
 
             if any(w in err_msg for w in ["almuerzo", "lunch", "receso", "descanso"]):
                 return (
-                    f"⚠️ El turno de las *{hora_sol}* coincide con la franja de almuerzo del especialista (12:00 PM a 2:00 PM) 🍽️.\n\n"
-                    f"Con gusto podemos agendarte en la jornada de la mañana (8:00 AM a 12:00 PM) o en la tarde a partir de las *2:00 PM* con {prof_nombre_display}. ¿Cuál te queda mejor? 😊"
+                    f"El turno de las *{hora_sol}* coincide con la franja de almuerzo del especialista (12:00 PM a 2:00 PM).\n\n"
+                    f"Con gusto podemos agendarte en la jornada de la mañana (8:00 AM a 12:00 PM) o en la tarde a partir de las *2:00 PM* con {prof_nombre_display}. ¿Cuál te queda mejor?"
                 )
             elif any(w in err_msg for w in ["horario", "schedule", "disponib", "fuera", "outside"]):
                 return (
-                    f"⚠️ {prof_nombre_display} no tiene disponibilidad registrada a las *{hora_sol}* para esa fecha.\n\n"
-                    f"¿Te gustaría que te muestre los horarios disponibles para que elijas otro turno cómodo? 😊"
+                    f"{prof_nombre_display} no tiene disponibilidad registrada a las *{hora_sol}* para esa fecha.\n\n"
+                    f"¿Te gustaría que te muestre los horarios disponibles para que elijas otro turno cómodo?"
                 )
             elif any(w in err_msg for w in ["overlap", "ocupad", "conflict", "traslap", "already has"]):
                 return (
-                    f"⚠️ El turno de las *{hora_sol}* ya se encuentra reservado.\n\n"
-                    f"¿Deseas consultar los horarios libres más cercanos para hoy o para otra fecha? 😊"
+                    f"El turno de las *{hora_sol}* ya se encuentra reservado.\n\n"
+                    f"¿Deseas consultar los horarios libres más cercanos para hoy o para otra fecha?"
                 )
             else:
                 return (
-                    f"⚠️ En este momento no fue posible confirmar la cita a las *{hora_sol}* en el sistema de agenda.\n\n"
-                    f"Por favor consulta los horarios disponibles con {prof_nombre_display} o comunícate con recepción al *+57 324 6030217*. 😊"
+                    f"En este momento no fue posible confirmar la cita a las *{hora_sol}* en el sistema de agenda.\n\n"
+                    f"Por favor consulta los horarios disponibles con {prof_nombre_display} o comunícate con recepción al *+57 324 6030217*."
                 )
     except Exception as exc:
         logger.error(f"Error al agendar cita: {exc}", exc_info=True)
         return (
             "En este momento el sistema tardó en responder al registrar la cita. "
-            "Por favor confírmame nuevamente o si gustas comunícate con recepción al *+57 324 6030217* y te la dejamos lista de inmediato. 😊"
+            "Por favor confírmame nuevamente o si gustas comunícate con recepción al *+57 324 6030217* y te la dejamos lista de inmediato."
         )
 
 
@@ -453,7 +453,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
     try:
         cedula = (cedula or "").strip()
         if not cedula:
-            return "Por favor, indícame tu número de cédula para poder consultar tus citas. 🆔"
+            return "Por favor, indícame tu número de cédula para poder consultar tus citas."
         error_cedula = _validar_cedula(cedula)
         if error_cedula:
             return error_cedula
@@ -508,7 +508,7 @@ async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
             resumen.append(_bloque_portal_paciente(es_primera_vez=False))
         else:
             resumen.append(
-                "💡 No tienes citas programadas pendientes. ¿Te gustaría agendar una nueva cita? Con gusto te colaboro. 😊"
+                "No tienes citas programadas pendientes. ¿Te gustaría agendar una nueva cita? Con gusto te colaboro."
             )
 
         return "\n".join(resumen)
@@ -581,9 +581,9 @@ async def _cancelar_cita_impl(cedula: str, cita_id: Optional[str] = None, thread
         else:
             err = resultado.get("error", "")
             return (
-                f"⚠️ No fue posible cancelar la cita en este momento.\n\n"
+                f"No fue posible cancelar la cita en este momento.\n\n"
                 f"Detalle: {err}\n"
-                "Por favor intenta de nuevo o comunícate con recepción al *+57 324 6030217*. 😊"
+                "Por favor intenta de nuevo o comunícate con recepción al *+57 324 6030217*."
             )
     except Exception as exc:
         logger.error(f"Error cancelando cita para cédula {cedula}: {exc}", exc_info=True)
@@ -609,7 +609,7 @@ async def _modificar_cita_impl(
                 return "Esa cita ya no aparece activa (quizás ya se movió o se canceló)."
         else:
             if not cedula:
-                return "Para reprogramar tu cita, por favor indícame tu *número de cédula* 🆔. 😊"
+                return "Para reprogramar tu cita, por favor indícame tu *número de cédula*."
             error_cedula = _validar_cedula(cedula)
             if error_cedula:
                 return error_cedula
@@ -674,7 +674,7 @@ async def _modificar_cita_impl(
 
         cita_encontrada, msg_opciones = _resolver_cita_por_selector(proximas, cita_id)
         if not cita_encontrada:
-            return msg_opciones or "No se pudo identificar la cita a reprogramar. Por favor indícame el número de la cita (ej: Cita 1). 😊"
+            return msg_opciones or "No se pudo identificar la cita a reprogramar. Por favor indícame el número de la cita (ej: Cita 1)."
 
         target_id = str(cita_encontrada.get("id") or cita_encontrada.get("citaId") or cita_id)
 
@@ -685,7 +685,7 @@ async def _modificar_cita_impl(
                 raise ValueError("Formato no reconocido")
         except Exception:
             return (
-                f"❌ No pude interpretar la fecha '{nueva_fecha_hora}'.\n"
+                f"No pude interpretar la fecha '{nueva_fecha_hora}'.\n"
                 "Por favor usa el formato: *YYYY-MM-DD HH:MM AM/PM* (ej: 2026-09-04 02:00 PM o 14:00)"
             )
 
@@ -767,20 +767,20 @@ async def _modificar_cita_impl(
 
             if "availability" in err_msg or "outside" in err_msg or resultado.get("status_code") == 409:
                 return (
-                    f"⚠️ El horario solicitado (*{hora_req}* del `{fecha_req}`) no está disponible para {prof_nombre_display}.\n\n"
-                    "💡 Puede deberse al receso de almuerzo (12:00 PM a 2:00 PM) o a que está fuera de su jornada de atención.\n"
-                    "Por favor consulta los horarios disponibles (mañana de 8:00 AM a 12:00 PM o tarde a partir de las 2:00 PM). 😊"
+                    f"El horario solicitado (*{hora_req}* del `{fecha_req}`) no está disponible para {prof_nombre_display}.\n\n"
+                    "Puede deberse al receso de almuerzo (12:00 PM a 2:00 PM) o a que está fuera de su jornada de atención.\n"
+                    "Por favor consulta los horarios disponibles (mañana de 8:00 AM a 12:00 PM o tarde a partir de las 2:00 PM)."
                 )
             elif "overlap" in err_msg or "already has" in err_msg:
                 return (
-                    f"⚠️ {prof_nombre_display} ya tiene otra cita programada a las *{hora_req}*.\n\n"
-                    "Por favor elige otro horario disponible para apartar tu turno. 😊"
+                    f"{prof_nombre_display} ya tiene otra cita programada a las *{hora_req}*.\n\n"
+                    "Por favor elige otro horario disponible para apartar tu turno."
                 )
             else:
                 return (
-                    f"⚠️ No fue posible reprogramar tu cita en este momento.\n\n"
+                    f"No fue posible reprogramar tu cita en este momento.\n\n"
                     f"Detalle: {resultado.get('error')}\n"
-                    "Por favor intenta de nuevo o comunícate con recepción: *+57 324 6030217* 😊"
+                    "Por favor intenta de nuevo o comunícate con recepción: *+57 324 6030217*"
                 )
     except Exception as exc:
         logger.error(f"Error modificando cita para cédula {cedula}: {exc}", exc_info=True)
@@ -821,7 +821,7 @@ async def _confirmar_cita_impl(cedula: str, cita_id: Optional[str] = None) -> st
         if not res.get("success"):
             return (
                 "Hubo un pequeño problema al confirmar tu cita en el sistema. "
-                "Por favor comunícate directamente con recepción al +57 324 6030217 para asegurar tu asistencia. 😊"
+                "Por favor comunícate directamente con recepción al +57 324 6030217 para asegurar tu asistencia."
             )
 
         doctor = cita_a_confirmar.get("professionalName", "Especialista Odontológico")

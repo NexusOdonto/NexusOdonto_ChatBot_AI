@@ -41,7 +41,7 @@ def es_hora_laboral_valida(t: time, es_sabado: bool = False) -> Tuple[bool, str]
     if es_horario_almuerzo(t):
         return False, (
             "El horario seleccionado (12:00 PM a 2:00 PM) corresponde al receso de almuerzo de nuestros especialistas. "
-            "La atención de la tarde inicia a las 2:00 PM. 😊"
+            "La atención de la tarde inicia a las 2:00 PM."
         )
 
     # 2. Verificar si es sábado (solo mañanas)

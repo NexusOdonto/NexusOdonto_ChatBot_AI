@@ -387,7 +387,7 @@ _REDACCION_SYSTEM = (
     "una (no recalcules ni cambies nada); si son 2 o más, en viñetas con •.\n"
     "- Si no hay opciones, pregúntale qué día y hora le quedan bien, con el mismo odontólogo u otro.\n"
     "- Cierra preguntando cuál prefiere o si le sirve mejor otro día u hora.\n"
-    "- Entre 4 y 9 líneas. Máximo un emoji (o ninguno). *negrita* con un solo asterisco, sin títulos "
+    "- Entre 4 y 8 líneas. Sin emojis. *negrita* con un solo asterisco, sin títulos "
     "ni firma.\n"
     "- PROHIBIDO decir que eres asistente, bot, IA, sistema o mensaje automático; PROHIBIDO inventar "
     "datos, precios, direcciones o teléfonos; no pidas la cédula; no digas que la cita ya se movió "

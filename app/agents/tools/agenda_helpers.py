@@ -167,7 +167,7 @@ def _resolver_profesional(
     if norm in _ANY_PROF_TOKENS:
         return None, (
             "Para agendar necesito el *nombre o ID* del odontólogo que prefieres "
-            "(ej: *Dra. Ana Sofía*). ¿Con quién te gustaría la cita? 😊"
+            "(ej: *Dra. Ana Sofía*). ¿Con quién te gustaría la cita?"
         )
 
     # 1) Exact UUID match
@@ -232,8 +232,8 @@ def _validar_cedula(cedula: str) -> Optional[str]:
     is_valid, clean_doc, error_msg = domain_validar_cedula(cedula)
     if not is_valid:
         return (
-            f"⚠️ La cédula *{cedula}* no parece ser válida (debe tener al menos 7 dígitos).\n"
-            "Por favor verifica el número e inténtalo de nuevo. 🆔"
+            f"La cédula *{cedula}* no parece ser válida (debe tener al menos 7 dígitos).\n"
+            "Por favor verifica el número e inténtalo de nuevo."
         )
     return None
 
@@ -640,7 +640,7 @@ def _mensaje_especialidad_sin_servicio_unico(
             f"*{consulta}* corresponde a la especialidad *{esp_label}*. "
             "Para agendar necesito el servicio concreto. Estos son los activos relacionados:\n\n"
             f"{lista}\n\n"
-            "¿Cuál de estos servicios deseas agendar? 😊"
+            "¿Cuál de estos servicios deseas agendar?"
         )
     lista_todos = _lista_servicios_whatsapp(todos_servicios)
     if lista_todos:
@@ -649,11 +649,11 @@ def _mensaje_especialidad_sin_servicio_unico(
             "activo específicamente asociado para agendar con ese nombre.\n\n"
             "Servicios activos disponibles:\n"
             f"{lista_todos}\n\n"
-            "¿Cuál de estos te gustaría agendar? 😊"
+            "¿Cuál de estos te gustaría agendar?"
         )
     return (
         f"Tenemos la especialidad *{esp_label}*, pero no hay servicios activos agendables "
-        "en este momento. ¿Deseas que te ayude con otra consulta? 😊"
+        "en este momento. ¿Deseas que te ayude con otra consulta?"
     )
 
 
@@ -664,7 +664,7 @@ def _mensaje_catalogo_no_encontrado(consulta: str, servicios: List[Dict[str, Any
             f"No encontré un servicio agendable con el nombre *{consulta}*. "
             "Estos son los *servicios activos* que sí puedes reservar ahora:\n\n"
             f"{lista}\n\n"
-            "Indícame cuál deseas y con gusto reviso disponibilidad. 😊"
+            "Indícame cuál deseas y con gusto reviso disponibilidad."
         )
     return (
         f"No encontré un servicio agendable con el nombre *{consulta}* "
@@ -922,22 +922,22 @@ def _validar_horario_cita(
     hora_sol = _formatear_hora_ampm(dt.strftime("%H:%M"))
 
     msg_sabado = (
-        "⚠️ Los sábados nuestro consultorio atiende únicamente en jornada continua de *8:00 AM a 12:00 PM* ⏰.\n\n"
-        "¿Te gustaría agendar el sábado en la mañana o para el lunes en la tarde? 😊"
+        "Los sábados nuestro consultorio atiende únicamente en jornada continua de *8:00 AM a 12:00 PM*.\n\n"
+        "¿Te gustaría agendar el sábado en la mañana o para el lunes en la tarde?"
     )
     msg_fuera = (
-        f"⚠️ El horario solicitado (*{hora_sol}*) se encuentra fuera de nuestra jornada de atención ⏰.\n\n"
+        f"El horario solicitado (*{hora_sol}*) se encuentra fuera de nuestra jornada de atención.\n\n"
         "Nuestros horarios de consulta son:\n"
-        "• ☀️ *Mañana:* 8:00 AM a 12:00 PM\n"
-        "• 🌤️ *Tarde:* 2:00 PM a 5:00 PM\n"
-        "• 📅 *Sábados:* 8:00 AM a 12:00 PM\n\n"
-        "¿Deseas consultar los turnos disponibles dentro de este horario? 😊"
+        "• *Mañana:* 8:00 AM a 12:00 PM\n"
+        "• *Tarde:* 2:00 PM a 5:00 PM\n"
+        "• *Sábados:* 8:00 AM a 12:00 PM\n\n"
+        "¿Deseas consultar los turnos disponibles dentro de este horario?"
     )
     msg_duracion = (
-        f"⚠️ El horario solicitado (*{hora_sol}*) no cabe con la duración del tratamiento "
-        f"(*{dur} min*) dentro de nuestra jornada de atención ⏰.\n\n"
+        f"El horario solicitado (*{hora_sol}*) no cabe con la duración del tratamiento "
+        f"(*{dur} min*) dentro de nuestra jornada de atención.\n\n"
         "Por favor consulta la disponibilidad para ver los turnos en los que sí alcanza "
-        "a completarse el servicio. 😊"
+        "a completarse el servicio."
     )
 
     if es_sabado:
@@ -949,9 +949,9 @@ def _validar_horario_cita(
         if almuerzo_ini <= start_t < almuerzo_fin:
             return (
                 False,
-                f"⚠️ El horario solicitado (*{hora_sol}*) coincide con el receso de almuerzo de nuestros especialistas (12:00 PM a 2:00 PM) 🍽️.\n\n"
+                f"El horario solicitado (*{hora_sol}*) coincide con el receso de almuerzo de nuestros especialistas (12:00 PM a 2:00 PM).\n\n"
                 f"En la jornada de la tarde disponemos de turnos con {prof_nombre} a partir de las *2:00 PM* o *2:30 PM*.\n\n"
-                "¿Te gustaría que te reserve a las *2:00 PM*? 😊",
+                "¿Te gustaría que te reserve a las *2:00 PM*?",
             )
         en_manana = time(8, 0) <= start_t < time(12, 0)
         en_tarde = time(14, 0) <= start_t < time(17, 0)
@@ -988,9 +988,9 @@ def _validar_horario_cita(
         if dt_check < now_bogota + timedelta(minutes=15):
             return (
                 False,
-                f"⚠️ Para poder prepararte adecuadamente y garantizar que alcances a llegar al consultorio, "
+                f"Para poder prepararte adecuadamente y garantizar que alcances a llegar al consultorio, "
                 f"las citas para hoy requieren un margen mínimo de 15 minutos de anticipación.\n\n"
-                f"Para hoy a las *{hora_sol}* ya no alcanzamos a prepararte, pero con gusto podemos agendarte en los turnos más cercanos de esta tarde o para mañana. ¿Te gustaría consultar los horarios disponibles? 😊",
+                f"Para hoy a las *{hora_sol}* ya no alcanzamos a prepararte, pero con gusto podemos agendarte en los turnos más cercanos de esta tarde o para mañana. ¿Te gustaría consultar los horarios disponibles?",
             )
 
     return (True, None)
@@ -1140,7 +1140,7 @@ def _resolver_cita_por_selector(
 
     if len(citas_ordenadas) == 1:
         if norm in ("2", "segunda", "segundo", "3", "tercera", "tercero"):
-            return None, "Solo tienes una cita activa programada (Cita #1). ¿Deseas gestionar esa cita? 😊"
+            return None, "Solo tienes una cita activa programada (Cita #1). ¿Deseas gestionar esa cita?"
         return citas_ordenadas[0], None
 
     # Exact id before ordinals: a UUID such as "3fa8..." would otherwise parse as "cita 3".
@@ -1161,12 +1161,12 @@ def _resolver_cita_por_selector(
                 f_display = dt.strftime("%d/%m/%Y a las %I:%M %p")
             except Exception:
                 pass
-            opciones.append(f"{i}️⃣ *Cita #{i}:* {serv} con {prof} — 📅 {f_display}")
+            opciones.append(f"{i}. *Cita #{i}:* {serv} con {prof} — {f_display}")
 
         msg_ambiguo = (
             "Tienes varias citas activas programadas:\n\n"
             + "\n".join(opciones)
-            + "\n\n¿Cuál de estas citas deseas gestionar? Indícame el número (ej: *1* o *2*) o la fecha. 😊"
+            + "\n\n¿Cuál de estas citas deseas gestionar? Indícame el número (ej: *1* o *2*) o la fecha."
         )
         return None, msg_ambiguo
 
@@ -1196,7 +1196,7 @@ def _resolver_cita_por_selector(
         if 1 <= idx_num <= len(citas_ordenadas):
             return citas_ordenadas[idx_num - 1], None
         else:
-            return None, f"El número de cita *#{idx_num}* no existe. Tienes {len(citas_ordenadas)} citas activas. Por favor indica un número del 1 al {len(citas_ordenadas)}. 😊"
+            return None, f"El número de cita *#{idx_num}* no existe. Tienes {len(citas_ordenadas)} citas activas. Por favor indica un número del 1 al {len(citas_ordenadas)}."
 
     for c in citas_ordenadas:
         cid = str(c.get("id") or c.get("citaId") or "").lower()

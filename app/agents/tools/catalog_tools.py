@@ -685,7 +685,7 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
                     "Actualmente estamos actualizando los turnos de nuestros doctores.\n\n"
                     "Mientras tanto, estos son los *servicios activos* que puedes agendar:\n"
                     f"{lista_serv}\n\n"
-                    "¿Deseas consultar disponibilidad de alguno? 😊"
+                    "¿Deseas consultar disponibilidad de alguno?"
                 )
             nombres_esp = [
                 (_obtener_valor(e, "name", "nombre") or _obtener_valor(e, "code", "codigo"))
@@ -696,11 +696,11 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
                 return (
                     "Actualmente estamos actualizando los turnos de nuestros doctores. "
                     f"Nuestra clínica cuenta con atención en: *{esp_str}*.\n\n"
-                    "¿Deseas consultar sobre alguno de nuestros tratamientos? 😊"
+                    "¿Deseas consultar sobre alguno de nuestros tratamientos?"
                 )
             return (
                 "Actualmente estamos actualizando los turnos de nuestros doctores. "
-                "¿Deseas intentar de nuevo en unos minutos? 😊"
+                "¿Deseas intentar de nuevo en unos minutos?"
             )
     except Exception as exc:
         logger.error(f"Error al consultar doctores: {exc}", exc_info=True)

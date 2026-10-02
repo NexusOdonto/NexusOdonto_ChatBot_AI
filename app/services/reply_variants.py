@@ -4,7 +4,7 @@ medios/audio, spam, inactividad, falta de respeto, portal). La conversación la 
 Cada aviso tiene varias redacciones con el mismo significado; `pick`
 elige una al azar evitando repetir las usadas recientemente con el mismo teléfono.
 
-Reglas de redacción: español de Colombia, tono de recepción humana, 0-1 emoji,
+Reglas de redacción: español de Colombia, tono de recepción humana, sin emojis,
 nunca revelar que es un bot, sin formas "o/a".
 """
 

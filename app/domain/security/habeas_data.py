@@ -27,7 +27,7 @@ def validar_cedula(cedula: Optional[str]) -> Tuple[bool, Optional[str], Optional
         Tuple[es_valida, cedula_limpia, mensaje_error]
     """
     if not cedula:
-        return False, None, "Por favor indícame tu *número de cédula* 🆔 para poder ayudarte."
+        return False, None, "Por favor indícame tu *número de cédula* para poder ayudarte."
 
     raw = str(cedula).strip()
     solo_digitos = re.sub(r"\D", "", raw)
@@ -36,16 +36,16 @@ def validar_cedula(cedula: Optional[str]) -> Tuple[bool, Optional[str], Optional
         return (
             False,
             None,
-            f"⚠️ El número *{raw}* no parece ser una cédula válida (debe tener al menos 7 dígitos).\n"
-            "Por favor verifica el número e inténtalo de nuevo. 🆔"
+            f"El número *{raw}* no parece ser una cédula válida (debe tener al menos 7 dígitos).\n"
+            "Por favor verifica el número e inténtalo de nuevo."
         )
 
     if len(solo_digitos) > 12:
         return (
             False,
             None,
-            f"⚠️ El número *{raw}* contiene demasiados dígitos para ser una cédula válida.\n"
-            "Por favor verifica el número e inténtalo de nuevo. 🆔"
+            f"El número *{raw}* contiene demasiados dígitos para ser una cédula válida.\n"
+            "Por favor verifica el número e inténtalo de nuevo."
         )
 
     return True, solo_digitos, None

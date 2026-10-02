@@ -106,7 +106,7 @@ def _outage_message() -> str:
     return (
         "En este momento nuestro sistema de agenda está tardando en sincronizar. "
         "Por favor escríbenos nuevamente en un momentico o, si lo prefieres, comunícate directamente con recepción al "
-        f"*{settings.clinic_phone}* y con mucho gusto te ayudamos de inmediato. 😊"
+        f"*{settings.clinic_phone}* y con mucho gusto te ayudamos de inmediato."
     )
 
 
