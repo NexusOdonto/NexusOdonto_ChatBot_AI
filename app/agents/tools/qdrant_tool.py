@@ -132,7 +132,8 @@ from langchain_core.tools import tool
 # Herramienta que LangGraph puede incluir junto con sus demás herramientas.
 @tool("buscar_conocimiento_clinico")
 def clinical_knowledge_tool(query: str) -> str:
-	"""Consulta protocolos clínicos, tratamientos, cuidados bucales y preparaciones de Nexus Odonto."""
+	"""Consulta protocolos clínicos, recomendaciones de cuidado bucal y dudas postoperatorias.
+	PROHIBIDO usar para consultar precios o servicios ofrecidos por la clínica (para servicios y tarifas usar consultar_servicios_y_precios_tool)."""
 	return retrieve_clinical_knowledge(query)
 
 

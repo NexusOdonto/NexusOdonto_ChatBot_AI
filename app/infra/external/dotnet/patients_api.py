@@ -91,8 +91,13 @@ class DotNetPatientsApi:
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
         phone: Optional[str] = None,
+        tipo_documento: Optional[str] = "CC",
+        tutor_nombre: Optional[str] = None,
+        tutor_telefono: Optional[str] = None,
+        tutor_vinculo: Optional[str] = None,
+        tutor_documento: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Crea o reutiliza perfil de paciente por cédula (nunca por nombre)."""
+        """Crea o reutiliza perfil de paciente por cédula / documento con soporte multi-tipo (CC, TI, CE, Pasaporte) y tutor para menores."""
         doc_num = (cedula or document_number or "").strip()
         if not doc_num:
             logger.warning("[PatientsApi] crear_paciente_basico sin cédula — abortado")
@@ -124,6 +129,15 @@ class DotNetPatientsApi:
                 tel,
                 resolved,
             )
+
+        # Tutor / Contacto de emergencia (clave para menores con TI/RC según frontend PacienteForm)
+        emergency_contact_str = "Recepción Nexus"
+        if tutor_nombre:
+            vinculo_str = f" ({tutor_vinculo})" if tutor_vinculo else ""
+            doc_str = f" - CC {tutor_documento}" if tutor_documento else ""
+            emergency_contact_str = f"Tutor: {tutor_nombre}{vinculo_str}{doc_str}".strip()
+
+        emergency_phone_str = tutor_telefono or clean_phone or "+573246030217"
 
         # Prefer existing identity before attempting create.
         existing = await self.resolver_paciente_por_documento(doc_num)
@@ -157,12 +171,29 @@ class DotNetPatientsApi:
             )
 
         doc_type_id = "e0000000-0000-0000-0000-000000000001"
+        target_tipo = str(tipo_documento or "CC").strip().upper()
         try:
             doc_types = await catalog_api.obtener_tipos_documento()
             if doc_types:
                 for dt in doc_types:
-                    c = (dt.get("code") or dt.get("name") or "").upper()
-                    if "CC" in c or "CEDULA" in c or "CITIZEN" in c:
+                    c = (dt.get("code") or "").upper()
+                    n = (dt.get("name") or "").upper()
+                    if target_tipo in c or target_tipo in n:
+                        doc_type_id = str(dt.get("id"))
+                        break
+                    if target_tipo in ("TI", "TARJETA", "TARJETA_IDENTIDAD") and ("TI" in c or "TARJETA" in n):
+                        doc_type_id = str(dt.get("id"))
+                        break
+                    if target_tipo in ("CE", "EXTRANJERIA") and ("CE" in c or "EXTRANJ" in n):
+                        doc_type_id = str(dt.get("id"))
+                        break
+                    if target_tipo in ("PAS", "PASAPORTE", "PP") and ("PAS" in c or "PASAPORTE" in n):
+                        doc_type_id = str(dt.get("id"))
+                        break
+                    if target_tipo in ("RC", "REGISTRO", "REGISTRO_CIVIL") and ("RC" in c or "CIVIL" in n):
+                        doc_type_id = str(dt.get("id"))
+                        break
+                    if target_tipo in ("CC", "CEDULA", "CEDULA_CIUDADANIA") and ("CC" in c or "CEDULA" in n or "CITIZEN" in n):
                         doc_type_id = str(dt.get("id"))
                         break
                 if not doc_type_id and doc_types:
@@ -178,18 +209,21 @@ class DotNetPatientsApi:
         except Exception:
             pass
 
+        # Para menores con TI / RC fecha de nacimiento acorde (ej. 2012)
+        fecha_nac = "2012-01-01" if target_tipo in ("TI", "RC") else "2000-01-01"
+
         onboard_payload = {
             "documentTypeId": doc_type_id,
             "documentNumber": cedula_clean,
             "firstName": first_name_val,
             "lastName": last_name_val,
-            "dateOfBirth": "2000-01-01",
+            "dateOfBirth": fecha_nac,
             "sexId": sex_id,
             "phone": clean_phone,  # None si no hay WA real — API no inventa placeholder
             "email": f"paciente_{cedula_clean}@nexusodonto.com",
             "address": "Consultorio Nexus Odonto",
-            "emergencyContact": "Recepción Nexus",
-            "emergencyPhone": "+573246030217",
+            "emergencyContact": emergency_contact_str,
+            "emergencyPhone": emergency_phone_str,
             "password": cedula_clean,
             "mustChangePassword": True,
         }
@@ -359,6 +393,50 @@ class DotNetPatientsApi:
                 return persona
 
         return None
+
+    async def resolver_paciente_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
+        """Resuelve el paciente asociado a un número de teléfono de WhatsApp verificado."""
+        persona = await self.buscar_persona_por_telefono(telefono)
+        if not persona or not persona.get("id"):
+            return None
+
+        person_id = str(persona["id"])
+        paciente = await self.buscar_paciente_por_person_id(person_id)
+        if not paciente:
+            paciente = await self.crear_paciente_para_persona(person_id)
+        if not paciente:
+            return None
+
+        patient_id = paciente.get("id") or paciente.get("patientId")
+        first_name = persona.get("firstName") or ""
+        last_name = persona.get("lastName") or ""
+        full_name = f"{first_name} {last_name}".strip()
+        doc_num = persona.get("documentNumber") or ""
+        doc_type_id = persona.get("documentTypeId")
+
+        doc_type_code = "CC"
+        try:
+            doc_types = await catalog_api.obtener_tipos_documento()
+            if doc_types and doc_type_id:
+                for dt in doc_types:
+                    if str(dt.get("id")) == str(doc_type_id):
+                        doc_type_code = str(dt.get("code") or dt.get("name") or "CC").upper()
+                        break
+        except Exception:
+            pass
+
+        return {
+            "id": patient_id,
+            "patientId": patient_id,
+            "personId": person_id,
+            "firstName": first_name,
+            "lastName": last_name,
+            "fullName": full_name,
+            "documentNumber": doc_num,
+            "documentTypeId": doc_type_id,
+            "documentTypeCode": doc_type_code,
+            "phone": persona.get("phone") or "",
+        }
 
     async def buscar_persona_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
         """Busca persona SOLO por número de documento (cédula). No usa caché ni nombre."""

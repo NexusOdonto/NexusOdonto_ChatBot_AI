@@ -8,7 +8,7 @@ from app.infra.external.dotnet.http_transport import dotnet_transport, DotNetHtt
 
 logger = logging.getLogger(__name__)
 
-_CATALOG_TTL_SECONDS = 180.0  # 3 min — catálogos estáticos (services/specialties/professionals)
+_CATALOG_TTL_SECONDS = 60.0  # 1 min — catálogos estáticos para refresco rápido
 _catalog_cache = {}
 
 
@@ -33,17 +33,17 @@ class DotNetCatalogApi:
         self.transport = transport or dotnet_transport
 
     async def obtener_servicios(self) -> Optional[List[Dict[str, Any]]]:
-        """Obtiene la lista de servicios activos de la clínica."""
+        """Obtiene la lista de servicios activos de la clínica desde el backend .NET."""
         cached = _cache_get("Services")
         if cached is not None:
             return cached
-        response = await self.transport.request("GET", "Services")
+        response = await self.transport.request("GET", "Services", params={"pageSize": 100})
         if response and response.status_code == 200:
             payload = response.json()
-            if isinstance(payload, list):
-                return _cache_set("Services", payload)
-            if isinstance(payload, dict):
-                return _cache_set("Services", payload.get("items", []))
+            items = payload if isinstance(payload, list) else payload.get("items", [])
+            from app.agents.tools.agenda_helpers import _es_servicio_activo
+            servicios_validos = [s for s in items if isinstance(s, dict) and _es_servicio_activo(s)]
+            return _cache_set("Services", servicios_validos)
         return None
 
     async def obtener_especialidades(self) -> Optional[List[Dict[str, Any]]]:
@@ -51,7 +51,7 @@ class DotNetCatalogApi:
         cached = _cache_get("Specialties")
         if cached is not None:
             return cached
-        response = await self.transport.request("GET", "Specialties")
+        response = await self.transport.request("GET", "Specialties", params={"pageSize": 100})
         if response and response.status_code == 200:
             payload = response.json()
             if isinstance(payload, list):
@@ -65,7 +65,7 @@ class DotNetCatalogApi:
         cached = _cache_get("Employees")
         if cached is not None:
             return cached
-        response = await self.transport.request("GET", "Employees")
+        response = await self.transport.request("GET", "Employees", params={"pageSize": 100})
         if response and response.status_code == 200:
             payload = response.json()
             items = payload if isinstance(payload, list) else payload.get("items", [])
@@ -78,7 +78,7 @@ class DotNetCatalogApi:
         NOT cached: person identity (cédula) must never be served from a stale list,
         or the chatbot can miss an existing patient and orphan appointments.
         """
-        response = await self.transport.request("GET", "Persons")
+        response = await self.transport.request("GET", "Persons", params={"pageSize": 100})
         if response and response.status_code == 200:
             payload = response.json()
             return payload if isinstance(payload, list) else payload.get("items", [])
@@ -87,33 +87,64 @@ class DotNetCatalogApi:
     async def obtener_profesionales(
         self, especialidad_id: Optional[Any] = None
     ) -> Optional[List[Dict[str, Any]]]:
-        """Obtiene la lista de profesionales enriquecidos con su nombre completo."""
+        """Obtiene la lista de profesionales enriquecidos con su nombre completo, especialidad y consultorio."""
         cache_key = f"Professionals:{especialidad_id or 'all'}"
         cached = _cache_get(cache_key)
         if cached is not None:
             return cached
-        params: Dict[str, Any] = {}
+        params: Dict[str, Any] = {"pageSize": 100}
         if especialidad_id is not None:
             params["especialidadId"] = str(especialidad_id)
             params["specialtyId"] = str(especialidad_id)
 
-        response = await self.transport.request("GET", "Professionals", params=params if params else None)
+        response = await self.transport.request("GET", "Professionals", params=params)
         if response and response.status_code == 200:
             payload = response.json()
             profs = payload if isinstance(payload, list) else payload.get("items", [])
             if not profs:
                 return _cache_set(cache_key, [])
 
-            # Enriquecer con nombres reales (Employees + Persons en paralelo, con caché)
+            # Filtrar profesionales inactivos o eliminados
+            profs_filtrados = []
+            for p in profs:
+                if not isinstance(p, dict):
+                    continue
+                is_del = p.get("isDeleted") or p.get("IsDeleted") or p.get("is_deleted")
+                is_act = p.get("isActive") if "isActive" in p else p.get("IsActive")
+                if is_del is True or str(is_del).strip().lower() in ("true", "1", "yes"):
+                    continue
+                if is_act is False or str(is_act).strip().lower() in ("false", "0", "no"):
+                    continue
+                profs_filtrados.append(p)
+
+            profs = profs_filtrados or profs
+
+            # Enriquecer con nombres reales, especialidades y consultorios en paralelo
             try:
-                empleados, personas = await asyncio.gather(
+                empleados, personas, especialidades = await asyncio.gather(
                     self.obtener_empleados(),
                     self.obtener_personas(),
+                    self.obtener_especialidades(),
                 )
-                emp_to_person = {e.get("id"): e.get("personId") for e in empleados if isinstance(e, dict)}
+                emp_to_person = {e.get("id"): e.get("personId") for e in (empleados or []) if isinstance(e, dict)}
+                emp_to_office = {
+                    e.get("id"): (e.get("consultorio") or e.get("office") or e.get("cubicle") or e.get("location"))
+                    for e in (empleados or [])
+                    if isinstance(e, dict)
+                }
+                emp_to_reg = {
+                    e.get("id"): (e.get("medicalLicenseNumber") or e.get("registrationNumber") or e.get("licenseNumber") or e.get("reg"))
+                    for e in (empleados or [])
+                    if isinstance(e, dict)
+                }
                 person_names = {
                     p.get("id"): f"{p.get('firstName', '')} {p.get('lastName', '')}".strip()
-                    for p in personas if isinstance(p, dict)
+                    for p in (personas or []) if isinstance(p, dict)
+                }
+                esp_map = {
+                    str(e.get("id")).lower(): (e.get("name") or e.get("nombre"))
+                    for e in (especialidades or [])
+                    if isinstance(e, dict)
                 }
 
                 for p in profs:
@@ -121,17 +152,55 @@ class DotNetCatalogApi:
                         emp_id = p.get("employeeId")
                         per_id = emp_to_person.get(emp_id)
                         nombre_raw = person_names.get(per_id)
+                        if not nombre_raw:
+                            nombre_raw = p.get("name") or p.get("nombre") or p.get("professionalName") or ""
+
                         if nombre_raw:
-                            prefijo = (
-                                "Dra."
-                                if any(n in nombre_raw.lower() for n in ["laura", "maria", "ana", "camila", "valentina", "sofia"])
-                                else "Dr."
-                            )
-                            p["name"] = f"{prefijo} {nombre_raw}"
-                            p["nombre"] = f"{prefijo} {nombre_raw}"
-                            p["nombreCompleto"] = f"{prefijo} {nombre_raw}"
+                            nombre_clean = str(nombre_raw).strip()
+                            if not nombre_clean.lower().startswith(("dr", "dra")):
+                                prefijo = (
+                                    "Dra."
+                                    if any(n in nombre_clean.lower() for n in ["laura", "maria", "ana", "camila", "valentina", "sofia", "andrea"])
+                                    else "Dr."
+                                )
+                                nombre_clean = f"{prefijo} {nombre_clean}"
+                            p["name"] = nombre_clean
+                            p["nombre"] = nombre_clean
+                            p["nombreCompleto"] = nombre_clean
+
+                        # Especialidad real del profesional
+                        p_esp_id = str(p.get("specialtyId") or p.get("especialidadId") or "").lower()
+                        if p_esp_id in esp_map:
+                            p["specialtyName"] = esp_map[p_esp_id]
+                            p["especialidad"] = esp_map[p_esp_id]
+                        elif not p.get("specialtyName") and not p.get("especialidad"):
+                            p["specialtyName"] = "Odontología General"
+                            p["especialidad"] = "Odontología General"
+
+                        # Consultorio / Ubicación
+                        consultorio = (
+                            p.get("consultorio")
+                            or p.get("office")
+                            or p.get("cubicle")
+                            or emp_to_office.get(emp_id)
+                        )
+                        if consultorio:
+                            p["consultorio"] = consultorio
+                            p["office"] = consultorio
+
+                        # Registro médico profesional
+                        reg = (
+                            p.get("medicalLicenseNumber")
+                            or p.get("licenseNumber")
+                            or p.get("registrationNumber")
+                            or p.get("reg")
+                            or emp_to_reg.get(emp_id)
+                        )
+                        if reg:
+                            p["medicalLicenseNumber"] = reg
+                            p["registrationNumber"] = reg
             except Exception as enh_err:
-                logger.debug(f"[CatalogApi] No se pudieron enriquecer nombres de profesionales: {enh_err}")
+                logger.debug(f"[CatalogApi] No se pudieron enriquecer profesionales: {enh_err}")
 
             return _cache_set(cache_key, profs)
         return None

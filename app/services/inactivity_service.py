@@ -121,9 +121,10 @@ class InactivityService:
         """
         Job periódico del Sweeper: consulta en PostgreSQL todas las sesiones
         cuya inactividad supere ttl_seconds (900s = 15 min), y ejecuta
-        el cierre ordenado (notificación a WhatsApp, registro en auditoría y purga).
-        Garantiza que incluso tras un reinicio del contenedor o fallo de red,
-        no queden sesiones huérfanas en la base de datos.
+        el cierre ordenado.
+        
+        Garantiza que sesiones antiguas (> 20 min) o huérfanas tras reinicios
+        sean purgadas silenciosamente sin enviar mensajes no solicitados al usuario por WhatsApp.
         """
         from app.session.postgres_checkpointer import get_checkpointer_instance
         checkpointer = get_checkpointer_instance()
@@ -138,12 +139,25 @@ class InactivityService:
             logger.info(
                 "[Inactivity Sweeper] Detectadas %d sesiones expiradas en PostgreSQL: %s",
                 len(expiradas),
-                expiradas,
+                [t[0] for t in expiradas],
             )
-            for thread_id in expiradas:
+            # Ventana de notificación: solo notificar si expiró recientemente (entre 15m y 20m).
+            # Si tiene más de 20 min (horas o días), se purga silenciosamente para no molestar ni arriesgar baneos.
+            MAX_NOTIFY_INACTIVITY_SECONDS = ttl_seconds + 300.0  # 15 min + 5 min gracia = 20 min
+
+            for thread_id, elapsed_seconds in expiradas:
                 self._cancel(thread_id)
+                debe_notificar = (elapsed_seconds <= MAX_NOTIFY_INACTIVITY_SECONDS)
+                if not debe_notificar:
+                    logger.info(
+                        "[Inactivity Sweeper] Sesión %s inactiva por %.1f min (> %.1f min). "
+                        "Purgando silenciosamente sin enviar mensaje a WhatsApp.",
+                        thread_id,
+                        elapsed_seconds / 60.0,
+                        MAX_NOTIFY_INACTIVITY_SECONDS / 60.0,
+                    )
                 try:
-                    await self._handle_expiry(thread_id)
+                    await self._handle_expiry(thread_id, send_whatsapp=debe_notificar)
                 except Exception as exc:
                     logger.error(
                         "[Inactivity Sweeper] Error procesando cierre para %s: %s",
@@ -181,7 +195,7 @@ class InactivityService:
         self._tasks.pop(numero_paciente, None)
 
         try:
-            await self._handle_expiry(numero_paciente)
+            await self._handle_expiry(numero_paciente, send_whatsapp=True)
         except Exception as exc:
             logger.error(
                 "[Inactivity] Error manejando expiración de sesión para %s: %s",
@@ -190,7 +204,7 @@ class InactivityService:
                 exc_info=True,
             )
 
-    async def _handle_expiry(self, numero_paciente: str) -> None:
+    async def _handle_expiry(self, numero_paciente: str, send_whatsapp: bool = True) -> None:
         """Cierra la sesión del usuario tras la expiración del temporizador."""
         # Importaciones lazy para evitar ciclos de importación
         from app.clients.evolution_client import evolution_client
@@ -208,8 +222,9 @@ class InactivityService:
         )
 
         logger.info(
-            "[Inactivity] Sesión expirada por inactividad para %s. Evaluando estado...",
+            "[Inactivity] Sesión expirada por inactividad para %s (send_whatsapp=%s). Evaluando estado...",
             numero_paciente,
+            send_whatsapp,
         )
 
         # No interrumpir conversaciones en atención humana
@@ -255,7 +270,7 @@ class InactivityService:
         except Exception:
             aviso_abierto = False
 
-        if not aviso_abierto:
+        if not aviso_abierto and send_whatsapp:
             # 1. Enviar mensaje de cierre por WhatsApp
             try:
                 await evolution_client.enviar_mensaje(numero_paciente, mensaje_cierre)
@@ -281,6 +296,11 @@ class InactivityService:
                     numero_paciente,
                     e,
                 )
+        elif not send_whatsapp:
+            logger.info(
+                "[Inactivity] Sesión %s purgada silenciosamente sin enviar mensaje por WhatsApp.",
+                numero_paciente,
+            )
 
         # 3. Purgar el hilo de LangGraph en PostgreSQL
         canon = obtener_telefono_canonico(numero_paciente)

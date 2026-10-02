@@ -138,22 +138,52 @@ class DotNetHttpTransport:
     async def request(
         self, method: str, path: str, params: Optional[Dict[str, Any]] = None, json: Optional[Any] = None
     ) -> Optional[httpx.Response]:
-        """Ejecuta una petición HTTP con manejo automático de reintentos en 401 (token expirado)."""
+        """Ejecuta una petición HTTP con manejo automático de reintentos con backoff y refresco JWT en 401."""
         url = path if path.startswith("http") else f"{self.base_url}/{path.lstrip('/')}"
-        headers = await self.get_headers()
-        client = await self.get_client()
+        max_attempts = max(1, int(getattr(settings, "dotnet_max_retries", 3)))
+        backoff_sec = float(getattr(settings, "dotnet_retry_backoff_seconds", 0.5))
 
-        try:
-            response = await client.request(method, url, params=params, json=json, headers=headers)
-            if response.status_code == 401:
-                logger.info("[.NET Transport] Token JWT expirado (401). Renovando sesión...")
-                self._jwt_token = None
-                headers = await self.get_headers(force_refresh=True)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                headers = await self.get_headers()
+                client = await self.get_client()
                 response = await client.request(method, url, params=params, json=json, headers=headers)
-            return response
-        except Exception as e:
-            logger.error(f"[.NET Transport] Error en {method} {url}: {e}")
-            return None
+
+                # Si el token expiró (401), renovar inmediatamente y reintentar
+                if response.status_code == 401:
+                    logger.info("[.NET Transport] Token JWT expirado o inválido (401). Renovando sesión...")
+                    self._jwt_token = None
+                    headers = await self.get_headers(force_refresh=True)
+                    response = await client.request(method, url, params=params, json=json, headers=headers)
+
+                # Si el servidor responde con 502, 503, 504 (servidor iniciando o reiniciando), reintentar
+                if response.status_code in (502, 503, 504) and attempt < max_attempts:
+                    logger.warning(
+                        f"[.NET Transport] Servidor devolvió HTTP {response.status_code} en {method} {url}. "
+                        f"Reintentando ({attempt}/{max_attempts}) en {backoff_sec * attempt:.1f}s..."
+                    )
+                    await asyncio.sleep(backoff_sec * attempt)
+                    continue
+
+                return response
+            except (httpx.TransportError, httpx.TimeoutException) as net_err:
+                if attempt < max_attempts:
+                    wait_time = backoff_sec * attempt
+                    logger.warning(
+                        f"[.NET Transport] Fallo de red/timeout en {method} {url} ({net_err}). "
+                        f"Reintentando intento {attempt + 1}/{max_attempts} en {wait_time:.1f}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"[.NET Transport] Error de conexión persistente tras {max_attempts} intentos en {method} {url}: {net_err}"
+                    )
+                    return None
+            except Exception as e:
+                logger.error(f"[.NET Transport] Error inesperado en {method} {url}: {e}", exc_info=True)
+                return None
+
+        return None
 
 
 # Instancia única reutilizable

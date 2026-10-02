@@ -104,8 +104,9 @@ def _portal_eligibility_from_tools(tool_msgs: list) -> tuple[bool, bool]:
 
 def _outage_message() -> str:
     return (
-        "En este momento tenemos un problema técnico y no podemos atenderte por este medio. "
-        f"Por favor intenta más tarde o comunícate al {settings.clinic_phone}."
+        "En este momento nuestro sistema de agenda está tardando en sincronizar. "
+        "Por favor escríbenos nuevamente en un momentico o, si lo prefieres, comunícate directamente con recepción al "
+        f"*{settings.clinic_phone}* y con mucho gusto te ayudamos de inmediato. 😊"
     )
 
 
@@ -714,14 +715,31 @@ async def process_whatsapp_message(
             except Exception:
                 pass
 
-        # Booking continuity: reuse cédula+nombre from recent history so Gemini never re-asks them.
+        # Booking continuity: reuse cédula+nombre from recent history or associated WhatsApp account
+        from app.infra.external.dotnet.patients_api import patients_api
         from app.services.booking_flow import (
             describe_session_for_llm,
             extract_identity_from_history_newest_first,
             get_session,
             parse_identity_from_text,
             prev_asked_for_booking_identity,
+            es_cita_para_si_mismo,
+            es_cita_para_tercero,
+            es_menor_o_ti,
+            parse_tutor_from_text,
         )
+
+        cuenta_paciente = None
+        try:
+            cuenta_paciente = await patients_api.resolver_paciente_por_telefono(numero_paciente)
+        except Exception as tel_err:
+            logger.debug(f"[Processor] No se pudo resolver paciente por teléfono {numero_paciente}: {tel_err}")
+
+        titular_nombre = (cuenta_paciente.get("fullName") or "") if cuenta_paciente else ""
+        titular_primer_nombre = (cuenta_paciente.get("firstName") or "") if cuenta_paciente else ""
+        titular_cedula = (cuenta_paciente.get("documentNumber") or "") if cuenta_paciente else ""
+        titular_tipo_doc = (cuenta_paciente.get("documentTypeCode") or "CC") if cuenta_paciente else "CC"
+        titular_patient_id = (cuenta_paciente.get("patientId") or "") if cuenta_paciente else ""
 
         history_msgs: list = []
         prev_ai_text = ""
@@ -739,27 +757,76 @@ async def process_whatsapp_message(
         booking_session = get_session(numero_paciente)
         hist_identity = extract_identity_from_history_newest_first(history_msgs)
         msg_identity = parse_identity_from_text(mensaje_texto, allow_name_only=awaiting_id)
+
+        explicit_tercero = es_cita_para_tercero(mensaje_texto)
+        explicit_si_mismo = es_cita_para_si_mismo(mensaje_texto)
+
         known_cedula = (
             msg_identity.cedula
             or (booking_session.cedula if booking_session else None)
             or hist_identity.cedula
         )
-        # A name only comes from this message in the identity step; otherwise keep the one we have.
         known_nombre = (
             (msg_identity.nombre if (awaiting_id or msg_identity.cedula) else None)
             or (booking_session.nombre if booking_session else None)
             or hist_identity.nombre
         )
+        known_tipo_doc = getattr(msg_identity, "tipo_documento", "CC") or (booking_session.tipo_documento if booking_session else None) or hist_identity.tipo_documento or "CC"
 
-        # Contexto del paciente: only from what the user already wrote (Habeas Data)
+        # Datos del tutor / acudiente responsable (para menores con TI o RC)
+        known_tutor_nombre = (
+            msg_identity.tutor_nombre
+            or (booking_session.tutor_nombre if booking_session else None)
+            or hist_identity.tutor_nombre
+        )
+        known_tutor_vinculo = (
+            msg_identity.tutor_vinculo
+            or (booking_session.tutor_vinculo if booking_session else None)
+            or hist_identity.tutor_vinculo
+        )
+        known_tutor_telefono = (
+            msg_identity.tutor_telefono
+            or (booking_session.tutor_telefono if booking_session else None)
+            or hist_identity.tutor_telefono
+        )
+        known_tutor_documento = (
+            msg_identity.tutor_documento
+            or (booking_session.tutor_documento if booking_session else None)
+            or hist_identity.tutor_documento
+        )
+
+        es_menor = es_menor_o_ti(mensaje_texto, known_tipo_doc)
+        if es_menor and known_tipo_doc == "CC":
+            known_tipo_doc = "TI"
+
+        # Si no hay cédula de un tercero y el paciente tiene cuenta asociada y es para sí mismo (o consulta propia)
+        if not known_cedula and cuenta_paciente and not explicit_tercero and not es_menor:
+            known_cedula = titular_cedula
+            known_nombre = titular_nombre
+            known_tipo_doc = titular_tipo_doc
+
         user_context = {
-            "nombre": known_nombre or "",
-            "primer_nombre": (known_nombre or "").split()[0] if known_nombre else "",
+            "nombre": known_nombre or titular_nombre or "",
+            "primer_nombre": (known_nombre or titular_primer_nombre or "").split()[0] if (known_nombre or titular_primer_nombre) else "",
             "cedula": known_cedula,
-            "is_registered": bool(known_cedula),
+            "tipo_documento": known_tipo_doc,
+            "is_registered": bool(known_cedula or cuenta_paciente),
             "phone": numero_paciente,
             "push_name": push_name.strip() if push_name else "",
             "booking_flow": describe_session_for_llm(numero_paciente),
+            "cuenta_asociada": bool(cuenta_paciente),
+            "titular_nombre": titular_nombre,
+            "titular_primer_nombre": titular_primer_nombre,
+            "titular_cedula": titular_cedula,
+            "titular_tipo_doc": titular_tipo_doc,
+            "titular_patient_id": titular_patient_id,
+            "es_para_tercero": explicit_tercero,
+            "es_para_si_mismo": explicit_si_mismo,
+            "es_menor_ti": es_menor,
+            "tutor_nombre": known_tutor_nombre,
+            "tutor_vinculo": known_tutor_vinculo,
+            "tutor_telefono": known_tutor_telefono,
+            "tutor_documento": known_tutor_documento,
         }
         try:
             from app.services.schedule_change import avisos_pendientes_para, bloque_cita_afectada
@@ -782,14 +849,27 @@ async def process_whatsapp_message(
         budget_token = start_turn_budget()
         try:
             timeout_s = float(settings.graph_timeout_seconds or 0)
-            if timeout_s > 0:
-                # High silent safety net; queue wait excluded from budget.
-                result = await run_with_graph_deadline(
-                    get_graph().ainvoke(invoke_input, config),
-                    timeout_seconds=timeout_s,
-                )
-            else:
-                result = await get_graph().ainvoke(invoke_input, config)
+            max_graph_attempts = 2
+            for g_attempt in range(1, max_graph_attempts + 1):
+                try:
+                    if timeout_s > 0:
+                        # High silent safety net; queue wait excluded from budget.
+                        result = await run_with_graph_deadline(
+                            get_graph().ainvoke(invoke_input, config),
+                            timeout_seconds=timeout_s,
+                        )
+                    else:
+                        result = await get_graph().ainvoke(invoke_input, config)
+                    break
+                except (GraphDeadlineExceeded, LLMCallTimeoutError, asyncio.TimeoutError, httpx.TransportError) as g_err:
+                    if g_attempt < max_graph_attempts:
+                        logger.warning(
+                            f"[Processor] Fallo transitorio procesando mensaje para {numero_paciente} ({g_err}). "
+                            f"Reintentando turno (intento {g_attempt + 1}/{max_graph_attempts})..."
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
+                    raise
         finally:
             end_turn_budget(budget_token)
         spans["graph_total"] = time.perf_counter() - t_graph

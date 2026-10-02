@@ -10,7 +10,12 @@ from collections import OrderedDict
 from typing import Any
 from fastapi import APIRouter, Request
 
-from app.schemas.chat import EvolutionWebhookPayload, unwrap_message_dict, extract_interactive_selection
+from app.schemas.chat import (
+    EvolutionWebhookPayload,
+    unwrap_message_dict,
+    extract_interactive_selection,
+    extract_message_timestamp,
+)
 from app.clients.evolution_client import (
     evolution_client,
     is_bot_message_id,
@@ -132,6 +137,19 @@ async def receive_whatsapp_message(request: Request):
         chat_jid = str((data.key.remoteJid if data.key else "") or "").strip().lower()
         if chat_jid.endswith(("@g.us", "@broadcast", "@newsletter")):
             return {"status": "ignored", "reason": "group_status_or_broadcast"}
+
+        # Filtrar mensajes históricos / diferidos (History Sync de WhatsApp o reconexión de Evolution API)
+        msg_ts = extract_message_timestamp(payload, raw_json)
+        if msg_ts is not None:
+            edad_segundos = time.time() - msg_ts
+            if edad_segundos > 120.0:
+                logger.info(
+                    "[Webhook] Mensaje histórico/desfasado ignorado (edad=%.1fs > 120s, ts=%.0f) para %s",
+                    edad_segundos,
+                    msg_ts,
+                    str((data.key.remoteJid if data.key else "") or ""),
+                )
+                return {"status": "ignored", "reason": "stale_message_history_sync"}
 
         # 1. Mensajes enviados desde el propio dispositivo vinculado (fromMe)
         if data.key and data.key.fromMe:

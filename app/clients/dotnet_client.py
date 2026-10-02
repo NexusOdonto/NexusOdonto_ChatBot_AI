@@ -139,15 +139,32 @@ class DotNetClient:
         self,
         cedula: str,
         nombre: str,
-        telefono_whatsapp: Optional[str] = None
+        telefono_whatsapp: Optional[str] = None,
+        tipo_documento: Optional[str] = "CC",
+        tutor_nombre: Optional[str] = None,
+        tutor_telefono: Optional[str] = None,
+        tutor_vinculo: Optional[str] = None,
+        tutor_documento: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        return await self.patients.crear_paciente_basico(cedula, nombre, telefono_whatsapp)
+        return await self.patients.crear_paciente_basico(
+            cedula=cedula,
+            nombre=nombre,
+            telefono_whatsapp=telefono_whatsapp,
+            tipo_documento=tipo_documento,
+            tutor_nombre=tutor_nombre,
+            tutor_telefono=tutor_telefono,
+            tutor_vinculo=tutor_vinculo,
+            tutor_documento=tutor_documento,
+        )
 
     async def login_paciente(self, document_number: str, password: str) -> Optional[Dict[str, Any]]:
         return await self.patients.login_paciente(document_number, password)
 
     async def buscar_persona_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
         return await self.patients.buscar_persona_por_telefono(telefono)
+
+    async def resolver_paciente_por_telefono(self, telefono: str) -> Optional[Dict[str, Any]]:
+        return await self.patients.resolver_paciente_por_telefono(telefono)
 
     async def buscar_persona_por_documento(self, document_number: str) -> Optional[Dict[str, Any]]:
         return await self.patients.buscar_persona_por_documento(document_number)

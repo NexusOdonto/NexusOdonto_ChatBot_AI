@@ -87,20 +87,20 @@ class PostgresCheckpointer:
 			logger.debug(f"[PostgresCheckpointer] Error consultando inactividad para {thread_id}: {e}")
 		return None
 
-	async def obtener_sesiones_expiradas(self, ttl_seconds: int) -> list[str]:
-		"""Retorna la lista de thread_id cuya inactividad supere ttl_seconds."""
+	async def obtener_sesiones_expiradas(self, ttl_seconds: int) -> list[tuple[str, float]]:
+		"""Retorna la lista de (thread_id, elapsed_seconds) cuya inactividad supere ttl_seconds."""
 		if not self.pool:
 			return []
 		try:
 			async with self.pool.connection() as conn:
 				async with conn.cursor() as cur:
 					await cur.execute("""
-						SELECT thread_id
+						SELECT thread_id, EXTRACT(EPOCH FROM (NOW() - last_activity_at))
 						FROM conversation_sessions
 						WHERE EXTRACT(EPOCH FROM (NOW() - last_activity_at)) > %s;
 					""", (ttl_seconds,))
 					rows = await cur.fetchall()
-					return [str(row[0]) for row in rows if row and row[0]]
+					return [(str(row[0]), float(row[1])) for row in rows if row and row[0] and row[1] is not None]
 		except Exception as e:
 			logger.error(f"[PostgresCheckpointer] Error consultando sesiones expiradas: {e}", exc_info=True)
 			return []

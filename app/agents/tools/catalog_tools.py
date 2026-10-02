@@ -609,9 +609,17 @@ async def _consultar_disponibilidad_impl(
 
 
 async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
-    """Consulta odontólogos y especialistas en Nexus Odonto."""
+    """Consulta odontólogos y especialistas en Nexus Odonto directamente de la base de datos."""
     try:
         especialidades = await dotnet_client.obtener_especialidades() or []
+        esp_map = {
+            str(_obtener_valor(e, "id", "especialidadId", "specialtyId")).lower(): (
+                _obtener_valor(e, "name", "nombre") or "Odontología"
+            )
+            for e in especialidades
+            if isinstance(e, dict)
+        }
+
         esp_id = None
         esp_nombre = None
 
@@ -632,14 +640,42 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
                 nombre = _obtener_valor(p, "name", "nombre", "nombreCompleto") or "Especialista Odontológico"
                 nombre_clean = str(nombre).strip()
                 if not nombre_clean.lower().startswith(("dr", "dra")):
-                    nombre_clean = f"Dr(a). {nombre_clean}"
-                tarjetas_prof.append(f"• *{nombre_clean}* — Odontología Integral y Especializada")
+                    prefijo = (
+                        "Dra."
+                        if any(n in nombre_clean.lower() for n in ["laura", "maria", "ana", "camila", "valentina", "sofia", "andrea"])
+                        else "Dr."
+                    )
+                    nombre_clean = f"{prefijo} {nombre_clean}"
 
-            titulo = f"En *Nexus Odonto* contamos con especialistas en {esp_nombre}:" if esp_nombre else "En *Nexus Odonto* contamos con odontólogos especialistas:"
+                # Especialidad real del profesional
+                esp_prof = _obtener_valor(p, "specialtyName", "especialidadNombre", "especialidad", "specialty")
+                if not esp_prof:
+                    p_esp_id = str(_obtener_valor(p, "specialtyId", "especialidadId") or "").lower()
+                    esp_prof = esp_map.get(p_esp_id, "Odontología General")
+
+                # Consultorio / Ubicación
+                consultorio = _obtener_valor(p, "consultorio", "office", "cubicle", "location", "room")
+                consultorio_txt = f" — {consultorio}" if consultorio else ""
+
+                # Registro profesional
+                reg = _obtener_valor(p, "medicalLicenseNumber", "licenseNumber", "registrationNumber", "reg")
+                reg_txt = f" (Reg: {reg})" if reg else ""
+
+                tarjetas_prof.append(f"• *{nombre_clean}*{reg_txt} — *{esp_prof}*{consultorio_txt}")
+
+            titulo = (
+                f"En *Nexus Odonto* contamos con especialistas en *{esp_nombre}*:"
+                if esp_nombre
+                else f"En *Nexus Odonto* contamos con {len(tarjetas_prof)} doctores y especialistas registrados en la clínica:"
+            )
             return (
                 f"{titulo}\n\n"
                 + "\n".join(tarjetas_prof)
-                + "\n\n¿Te gustaría consultar los horarios de alguno de ellos para agendar tu cita? 😊"
+                + "\n\n[INSTRUCCIÓN CRÍTICA PARA EL ASISTENTE: "
+                "Esta es la lista oficial COMPLETA de doctores y especialistas registrados en la base de datos de la clínica. "
+                "Preséntalos a TODOS tal como aparecen en esta lista, con su nombre y especialidad correspondiente. "
+                "NUNCA limites la respuesta a solo 3 o 4 doctores; debes listar a todos los doctores. "
+                "Pregúntale amablemente al paciente con cuál de ellos le gustaría agendar su cita o para qué tratamiento necesita atención.]"
             )
         else:
             servicios = await dotnet_client.obtener_servicios() or []
@@ -672,17 +708,29 @@ async def _consultar_doctores_impl(especialidad: Optional[str] = None) -> str:
 
 
 async def _consultar_servicios_impl() -> str:
-    """Consulta la lista oficial de servicios activos de Nexus Odonto."""
+    """Consulta la lista oficial de servicios activos de Nexus Odonto en la base de datos del servidor."""
     try:
         servicios = await dotnet_client.obtener_servicios() or []
+        especialidades = await dotnet_client.obtener_especialidades() or []
         activos = _servicios_activos(servicios)
         if not activos:
             return (
-                "En este momento no hay servicios activos en el catálogo, "
+                "En este momento no hay servicios activos en el catálogo de la clínica, "
                 "o no podemos acceder a la lista. Por favor intenta de nuevo más tarde."
             )
 
-        items_servicios = []
+        esp_map = {
+            str(_obtener_valor(e, "id", "especialidadId", "specialtyId")).lower(): (
+                _obtener_valor(e, "name", "nombre") or "Odontología General"
+            )
+            for e in especialidades
+            if isinstance(e, dict)
+        }
+
+        # Agrupar servicios por especialidad para presentación organizada
+        por_especialidad: Dict[str, List[str]] = {}
+        todos_los_items: List[str] = []
+
         for s in activos:
             nombre = _etiqueta_servicio(s)
             desc = _obtener_valor(s, "description", "descripcion")
@@ -690,6 +738,8 @@ async def _consultar_servicios_impl() -> str:
             desc_es = DESCRIPCIONES_SERVICIO_ES.get(desc_str.lower(), desc_str)
             precio = _obtener_valor(s, "price", "precio")
             duracion = _obtener_valor(s, "durationMinutes", "duracionMinutos")
+            esp_id = str(_obtener_valor(s, "specialtyId", "especialidadId") or "").lower()
+            esp_nombre = esp_map.get(esp_id, "Odontología General")
 
             partes = []
             if precio is not None and str(precio).strip() != "":
@@ -698,19 +748,32 @@ async def _consultar_servicios_impl() -> str:
                 partes.append(f"{duracion} min")
 
             detalles = f" ({', '.join(partes)})" if partes else ""
-            items_servicios.append(f"• *{nombre}*{detalles}")
+            item_str = f"• *{nombre}*{detalles}"
+            if desc_es and len(desc_es) > 10:
+                item_str += f": {desc_es}"
+
+            por_especialidad.setdefault(esp_nombre, []).append(item_str)
+            todos_los_items.append(f"• *{nombre}*{detalles}")
+
+        # Si hay más de una especialidad, presentar organizado por categorías
+        if len(por_especialidad) > 1:
+            bloques = []
+            for esp_nom, items in por_especialidad.items():
+                bloques.append(f"*{esp_nom}*:\n" + "\n".join(items))
+            cuerpo = "\n\n".join(bloques)
+        else:
+            cuerpo = "\n".join(todos_los_items)
 
         return (
-            "Catálogo de Servicios y Tratamientos Activos en Nexus Odonto:\n"
-            + "\n".join(items_servicios)
-            + "\n\n[INSTRUCCIÓN CRÍTICA DE COMUNICACIÓN HUMANA: "
-            "Responde al paciente como una asesora empática y conversacional por WhatsApp. "
-            "NUNCA hagas un volcado copiado de toda la lista de servicios con todas las duraciones y precios a la vez. "
-            "Si preguntó de forma general qué servicios tienen, salúdalo con calidez por su nombre, resume en 3 o 4 viñetas limpias las categorías principales (limpieza/profilaxis, resinas/calzas estéticas, blanqueamiento, valoración general) "
-            "y pregúntale amablemente si presenta alguna molestia o qué procedimiento en particular le interesa. "
-            "Si el paciente preguntó por un servicio puntual, dale directamente su valor y detalles amables. "
-            "Escribe los precios tal cual aparecen aquí (ej. $960.000, sin 'COP'). "
-            "Al dar precios NO pidas cédula ni nombre: pregunta si quiere agendar o qué día le sirve.]"
+            f"Catálogo Oficial de Servicios y Tratamientos Activos en Nexus Odonto ({len(activos)} disponibles en base de datos):\n\n"
+            + cuerpo
+            + "\n\n[INSTRUCCIÓN CRÍTICA PARA EL ASISTENTE: "
+            "Esta lista contiene TODOS los servicios activos reales registrados en la clínica traídos directamente de la base de datos del servidor. "
+            "Preséntalos al paciente de forma clara, completa y organizada con viñetas limpias y sus precios correspondientes. "
+            "NUNCA omitas servicios activos ni los limites a 3 o 4. "
+            "NUNCA inventes servicios ni menciones tratamientos que no estén en esta lista (como servicios eliminados o de otras clínicas). "
+            "Al informar precios, usa el formato $ colombiano (ej. $120.000). "
+            "Pregunta amablemente al paciente en cuál de estos procedimientos le gustaría agendar o si tiene alguna molestia para orientarlo.]"
         )
     except Exception as exc:
         logger.error(f"Error al consultar servicios: {exc}", exc_info=True)

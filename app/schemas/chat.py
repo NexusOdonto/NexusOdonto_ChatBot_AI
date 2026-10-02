@@ -26,11 +26,72 @@ class MessageData(BaseChatModel):
     messageType: Optional[str] = None
     message: Optional[Dict[str, Any]] = None
     base64: Optional[str] = None
+    messageTimestamp: Optional[Any] = None
+    date_time: Optional[Any] = None
 
 class EvolutionWebhookPayload(BaseChatModel):
     event: Optional[str] = None
     instance: Optional[str] = None
     data: Optional[MessageData] = None
+    date_time: Optional[Any] = None
+
+
+def extract_message_timestamp(payload: Optional[EvolutionWebhookPayload] = None, raw_json: Optional[Dict[str, Any]] = None) -> Optional[float]:
+    """Extrae el timestamp en segundos (UNIX epoch) de un mensaje entrante de Evolution API.
+    
+    Soporta enteros/flotantes en segundos o milisegundos, objetos Baileys Long ({"low": ...}),
+    y cadenas ISO (date_time / dateTime). Retorna None si no se puede determinar.
+    """
+    raw_data = (raw_json or {}).get("data") if isinstance(raw_json, dict) else {}
+    if not isinstance(raw_data, dict):
+        raw_data = {}
+
+    data_obj = getattr(payload, "data", None) if payload else None
+
+    # 1. Candidatos directos de messageTimestamp
+    ts_val = None
+    if data_obj is not None:
+        ts_val = getattr(data_obj, "messageTimestamp", None)
+    if ts_val is None:
+        ts_val = raw_data.get("messageTimestamp")
+    if ts_val is None and isinstance(raw_json, dict):
+        ts_val = raw_json.get("messageTimestamp")
+
+    # Si es dict tipo Long de Baileys / protobuf: {"low": 1711929600, ...}
+    if isinstance(ts_val, dict):
+        ts_val = ts_val.get("low")
+
+    if ts_val is not None:
+        try:
+            val_f = float(ts_val)
+            # En milisegundos (>1e11)
+            if val_f > 1e11:
+                return val_f / 1000.0
+            # En segundos (>1e8)
+            if val_f > 1e8:
+                return val_f
+        except (ValueError, TypeError):
+            pass
+
+    # 2. Candidatos de fecha en string ISO (date_time / dateTime)
+    dt_str = None
+    if data_obj is not None:
+        dt_str = getattr(data_obj, "date_time", None)
+    if not dt_str:
+        dt_str = raw_data.get("date_time") or raw_data.get("dateTime")
+    if not dt_str and isinstance(raw_json, dict):
+        dt_str = raw_json.get("date_time") or raw_json.get("dateTime")
+
+    if dt_str and isinstance(dt_str, str):
+        try:
+            from datetime import datetime
+            clean_dt = dt_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean_dt)
+            return dt.timestamp()
+        except Exception:
+            pass
+
+    return None
 
 
 def unwrap_message_dict(raw_message: Dict[str, Any]) -> Dict[str, Any]:

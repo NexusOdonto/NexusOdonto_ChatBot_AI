@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Parámetros de Anti-Spam y Debounce
 SPAM_WINDOW_SECONDS = 5.0
-SPAM_MAX_BURST = 3
+SPAM_MAX_BURST = 6
 SPAM_PENALTY_SECONDS = 15.0
 SPAM_WARN_COOLDOWN = 30.0
 DEBOUNCE_WAIT_SECONDS = 0.5
@@ -39,7 +39,10 @@ class ChatOrchestrator:
 
     @classmethod
     def check_and_trigger_spam(cls, phone: str) -> bool:
-        """Verifica si los mensajes recientes del usuario constituyen spam en tiempo real."""
+        """Verifica si los mensajes recientes del usuario constituyen spam en tiempo real.
+        Si se detecta flood, se penaliza silenciosamente sin enviar mensajes salientes
+        para proteger la línea de WhatsApp contra baneos automáticos de Meta.
+        """
         now = time.monotonic()
         timestamps = _SPAM_TIMESTAMPS.get(phone, [])
         timestamps = [t for t in timestamps if now - t < SPAM_WINDOW_SECONDS]
@@ -53,14 +56,10 @@ class ChatOrchestrator:
             if existing and not existing.done():
                 existing.cancel()
 
-            last_warn = _SPAM_WARNED_AT.get(phone, 0.0)
-            if now - last_warn > SPAM_WARN_COOLDOWN:
-                _SPAM_WARNED_AT[phone] = now
-                logger.warning(f"[Anti-Spam] Ráfaga detectada para {phone}. Enviando advertencia.")
-                from app.services import reply_variants
-
-                spam_msg = reply_variants.pick("spam", reply_variants.SPAM, phone=phone)
-                asyncio.create_task(evolution_client.enviar_mensaje(phone, spam_msg))
+            logger.warning(
+                f"[Anti-Spam] Ráfaga excesiva detectada para {phone} ({len(timestamps)} msgs en {SPAM_WINDOW_SECONDS}s). "
+                f"Mensajes descartados silenciosamente sin emisión saliente (prevención de baneos Meta/Evolution)."
+            )
             return True
         return False
 

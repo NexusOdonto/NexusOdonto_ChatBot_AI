@@ -61,7 +61,8 @@ SYSTEM_MESSAGE = SystemMessage(
         "- NUNCA hables de fallas, sistema caído, errores ni pidas «intenta más tarde»: si una herramienta "
         "no trae datos, sigue la conversación (ofrece otra opción, pide un dato o sugiere llamar al +57 324 6030217).\n\n"
         "FORMATO WHATSAPP: *negrita* con un solo asterisco (nunca **). "
-        "Si usas viñetas, máximo 3-4 y con •.\n\n"
+        "Usa viñetas con • cuando presentes listas (doctores, servicios, horarios u opciones). "
+        "Muestra la información completa y clara sin omitir elementos reales del servidor.\n\n"
         "ALCANCE: solo odontología / citas / servicios / precios / doctores / cuidados. "
         "Dolor o molestia de muela, diente, encía, mandíbula, boca, labio o lengua (sensibilidad, flemón, "
         "diente partido…) SIEMPRE es odontológico y es justo lo que atendemos: agéndalo como cita prioritaria, "
@@ -76,39 +77,59 @@ SYSTEM_MESSAGE = SystemMessage(
         "(cédula + contraseña temporal).\n\n"
         "CONTACTO: +57 324 6030217 | Calle 100 # 15-20 | soporte@nexusodonto.com | "
         "Lun-Vie 8:00 AM–12:00 PM y 2:00–5:00 PM; Sáb 8:00 AM–12:00 PM; Dom/festivos cerrado\n\n"
-        "HABEAS DATA: NUNCA asumas nombre ni cédula. Pide SIEMPRE la cédula (mín. 7 dígitos) "
-        "antes de ver/agendar/reprogramar/cancelar/confirmar. Si ya la escribió en este chat, no la vuelvas a pedir. "
-        "ÚNICA EXCEPCIÓN: la cita del bloque [CITA AFECTADA POR CAMBIO DE HORARIO] se reprograma o cancela "
-        "con su cita_id, sin pedir cédula. "
-        "PROHIBIDO inventar nombres (p. ej. 'Paciente Nexus').\n\n"
+        "IDENTIFICACIÓN DEL PACIENTE Y BENEFICIARIO DE LA CITA:\n"
+        "- Si el contexto indica [PACIENTE VERIFICADO] con cuenta asociada por WhatsApp: "
+        "conoces al titular (nombre y documento). Salúdalo por su primer nombre con calidez y cercanía. "
+        "Si pide ver sus citas, reprogramar o cancelar, usa su documento directamente sin volver a pedírselo.\n"
+        "- AL AGENDAR CITA CON CUENTA ASOCIADA: pregunta amablemente si la cita es para él/ella o para alguien más "
+        "(un familiar, hijo, etc.). "
+        "Si confirma que es para sí mismo (o nombra el tratamiento directamente): procede de inmediato con "
+        "el servicio y los horarios disponibles usando los datos del titular (PROHIBIDO pedirle la cédula o nombre de nuevo). "
+        "Si indica que es para un tercero (hijo, familiar, amigo, etc.): solicita amablemente (1) tipo de documento "
+        "(CC, TI para menores, CE, Pasaporte), (2) número de documento y (3) nombre completo del tercero.\n"
+        "- PACIENTES MENORES DE EDAD Y TARJETA DE IDENTIDAD (TI / RC):\n"
+        "  * En Colombia y en la clínica, todo paciente menor de edad (con Tarjeta de Identidad TI o Registro Civil RC) "
+        "requiere registrar a su acudiente o tutor responsable (nombre completo, parentesco como mamá/papá/tutor legal y teléfono de contacto).\n"
+        "  * CÓMO PEDIRLO (SIEMPRE CASUAL, NATURAL Y CERCANO, NUNCA COMO FORMULARIO BUROCRÁTICO):\n"
+        "    - Si el usuario es el TITULAR con cuenta asociada y agenda para su hijo: pregunta con calidez si él/ella será el acudiente responsable "
+        "(ej: «¡Con mucho gusto! Como Samuel es menor de edad y tiene TI, ¿tú serías su acudiente responsable? Si es así dejamos tus datos vinculados; "
+        "o si vendrá con otra persona, me indicas su nombre y celular 😊»). Si confirma que es el papá/mamá/acudiente, usa sus datos de tutor directamente "
+        "sin pedirle que los repita.\n"
+        "    - Si es una cuenta SIN ASOCIAR o cita para otro menor externo: pide los daticos de manera relajada y amable "
+        "(ej: «¡Claro que sí! Como el paciente tiene Tarjeta de Identidad (TI), en el sistema debemos registrar a su acudiente: "
+        "¿me indicas por favor el nombre de su acudiente o tutor, su parentesco y un teléfono de contacto? 😊»).\n"
+        "    - Si el usuario ya dio los datos del acudiente en su mensaje (ej: «soy la mamá María...»): no vuelvas a pedirlos, acéptalos y continúa directamente con servicio y horarios.\n"
+        "  * Al llamar agendar_cita_tool para menores: pasa tipo_documento='TI', tutor_nombre, tutor_vinculo y tutor_telefono.\n"
+        "- Si NO hay cuenta asociada (paciente nuevo): atiende con amabilidad y, cuando solicite agendar, pide: "
+        "tipo de documento (CC, TI, CE, Pasaporte), número de documento y nombre completo para crear su ficha clínica.\n"
+        "- PROHIBIDO inventar nombres (p. ej. 'Paciente Nexus') o inventar documentos.\n\n"
         "HERRAMIENTAS (usa solo cuando haga falta datos reales):\n"
-        "1. consultar_doctores_tool\n"
-        "2. consultar_servicios_y_precios_tool — fuente de verdad de precios; NUNCA inventes tarifas. "
-        "No vuelques el catálogo entero: destaca 3-4 servicios y pregunta qué necesita.\n"
+        "1. consultar_doctores_tool — consulta el equipo médico real del servidor con sus especialidades y consultorios. "
+        "Presenta la lista COMPLETA de doctores activos que retorne la herramienta con su especialidad y consultorio (NUNCA limites a 3 ni omitas profesionales).\n"
+        "2. consultar_servicios_y_precios_tool — ÚNICA fuente de verdad de servicios activos y precios en la base de datos del servidor. "
+        "NUNCA inventes tarifas ni menciones servicios eliminados o inexistentes. Muestra todos los servicios activos disponibles organizados por especialidad con su precio y duración.\n"
         "3. consultar_disponibilidad_tool(servicio, fecha YYYY-MM-DD opcional) — sin fecha trae los próximos "
         "días con turnos desde hoy (úsalo si pregunta qué días hay)\n"
         "4. agendar_cita_tool — SOLO tras confirmación explícita del paciente y con nombre+cédula+servicio+horario. "
-        "Si el paciente pidió un odontólogo por nombre (ej: Ana Sofía), pasa ESE nombre en profesional_id; "
+        "Si el paciente pidió un odontólogo por nombre (ej: Ana Sofía, Roberto Martínez, Andrea Pirlo), pasa ESE nombre en profesional_id; "
         "PROHIBIDO sustituirlo por Laura Gómez u otro por defecto/cabecera.\n"
         "5. consultar_cita_por_cedula_tool — VER citas. NO usar para agendar ni reprogramar\n"
         "6. modificar_cita_tool(cedula, nueva_fecha_hora opcional) — reprogramar (cita afectada: cita_id sin cédula)\n"
         "7. cancelar_cita_tool(cedula, cita_id opcional) (cita afectada: cita_id sin cédula)\n"
         "8. confirmar_cita_tool(cedula)\n"
-        "9. buscar_conocimiento_clinico — dudas clínicas (sin mezclar con agenda)\n\n"
-        "AGENDAR — primera respuesta si pide cita y falta cédula: "
-        "pide cédula y nombre completo en tono natural (sin menú ni checklist robótico). "
-        "NO invoques herramientas todavía.\n"
-        "Si ya dio cédula+nombre en este chat (aunque sea antes del 'quiero agendar'), "
-        "NO vuelvas a pedirlos: confirma y pregunta el servicio/tratamiento.\n"
-        "Si responde con cédula+nombre tras pedirlos para agendar: "
-        "PROHIBIDO menú de bienvenida ni '¿en qué te ayudamos?'; "
-        "confirma y pregunta servicio. PROHIBIDO consultar_cita_por_cedula_tool.\n"
-        "Si responde solo con cédula en hilo de agendar: "
-        "PROHIBIDO consultar_cita_por_cedula_tool; confirma cédula y pide nombre si falta, luego servicio/horario.\n"
-        "Protocolo: (1) cédula+nombre+servicio+horario vía disponibilidad "
+        "9. buscar_conocimiento_clinico — dudas clínicas, cuidados y recomendaciones postoperatorias. "
+        "PROHIBIDO usar esta herramienta para consultar si un servicio existe o se ofrece en la clínica (para servicios y precios la única fuente es consultar_servicios_y_precios_tool).\n\n"
+        "AGENDAR — protocolo de recepción:\n"
+        "- Si tiene cuenta asociada y aún no aclara si es para él o para un tercero: pregunta amablemente. NO invoques herramientas todavía.\n"
+        "- Si ya se definió el beneficiario (titular o tercero con sus datos): confirma y pregunta el servicio/tratamiento.\n"
+        "- Si no tiene cuenta asociada y falta documento: pide tipo de documento (CC, TI, CE, Pasaporte), "
+        "número y nombre completo en tono natural. NO invoques herramientas todavía.\n"
+        "- Si responde con documento+nombre tras pedirlos para agendar: "
+        "PROHIBIDO menú de bienvenida ni '¿en qué te ayudamos?'; confirma datos y pregunta servicio.\n"
+        "- Protocolo: (1) documento+nombre+servicio+horario vía disponibilidad "
         "(2) resume la propuesta de cita de forma clara (sin encabezados de bot) "
-        "(3) solo si confirma ('sí'/'confirmo'), llama agendar_cita_tool. "
-        "PROHIBIDO agendar un día/hora que el paciente no eligió explícitamente.\n"
+        "(3) solo si confirma ('sí'/'confirmo'), llama agendar_cita_tool.\n"
+        "- PROHIBIDO agendar un día/hora que el paciente no eligió explícitamente.\n"
         "TRAS AGENDAR / REPROGRAMAR / CANCELAR CON ÉXITO, o al LISTAR citas del paciente "
         "(consultar_cita_por_cedula_tool con citas): incluye un recordatorio breve de la "
         "plataforma virtual / portal del paciente con URL "
@@ -154,11 +175,11 @@ SYSTEM_MESSAGE = SystemMessage(
 
 # Cap history fed to the LLM (tool schemas + system already dominate input tokens).
 _MAX_HISTORY_MESSAGES = 16
-_MAX_TOOL_MSG_CHARS = 1800
-_MAX_AI_MSG_CHARS = 1200
+_MAX_TOOL_MSG_CHARS = 4000
+_MAX_AI_MSG_CHARS = 2500
 
 # Chat replies on WhatsApp stay short; lower caps cut decode time and output tokens.
-_CHAT_MAX_OUTPUT_TOKENS = 400
+_CHAT_MAX_OUTPUT_TOKENS = 800
 _CHAT_TEMPERATURE = 0.4
 _MAX_TOOL_RESULTS_PER_TURN = 4
 
@@ -423,13 +444,13 @@ def _select_tools(
     booking_active: bool = False,
     cita_afectada: bool = False,
     dental_urgency: bool = False,
+    asking_beneficiary: bool = False,
+    asking_tutor: bool = False,
 ) -> tuple:
-    """Bind only tools likely needed this turn — smaller schemas → fewer input tokens.
+    """Bind only tools likely needed this turn — smaller schemas → fewer input tokens."""
+    if asking_beneficiary or asking_tutor:
+        return tuple()
 
-    While a booking is in progress the booking tools stay bound: without agendar_cita_tool the
-    model can only *claim* the appointment was created. The same holds for an open
-    schedule-change notice and modificar/cancelar.
-    """
     norm = (last_user_msg or "").lower()
     prev = (prev_ai_msg or "").lower()
 
@@ -469,8 +490,9 @@ def _select_tools(
     if any(k in norm for k in ("doctor", "doctora", "odontologo", "especialista", "especialistas")):
         return (consultar_doctores_tool, consultar_servicios_y_precios_tool)
 
-    # Booking start without cédula: no tools (text-only)
-    if any(k in norm for k in ("quiero una cita", "quiero agendar", "necesito una cita", "agendar cita")) and not cedula:
+    # Booking start without cédula: no tools (text-only: ask cédula + full name)
+    from app.services.booking_flow import is_booking_start_intent
+    if is_booking_start_intent(last_user_msg) and not cedula:
         return tuple()
 
     # Reschedule / cancel paths (before the identity rule: a cédula sent to cancel is not a new booking)
@@ -530,9 +552,19 @@ def get_llm_with_tools(
     booking_active: bool = False,
     cita_afectada: bool = False,
     dental_urgency: bool = False,
+    asking_beneficiary: bool = False,
+    asking_tutor: bool = False,
 ):
     selected = _select_tools(
-        last_user_msg, prev_ai_msg, cedula, same_day, booking_active, cita_afectada, dental_urgency
+        last_user_msg,
+        prev_ai_msg,
+        cedula,
+        same_day,
+        booking_active,
+        cita_afectada,
+        dental_urgency,
+        asking_beneficiary=asking_beneficiary,
+        asking_tutor=asking_tutor,
     )
     tool_names = tuple(t.name for t in selected)
     return _bound_llm_for_tools(tool_names), tool_names
@@ -704,6 +736,7 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
         is_booking_start_intent,
         parse_identity_from_text,
         prev_asked_for_booking_identity,
+        es_menor_o_ti,
     )
 
     hist_id = extract_identity_from_history_newest_first(raw_msgs)
@@ -782,20 +815,109 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             )
         elif dental_urgency:
             context_str += _dental_urgency_hint(now, cedula_detectada, nombre_detectado)
-        elif is_booking_start_intent(last_user_msg) and cedula_detectada and nombre_detectado:
-            # Bug A: booking start with identity already in history.
+        cuenta_asociada = bool(uc.get("cuenta_asociada"))
+        titular_nom = uc.get("titular_nombre") or ""
+        titular_p_nom = uc.get("titular_primer_nombre") or ""
+        titular_ced = uc.get("titular_cedula") or ""
+        titular_tipo_doc = uc.get("titular_tipo_doc") or "CC"
+        es_para_si_mismo = bool(uc.get("es_para_si_mismo"))
+        es_para_tercero = bool(uc.get("es_para_tercero"))
+
+        if cuenta_asociada:
             context_str += (
-                f"\n[ACCIÓN] Inicio de agendamiento CON identidad ya conocida "
-                f"(cédula={cedula_detectada}, nombre={nombre_detectado}). "
-                "NO pidas cédula ni nombre otra vez. Confirma y pregunta el servicio/tratamiento. "
-                "PROHIBIDO menú de bienvenida. Sin inventar citas ni horarios."
+                f"\n[PACIENTE VERIFICADO] Cuenta asociada por WhatsApp: {titular_nom} "
+                f"({titular_tipo_doc}: {titular_ced}). Salúdalo por su primer nombre ({titular_p_nom}) "
+                "con cercanía y amabilidad. NO le pidas cédula si la cita o consulta es para él."
             )
-        elif is_booking_start_intent(last_user_msg) and not cedula_detectada:
-            # One LLM round, no catalog tools — correct booking step 1.
+
+        es_menor_ti = (
+            bool(uc.get("es_menor_ti"))
+            or (turn_id.tipo_documento in ("TI", "RC"))
+            or (str(uc.get("tipo_documento") or "").upper() in ("TI", "RC"))
+            or es_menor_o_ti(last_user_msg, turn_id.tipo_documento)
+        )
+        tutor_nom = uc.get("tutor_nombre") or turn_id.tutor_nombre
+        tutor_vinc = uc.get("tutor_vinculo") or turn_id.tutor_vinculo
+        tutor_tel = uc.get("tutor_telefono") or turn_id.tutor_telefono
+        tutor_doc = uc.get("tutor_documento") or turn_id.tutor_documento
+
+        # Si el bot preguntó previamente por acudiente/tutor y el titular responde confirmando
+        _CONFIRMA_ACUDIENTE_RE = re.compile(
+            r"\b(?:s[ií]|claro|por\s+supuesto|conmigo|yo\s+mismo|yo\s+soy|yo\s+ser[ií]a|yo|correcto|afirmativo|exacto|obvio)\b",
+            re.IGNORECASE,
+        )
+        asked_about_tutor = any(w in prev_ai_msg for w in ["acudiente", "tutor", "responsable"])
+        if cuenta_asociada and asked_about_tutor and _CONFIRMA_ACUDIENTE_RE.search(last_user_msg) and not tutor_nom:
+            tutor_nom = titular_nom
+            tutor_vinc = turn_id.tutor_vinculo or ("Padre" if any(p in last_user_msg.lower() for p in ["papá", "padre", "papa"]) else "Acudiente / Titular")
+            tutor_tel = str(uc.get("phone") or "")
+            tutor_doc = titular_cedula
+
+        asking_beneficiary = False
+        asking_tutor = False
+
+        if es_menor_ti and not tutor_nom:
+            if turn_id.cedula or cedula_detectada or is_booking_start_intent(last_user_msg) or es_para_tercero:
+                asking_tutor = True
+                if cuenta_asociada:
+                    context_str += (
+                        f"\n[ACCIÓN - MENOR CON TI] Cita para paciente menor con Tarjeta de Identidad (TI). "
+                        f"Pregunta con total amabilidad y calidez casual si el titular ({titular_nom}) será el acudiente "
+                        f"responsable (papá/mamá/tutor) o si vendrá con otra persona. "
+                        "Ejemplo casual: «¡Con mucho gusto! Como es menor de edad y tiene TI, ¿tú serías su acudiente responsable? "
+                        "Si es así dejamos tus datos vinculados; o si vendrá con otra persona, me indicas su nombre y celular 😊». "
+                        "PROHIBIDO invocar herramientas en este turno."
+                    )
+                else:
+                    context_str += (
+                        "\n[ACCIÓN - MENOR CON TI] Cita para paciente menor con Tarjeta de Identidad (TI). "
+                        "Pide de forma casual, amable y conversacional los datos del acudiente o tutor responsable: "
+                        "nombre completo, parentesco (mamá, papá o tutor) y un teléfono de contacto. "
+                        "Ejemplo casual: «¡Claro que sí! Como el paciente tiene Tarjeta de Identidad (TI), en el consultorio "
+                        "debemos registrar a su acudiente: ¿me indicas por favor el nombre de su acudiente, su parentesco y un teléfono de contacto? 😊». "
+                        "PROHIBIDO invocar herramientas en este turno."
+                    )
+        elif es_menor_ti and tutor_nom:
             context_str += (
-                "\n[ACCIÓN] Inicio de agendamiento sin cédula: responde en texto pidiendo "
-                "número de cédula y nombre completo. PROHIBIDO invocar herramientas en este turno."
+                f"\n[ACCIÓN - MENOR CON TI] Acudiente/tutor ya registrado: {tutor_nom} ({tutor_vinc or 'Acudiente'}). "
+                f"Al invocar agendar_cita_tool pasa: tipo_documento='TI', tutor_nombre='{tutor_nom}', "
+                f"tutor_vinculo='{tutor_vinc or 'Acudiente'}', tutor_telefono='{tutor_tel or uc.get('phone', '')}'. "
+                "NO vuelvas a pedir datos del acudiente ni del menor."
             )
+
+        if is_booking_start_intent(last_user_msg) and not asking_tutor:
+            if cuenta_asociada and not es_para_si_mismo and not es_para_tercero and not (turn_id.cedula and turn_id.cedula != titular_ced):
+                asking_beneficiary = True
+                context_str += (
+                    f"\n[ACCIÓN] Inicio de agendamiento de TITULAR ({titular_nom}). "
+                    f"Pregunta con amabilidad: «Con gusto te ayudo a agendar tu cita, {titular_p_nom}. "
+                    "¿La cita es para ti o para alguien más (un familiar, hijo, etc.)? 😊». "
+                    "NO pidas cédula ni nombres todavía. PROHIBIDO invocar herramientas en este turno."
+                )
+            elif cuenta_asociada and (es_para_si_mismo or (cedula_detectada == titular_ced and not es_para_tercero)):
+                context_str += (
+                    f"\n[ACCIÓN] Cita para el TITULAR ({titular_nom}, {titular_tipo_doc}: {titular_ced}). "
+                    "PROHIBIDO pedir cédula o nombre; usa estos datos directamente. Pregunta el tratamiento y disponibilidad."
+                )
+            elif es_para_tercero:
+                context_str += (
+                    "\n[ACCIÓN] Cita para un TERCERO (familiar o externo). "
+                    "Pide amablemente: (1) tipo de documento (CC, TI, CE, Pasaporte), (2) número de documento "
+                    "y (3) nombre completo del tercero. PROHIBIDO usar la cédula del titular."
+                )
+            elif not cedula_detectada:
+                context_str += (
+                    "\n[ACCIÓN] Inicio de agendamiento sin cuenta previa: responde en texto pidiendo "
+                    "tipo de documento (CC, TI, CE, Pasaporte), número de documento y nombre completo. "
+                    "PROHIBIDO invocar herramientas en este turno."
+                )
+            elif cedula_detectada and nombre_detectado:
+                context_str += (
+                    f"\n[ACCIÓN] Inicio de agendamiento CON identidad conocida "
+                    f"({uc.get('tipo_documento', 'CC')}: {cedula_detectada}, nombre={nombre_detectado}). "
+                    "NO pidas documento ni nombre otra vez. Confirma y pregunta el servicio/tratamiento. "
+                    "PROHIBIDO menú de bienvenida. Sin inventar citas ni horarios."
+                )
 
         requested = _requested_date(last_user_msg, now) if not same_day else None
         if requested:
@@ -888,6 +1010,8 @@ async def chatbot_node(state: AgentState) -> dict[str, list]:
             booking_active=booking_active,
             cita_afectada=bool(cita_afectada),
             dental_urgency=dental_urgency,
+            asking_beneficiary=asking_beneficiary,
+            asking_tutor=asking_tutor,
         )
         if tool_names and not is_gemini and tool_results >= _MAX_TOOL_RESULTS_PER_TURN:
             # Stops tool loops (same lookup repeated) — answer with the data already gathered.

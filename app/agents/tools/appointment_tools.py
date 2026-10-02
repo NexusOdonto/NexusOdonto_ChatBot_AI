@@ -154,8 +154,13 @@ async def _agendar_cita_impl(
     motivo_consulta: str,
     config: Optional[RunnableConfig] = None,
     confirmar_misma_persona: bool = False,
+    tipo_documento: Optional[str] = "CC",
+    tutor_nombre: Optional[str] = None,
+    tutor_vinculo: Optional[str] = None,
+    tutor_telefono: Optional[str] = None,
+    tutor_documento: Optional[str] = None,
 ) -> str:
-    """Agenda una cita buscando o creando el paciente por su cédula en el backend .NET."""
+    """Agenda una cita buscando o creando el paciente por su cédula en el backend .NET (con tutor si es menor)."""
     try:
         thread_id = ""
         if config and isinstance(config, dict):
@@ -239,11 +244,16 @@ async def _agendar_cita_impl(
                     "¿Me podrías indicar cómo te llamas por favor? 😊"
                 )
 
-            logger.info(f"[Agenda] Cédula {cedula} no encontrada. Creando una sola vez con nombre: '{nombre_display}'...")
+            logger.info(f"[Agenda] Documento {cedula} ({tipo_documento}) no encontrado. Creando paciente con nombre: '{nombre_display}'...")
             resultado_registro = await dotnet_client.crear_paciente_basico(
                 cedula=cedula,
                 nombre=nombre_display,
                 telefono_whatsapp=thread_id,
+                tipo_documento=tipo_documento or "CC",
+                tutor_nombre=tutor_nombre,
+                tutor_telefono=tutor_telefono,
+                tutor_vinculo=tutor_vinculo,
+                tutor_documento=tutor_documento,
             )
             if resultado_registro:
                 paciente_id = resultado_registro.get("patientId") or resultado_registro.get("id")
@@ -369,7 +379,11 @@ async def _agendar_cita_impl(
             "appointmentStatusId": str(status_id),
             "appointmentOriginId": str(origin_id),
             "reasonForVisit": motivo_consulta or f"Cita de {serv_nombre_display}",
-            "notes": "Agendado por Nexus Odonto Chatbot",
+            "notes": (
+                f"Agendado por Nexus Odonto Chatbot | Acudiente: {tutor_nombre} ({tutor_vinculo or 'Tutor'}) - Tel: {tutor_telefono or 'N/A'}"
+                if tutor_nombre
+                else "Agendado por Nexus Odonto Chatbot"
+            ),
         }
 
         respuesta = await dotnet_client.agendar_cita(payload)
@@ -384,10 +398,15 @@ async def _agendar_cita_impl(
                 f"prof={prof_real} servicio={serv_nombre_display}"
             )
 
+            doc_tipo_clean = (tipo_documento or "CC").upper()
+            doc_label = f"Documento ({doc_tipo_clean})" if doc_tipo_clean != "CC" else "Cédula"
+            tutor_line = f"• *Acudiente responsable:* {tutor_nombre} ({tutor_vinculo or 'Tutor'})\n" if tutor_nombre else ""
+
             return (
                 f"¡Listo! Quedó *confirmada con éxito* tu cita.\n\n"
                 f"• *Paciente:* {nombre_display}\n"
-                f"• *Cédula:* {cedula}\n"
+                f"• *{doc_label}:* {cedula}\n"
+                f"{tutor_line}"
                 f"• *Especialista:* {prof_real}\n"
                 f"• *Tratamiento:* {serv_nombre_display}\n"
                 f"• *Fecha:* {fecha_legible(inicio_real)}\n"
@@ -423,7 +442,10 @@ async def _agendar_cita_impl(
                 )
     except Exception as exc:
         logger.error(f"Error al agendar cita: {exc}", exc_info=True)
-        return "Lo siento, ocurrió un problema de conexión al registrar la cita. Por favor intenta de nuevo en unos minutos."
+        return (
+            "En este momento el sistema tardó en responder al registrar la cita. "
+            "Por favor confírmame nuevamente o si gustas comunícate con recepción al *+57 324 6030217* y te la dejamos lista de inmediato. 😊"
+        )
 
 
 async def _consultar_cita_por_cedula_impl(cedula: str) -> str:
@@ -849,24 +871,31 @@ async def agendar_cita_tool(
     fecha_hora_inicio: str,
     motivo_consulta: str,
     confirmar_misma_persona: bool = False,
+    tipo_documento: str = "CC",
+    tutor_nombre: Optional[str] = None,
+    tutor_vinculo: Optional[str] = None,
+    tutor_telefono: Optional[str] = None,
+    tutor_documento: Optional[str] = None,
     config: Annotated[Optional[RunnableConfig], InjectedToolArg] = None,
 ) -> str:
     """
-    Registra una cita en el sistema para un paciente identificado por su cédula.
+    Registra una cita en el sistema para un paciente identificado por su documento (CC, TI, CE, Pasaporte).
     
-    IMPORTANTE: Antes de invocar esta herramienta DEBES tener los siguientes datos del usuario:
-    - cedula: Número de cédula o documento del paciente (OBLIGATORIO). Clave única de identidad.
-    - nombre_paciente: Nombre del paciente (OBLIGATORIO). No hace falta el nombre exacto registrado:
-      basta con que las partes del nombre estén contenidas en el nombre canónico
-      (ej. "Alejandro Escobar" coincide con "Jhon Alejandro Escobar Lozada" + misma cédula).
+    IMPORTANTE: Antes de invocar esta herramienta DEBES tener los siguientes datos:
+    - cedula: Número de documento o cédula del paciente a atender (OBLIGATORIO).
+    - nombre_paciente: Nombre completo del paciente a atender (OBLIGATORIO). Si la cita es para un tercero (hijo/familiar), debe ser el nombre del tercero.
     - profesional_id: ID o nombre del odontólogo seleccionado.
     - servicio_id: ID o nombre del servicio odontológico.
     - fecha_hora_inicio: Fecha y hora de inicio en formato ISO 8601 (ej. YYYY-MM-DDTHH:MM:SS).
     - motivo_consulta: Breve descripción de la razón de la consulta.
-    - confirmar_misma_persona: True SOLO si el paciente ya confirmó ser la misma persona
-      tras un aviso de nombre sin coincidencia de partes (misma cédula, nombres sin tokens comunes).
+    - confirmar_misma_persona: True SOLO si el paciente ya confirmó ser la misma persona tras aviso.
+    - tipo_documento: Tipo de documento oficial del paciente ("CC", "TI", "CE", "PAS", "RC"). Por defecto "CC".
+    - tutor_nombre: Nombre completo del acudiente o tutor responsable (OBLIGATORIO para menores con TI o RC).
+    - tutor_vinculo: Parentesco con el menor ("Madre", "Padre", "Acudiente legal").
+    - tutor_telefono: Teléfono de contacto del acudiente/tutor.
+    - tutor_documento: Cédula del acudiente/tutor.
     
-    Usa esta herramienta SOLAMENTE después de presentar la ficha de propuesta y obtener confirmación explícita del usuario.
+    Usa esta herramienta SOLAMENTE después de presentar la propuesta y obtener confirmación explícita del usuario.
     El número de WhatsApp del paciente se usa automáticamente como teléfono de contacto.
     Si el paciente no existe en el sistema, se creará automáticamente con los datos básicos.
     """
@@ -879,6 +908,11 @@ async def agendar_cita_tool(
         motivo_consulta,
         config,
         confirmar_misma_persona=bool(confirmar_misma_persona),
+        tipo_documento=tipo_documento,
+        tutor_nombre=tutor_nombre,
+        tutor_vinculo=tutor_vinculo,
+        tutor_telefono=tutor_telefono,
+        tutor_documento=tutor_documento,
     ))
 
 

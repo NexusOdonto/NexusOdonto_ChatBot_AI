@@ -413,15 +413,30 @@ def _variantes_busqueda_servicio(norm_query: str) -> List[str]:
 
 
 def _es_servicio_activo(ser: Dict[str, Any]) -> bool:
-    """True si el servicio está activo o si no trae bandera de activo."""
+    """True si el servicio está activo y no ha sido eliminado en el backend .NET."""
+    if not isinstance(ser, dict):
+        return False
+
+    # 1. Banderas explícitas de eliminación o soft-delete
+    is_deleted = _obtener_valor(ser, "isDeleted", "IsDeleted", "is_deleted", "eliminado", "borrado")
+    if is_deleted is True or str(is_deleted).strip().lower() in ("true", "1", "yes", "si", "sí"):
+        return False
+
+    deleted_at = _obtener_valor(ser, "deletedAt", "DeletedAt", "deleted_at", "fechaEliminacion", "fechaBorrado")
+    if deleted_at not in (None, "", "null", "None"):
+        return False
+
+    # 2. Estados textuales de eliminación o inactividad
+    status = str(_obtener_valor(ser, "status", "Status", "estado", "serviceStatusId") or "").strip().lower()
+    if status in ("deleted", "eliminado", "inactivo", "inactive", "cancelado", "cancelled", "borrado"):
+        return False
+
+    # 3. Bandera de activo
     active = _obtener_valor(ser, "isActive", "IsActive", "active", "activo")
-    if active is None:
-        return True
-    if isinstance(active, bool):
-        return active
-    if isinstance(active, (int, float)):
-        return active != 0
-    return str(active).strip().lower() not in ("false", "0", "no", "inactive", "inactivo")
+    if active is False or str(active).strip().lower() in ("false", "0", "no", "inactive", "inactivo"):
+        return False
+
+    return True
 
 
 def _texto_coincide(norm_query: str, *candidatos: str) -> bool:
@@ -552,6 +567,7 @@ def _servicios_relacionados_a_especialidad(
     norm_query: str = "",
 ) -> List[Dict[str, Any]]:
     """Servicios activos relacionados a la especialidad."""
+    esp_id = str(_obtener_valor(especialidad, "id", "especialidadId", "specialtyId") or "").lower()
     esp_nombre = _obtener_valor(especialidad, "name", "nombre") or ""
     esp_code = _obtener_valor(especialidad, "code", "codigo") or ""
     candidatos_norm = [
@@ -569,6 +585,14 @@ def _servicios_relacionados_a_especialidad(
         sid = str(_obtener_valor(ser, "id", "servicioId", "serviceId") or id(ser))
         if sid in vistos:
             continue
+
+        # Coincidencia directa por ID de especialidad
+        ser_esp_id = str(_obtener_valor(ser, "specialtyId", "especialidadId") or "").lower()
+        if ser_esp_id and esp_id and ser_esp_id == esp_id:
+            relacionados.append(ser)
+            vistos.add(sid)
+            continue
+
         nombre = _obtener_valor(ser, "name", "nombre") or ""
         display = _obtener_valor(ser, "displayName", "DisplayName") or ""
         desc = _obtener_valor(ser, "description", "descripcion") or ""
@@ -581,7 +605,7 @@ def _servicios_relacionados_a_especialidad(
     return relacionados
 
 
-def _lista_servicios_whatsapp(servicios: List[Dict[str, Any]], limite: int = 12) -> str:
+def _lista_servicios_whatsapp(servicios: List[Dict[str, Any]], limite: int = 50) -> str:
     activos = _servicios_activos(servicios)
     if not activos:
         return ""
