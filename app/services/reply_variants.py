@@ -228,3 +228,98 @@ PORTAL_SOLO_CREDENCIALES = (
     "Entras con tu número de cédula como *usuario* y también como *contraseña* temporal. "
     "Te recomiendo cambiarla al ingresar; por aquí no manejamos contraseñas.",
 )
+
+FUERA_DE_ALCANCE = (
+    "En *Nexus Odonto* solo atendemos *salud oral* (dientes, encías y boca). "
+    "Por un dolor en otra parte del cuerpo te conviene consultar un médico general "
+    "o el especialista correspondiente. "
+    "Si tienes una molestia dental o quieres una cita odontológica, aquí te ayudamos.",
+    "Eso ya se sale de lo que manejamos: en *Nexus Odonto* solo vemos *salud oral*. "
+    "Para ese dolor lo mejor es un médico general o el especialista. "
+    "Si es algo de dientes, encías o boca, con gusto te ayudo.",
+    "Qué pena, aquí solo atendemos *salud oral*: dientes, encías y boca. "
+    "Para esa molestia te recomiendo ir al médico. "
+    "Si necesitas algo odontológico, me cuentas.",
+)
+
+INTERMITENCIAS = (
+    "En este momento tenemos una pequeña falla en el sistema. "
+    "¿Me escribes de nuevo en un ratico? Qué pena la molestia.",
+    "Uy, se nos está cayendo el sistema por un momento. "
+    "Intenta de nuevo en unos minutos, porfa. Disculpa la espera.",
+    "Tenemos intermitencias en este momento y no alcancé a revisar tu mensaje. "
+    "¿Me lo reenvías en un momentico?",
+    "Qué pena, el sistema está lento ahora mismo. "
+    "Escríbeme otra vez en unos minutos y con gusto te ayudo.",
+)
+
+NO_ENTENDI = (
+    "No te entendí bien. ¿Me lo dices otra vez con palabras? Por ejemplo: agendar, precios o servicios.",
+    "Perdón, no te entendí. ¿Me cuentas de nuevo qué necesitas? Puede ser una cita, precios o una duda.",
+    "Uy, no logré entender el mensaje. ¿Me lo escribes otra vez? Te ayudo con citas, precios o servicios.",
+    "Creo que se te fue un mensaje incompleto. ¿Qué necesitas: agendar, saber precios o algo más?",
+)
+
+
+def is_known_bot_text(text: str) -> bool:
+    """Retorna True si el texto corresponde a una plantilla o mensaje estándar emitido por el bot."""
+    if not text:
+        return False
+    import re
+    norm = " ".join(text.strip().lower().split())
+    if not norm:
+        return False
+
+    pools = [
+        SPAM,
+        INACTIVIDAD_GENERAL,
+        INACTIVIDAD_CITA_INCOMPLETA,
+        SOLO_ODONTOLOGIA,
+        AUDIO_ERROR,
+        AUDIO_NO_ENTENDIDO,
+        MEDIOS_NO_SOPORTADOS,
+        REINICIO,
+        ESCALAMIENTO,
+        FUERA_DE_ALCANCE,
+        PORTAL_RECORDATORIO,
+        PORTAL_PRIMERA_VEZ,
+        PORTAL_SOLO_CREDENCIALES,
+        INTERMITENCIAS,
+        NO_ENTENDI,
+    ]
+    for pool in pools:
+        for tpl in pool:
+            clean_tpl = re.sub(r"\{[a-zA-Z0-9_]+\}", "", tpl)
+            norm_tpl = " ".join(clean_tpl.strip().lower().split())
+            if not norm_tpl:
+                continue
+            if norm_tpl in norm or norm in norm_tpl or (len(norm_tpl) > 20 and norm_tpl[:25] in norm):
+                return True
+
+    markers = [
+        "nexus odonto",
+        "asistente virtual",
+        "sistema de agenda",
+        "muchos mensajes seguidos",
+        "muchos mensajes muy rapido",
+        "muchos mensajes muy rápido",
+        "espera un momento y escribeme",
+        "espera un momento y escríbeme",
+        "no alcance a dejar registrada",
+        "no alcancé a dejar registrada",
+        "solo puedo ayudarte con temas odontologicos",
+        "solo puedo ayudarte con temas odontológicos",
+        "por aqui no alcanzo a ver fotos",
+        "por aquí no alcanzo a ver fotos",
+        "no pude abrir tu audio",
+        "no logre entender la nota de voz",
+        "no logré entender la nota de voz",
+        "un asesor de la clinica revisara",
+        "un asesor de la clínica revisará",
+        "plataforma virtual",
+    ]
+    for m in markers:
+        if m in norm:
+            return True
+
+    return False

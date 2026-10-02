@@ -22,6 +22,7 @@ from app.clients.evolution_client import (
     is_recent_bot_text,
     extract_evolution_message_id,
 )
+from app.services.reply_variants import is_known_bot_text
 from app.services.semantic_cache import purgar_cache_semantico
 from app.services.chat.chat_orchestrator import (
     chat_orchestrator,
@@ -40,6 +41,8 @@ from app.services.chat.message_processor import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["WhatsApp Webhook"])
+
+_SERVER_START_TIME = time.time()
 
 # Deduplicación de webhooks entrantes (TTL 90 segundos)
 _MESSAGE_DEDUPE_TTL_SECONDS = 90
@@ -142,7 +145,7 @@ async def receive_whatsapp_message(request: Request):
         msg_ts = extract_message_timestamp(payload, raw_json)
         if msg_ts is not None:
             edad_segundos = time.time() - msg_ts
-            if edad_segundos > 120.0:
+            if edad_segundos > 60.0 or msg_ts < (_SERVER_START_TIME - 10.0):
                 logger.info(
                     "[Webhook] Mensaje histórico/desfasado ignorado (edad=%.1fs > 120s, ts=%.0f) para %s",
                     edad_segundos,
@@ -187,12 +190,17 @@ async def receive_whatsapp_message(request: Request):
             if texto_asesor and (
                 is_recent_bot_text(destinatario, texto_asesor)
                 or is_recent_bot_text(str(remote_jid_me or ""), texto_asesor)
+                or is_known_bot_text(texto_asesor)
             ):
                 if msg_id_from_me:
                     from app.clients.evolution_client import register_bot_message_id
                     register_bot_message_id(str(msg_id_from_me))
                 logger.info(f"[fromMe-BotEcho] Eco de mensaje enviado por el bot hacia {destinatario} descartado.")
                 return {"status": "ignored", "reason": "self_message_bot_echo"}
+
+            if msg_ts is not None and (time.time() - msg_ts > 15.0):
+                logger.info(f"[fromMe-Sync] Mensaje fromMe historico ({time.time() - msg_ts:.1f}s) descartado para {destinatario}.")
+                return {"status": "ignored", "reason": "self_message_history_sync"}
 
             if texto_asesor and destinatario:
                 asyncio.create_task(registrar_mensaje_asesor(destinatario, texto_asesor))

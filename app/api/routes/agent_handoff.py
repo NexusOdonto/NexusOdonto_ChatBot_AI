@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import asyncio
 import time
 import re
@@ -155,6 +155,51 @@ async def resume_conversation(request: ResumeConversationRequest):
     except Exception as e:
         logger.error(f"[Handoff Error] Error al reanudar conversación para {phone_number}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error interno al reanudar conversación: {str(e)}")
+
+
+@router.post("/conversations/resume-all", dependencies=[Depends(verify_internal_secret)])
+async def resume_all_conversations():
+    """Restablece al bot todas las conversaciones abiertas que quedaron en atencion manual o sin tickets activos."""
+    try:
+        convs = await dotnet_client.obtener_catalogo("ChatbotConversations") or []
+        reactivated_count = 0
+        checkpointer = get_checkpointer_instance()
+
+        for c in convs:
+            c_status = str(c.get("conversationStatusId", "")).lower()
+            c_id = str(c.get("id", "")).strip()
+            c_ident = str(c.get("chatIdentifier", "")).strip()
+            is_closed = bool(c.get("closedAt"))
+
+            if is_closed:
+                continue
+
+            if c_status in (dotnet_client.STATUS_ATENDIDA_HUMANO.lower(), dotnet_client.STATUS_ESCALADA.lower()):
+                try:
+                    await dotnet_client.actualizar_estado_conversacion(c_id, dotnet_client.STATUS_ACTIVA)
+                    await dotnet_client.resolver_tickets_conversacion(c_id)
+                    if c_ident:
+                        marcar_conversacion_reactivada(c_ident)
+                        if checkpointer:
+                            await checkpointer.clear_thread(c_ident)
+                        config = get_thread_config(c_ident)
+                        try:
+                            await get_graph().aupdate_state(config, {"conversation_status": "ACTIVA"}, as_node="chatbot")
+                        except Exception:
+                            pass
+                        dotnet_client.limpiar_cache_conversacion(c_ident)
+                    reactivated_count += 1
+                except Exception as c_err:
+                    logger.warning(f"[Handoff] Error reactivando conversacion {c_id}: {c_err}")
+
+        return {
+            "status": "success",
+            "message": f"Se reactivaron {reactivated_count} conversaciones con NexusBot.",
+            "reactivated_count": reactivated_count,
+        }
+    except Exception as e:
+        logger.error(f"[Handoff Error] Error en resume_all: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error reactivando conversaciones: {str(e)}")
 
 
 class ResolveIdentityRequest(BaseModel):

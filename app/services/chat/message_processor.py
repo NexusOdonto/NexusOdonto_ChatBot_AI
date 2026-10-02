@@ -1,4 +1,4 @@
-"""Procesador central de mensajes de chat en segundo plano para Nexus Odonto.
+﻿"""Procesador central de mensajes de chat en segundo plano para Nexus Odonto.
 Ejecuta la orquestación del grafo LangGraph, control de TTL de sesión (15 min),
 caché semántico, escalamiento a asesores humanos y auditoría a .NET / Oracle.
 """
@@ -506,19 +506,19 @@ async def registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> 
         )
         # Mantener la conversación en atención humana (Uso Manual) para que el bot no interfiera
         conv_id = await dotnet_client.obtener_o_crear_conversacion(numero_paciente)
-        if conv_id:
+        if conv_id and await is_escalated(numero_paciente):
             await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ATENDIDA_HUMANO)
-        try:
-            config = get_thread_config(numero_paciente)
-            await _update_thread_state(
-                config,
-                {
-                    "messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")],
-                    "conversation_status": "ESCALADA",
-                },
-            )
-        except Exception:
-            pass
+            try:
+                config = get_thread_config(numero_paciente)
+                await _update_thread_state(
+                    config,
+                    {
+                        "messages": [AIMessage(content=f"[Asesor]: {mensaje_texto}")],
+                        "conversation_status": "ESCALADA",
+                    },
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"[fromMe-Humano] No se pudo registrar mensaje del asesor: {e}")
 
