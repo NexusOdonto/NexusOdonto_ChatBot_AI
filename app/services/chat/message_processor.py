@@ -495,6 +495,25 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
     return True
 
 
+_ADVISOR_ALERT_SENT_AT: dict[str, float] = {}
+_ADVISOR_ALERT_COOLDOWN_S = 30 * 60
+
+
+async def alert_advisors(phone_number: str, motivo: str, prioridad: str = "MEDIA") -> None:
+    """Alerta al panel de asesores (ticket abierto) sin quitarle la conversación al bot."""
+    now_mono = time.monotonic()
+    last = _ADVISOR_ALERT_SENT_AT.get(phone_number)
+    if last and (now_mono - last) < _ADVISOR_ALERT_COOLDOWN_S:
+        return
+    _ADVISOR_ALERT_SENT_AT[phone_number] = now_mono
+    try:
+        await dotnet_client.crear_ticket_soporte(telefono=phone_number, motivo=motivo, prioridad=prioridad)
+        logger.info(f"[Processor] Alerta a asesores ({motivo}) para {phone_number}; el bot sigue atendiendo.")
+    except Exception as e:
+        _ADVISOR_ALERT_SENT_AT.pop(phone_number, None)
+        logger.warning(f"[Processor] No se pudo crear la alerta para {phone_number}: {e}")
+
+
 async def registrar_mensaje_asesor(numero_paciente: str, mensaje_texto: str) -> None:
     """Registra en .NET un mensaje enviado manualmente por el asesor desde el celular o web."""
     try:
@@ -877,40 +896,24 @@ async def process_whatsapp_message(
 
         rag_conf = result.get("rag_confidence")
 
-        if result.get("conversation_status") == "ESCALADA":
-            already_sent_by_graph = bool(result.get("emergency_detected"))
-            if not already_sent_by_graph:
-                messages = result.get("messages", [])
-                if messages:
-                    last_msg = messages[-1]
-                    if isinstance(last_msg, AIMessage) and last_msg.content:
-                        resp_urg = extract_text_content(last_msg.content)
-                        t_send = time.perf_counter()
-                        await evolution_client.enviar_mensaje(numero_paciente, resp_urg)
-                        spans["send"] = time.perf_counter() - t_send
-                        asyncio.create_task(
-                            dotnet_client.registrar_mensaje(
-                                chat_identifier=numero_paciente,
-                                rol="CHATBOT",
-                                contenido=resp_urg,
-                                rag_confidence=rag_conf,
-                            )
-                        )
-                await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
-            else:
-                config = get_thread_config(numero_paciente)
-                await _update_thread_state(config, {"conversation_status": "ESCALADA"})
+        # The emergency node already sent its WhatsApp messages and alerted the panel.
+        if result.get("emergency_detected"):
+            if result.get("conversation_status") == "ESCALADA":
+                await _update_thread_state(config, {"conversation_status": "ACTIVA"})
             spans["total"] = time.perf_counter() - t_total
             logger.info(
-                f"[Latency] phone={numero_paciente} path=escalated "
+                f"[Latency] phone={numero_paciente} path=emergency_alert "
                 + " ".join(f"{k}={v:.3f}s" for k, v in spans.items())
             )
             return
 
-        # Solo escalar por baja confianza RAG cuando hubo score real de tool RAG
+        if result.get("conversation_status") == "ESCALADA":
+            await _update_thread_state(config, {"conversation_status": "ACTIVA"})
+            asyncio.create_task(alert_advisors(numero_paciente, "CONSULTA_COMPLEJA"))
+
+        # Low RAG confidence only alerts advisors; the bot keeps answering.
         if rag_conf is not None and rag_conf < settings.rag_min_confidence:
-            await escalate_conversation(numero_paciente, numero_paciente, mensaje_texto)
-            return
+            asyncio.create_task(alert_advisors(numero_paciente, "BAJA_CONFIANZA_RAG"))
 
         # Extraer respuesta final del bot
         mensajes_resultado = result.get("messages", [])

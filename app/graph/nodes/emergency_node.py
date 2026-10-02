@@ -1,6 +1,6 @@
 """Nodo de detección de emergencias médicas / odontológicas severas.
-Escala inmediatamente a nivel CRÍTICO si se detectan hemorragias, dolor intolerable,
-flemones con fiebre o traumatismos maxilofaciales graves.
+Alerta al panel a nivel CRÍTICO si se detectan hemorragias, dolor intolerable,
+flemones con fiebre o traumatismos maxilofaciales graves; el bot sigue atendiendo.
 """
 
 import asyncio
@@ -77,12 +77,10 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
             except Exception as e:
                 logger.error(f"[Emergency Detector] Error enviando turno más cercano a {thread_id}: {e}")
 
-        # 2. Escalar ticket a nivel CRÍTICO, crear notificación y actualizar estado en .NET
+        # 2. Alertar al panel (ticket CRÍTICO + notificación) sin quitarle la conversación al bot
         if thread_id:
             try:
                 conv_id = await dotnet_client.obtener_o_crear_conversacion(thread_id)
-                if conv_id:
-                    await dotnet_client.actualizar_estado_conversacion(conv_id, dotnet_client.STATUS_ESCALADA)
                 await dotnet_client.crear_ticket_soporte(
                     telefono=thread_id,
                     motivo=f"EMERGENCIA_MEDICA: {reason}",
@@ -103,7 +101,7 @@ async def emergency_check_node(state: AgentState, config: RunnableConfig) -> dic
         )
         return {
             "messages": [emergency_message],
-            "conversation_status": "ESCALADA",
+            "conversation_status": "ACTIVA",
             "emergency_detected": True,
             "emergency_reason": reason,
         }
