@@ -15,9 +15,29 @@ Módulo puro de dominio: 0 dependencias externas, determinista y testeable.
 import re
 
 
+def sanitizar_caracteres_escapados(texto: str) -> str:
+    """Limpia comillas escapadas accidentales, saltos de línea literales y comillas envolventes."""
+    if not texto:
+        return ""
+    res = texto.strip()
+    # Eliminar comillas envolventes si todo el texto viene entre comillas
+    if (res.startswith('"') and res.endswith('"') and len(res) > 2) or (
+        res.startswith("'") and res.endswith("'") and len(res) > 2
+    ):
+        res = res[1:-1].strip()
+
+    # Reemplazar comillas y saltos de línea escapados
+    res = res.replace('\\"', '"').replace("\\'", "'").replace("\\n", "\n")
+    # Limpiar comillas al inicio de párrafos resultantes de serialización de JSON
+    res = re.sub(r'^"(.*?)"$', r"\1", res, flags=re.MULTILINE)
+    # Eliminar bloques de código markdown ``` o ```markdown
+    res = re.sub(r"```[a-zA-Z]*\n?", "", res)
+    return res
+
+
 def sanitizar_negritas_whatsapp(texto: str) -> str:
-    """Convierte negritas de Markdown (**texto**) a negrita simple de WhatsApp (*texto*)
-    y limpia asteriscos dobles residuales.
+    """Convierte negritas de Markdown (**texto**) a negrita simple de WhatsApp (*texto*),
+    elimina espacios internos en los asteriscos y limpia asteriscos residuales.
     """
     if not texto:
         return ""
@@ -37,6 +57,18 @@ def sanitizar_negritas_whatsapp(texto: str) -> str:
     # 3. Limpiar cualquier doble asterisco residual (ej. "palabra**dentro" o "**opción")
     texto = re.sub(r"\*\*", "*", texto)
 
+    # 4. WhatsApp exige que el texto en negrita NO tenga espacios pegados al asterisco (* palabra * no funciona)
+    # Corregir '* palabra *' -> ' *palabra* '
+    def _ajustar_espacios_negrita(match):
+        prefix_space = match.group(1) or ""
+        inner = match.group(2).strip()
+        suffix_space = match.group(3) or ""
+        if not inner:
+            return ""
+        return f"{prefix_space}*{inner}*{suffix_space}"
+
+    texto = re.sub(r"(\s|^)\*\s*([^\*\n]+?)\s*\*(\s|$|[.,;:!?])", _ajustar_espacios_negrita, texto)
+
     return texto
 
 
@@ -55,7 +87,7 @@ def sanitizar_listas_y_encabezados(texto: str) -> str:
         if re.match(r"^#{1,6}\s+", l_strip):
             titulo = re.sub(r"^#{1,6}\s+", "", l_strip).strip()
             # Si el título ya tiene asteriscos, preservarlos limpios
-            titulo_limpio = titulo.strip("*")
+            titulo_limpio = titulo.strip("*").strip()
             lineas_procesadas.append(f"*{titulo_limpio}*")
             continue
 
@@ -82,21 +114,25 @@ def formatear_para_whatsapp(texto: str) -> str:
     """Función principal de formateo nativo para mensajes salientes a WhatsApp.
 
     Garantiza una presentación visual impecable, libre de caracteres markdown
-    incompatibles y asteriscos dobles dentro de palabras.
+    incompatibles, comillas o saltos escapados, y asteriscos mal formados.
     """
     if not texto or not isinstance(texto, str):
         return ""
 
+    # Paso 0: Limpieza de caracteres escapados y comillas accidentales
+    res = sanitizar_caracteres_escapados(texto)
+
     # Paso 1: Sanitizar enlaces
-    res = sanitizar_enlaces_whatsapp(texto)
+    res = sanitizar_enlaces_whatsapp(res)
 
     # Paso 2: Sanitizar listas y encabezados
     res = sanitizar_listas_y_encabezados(res)
 
-    # Paso 3: Sanitizar negritas y eliminar **
+    # Paso 3: Sanitizar negritas y eliminar espacios internos en *
     res = sanitizar_negritas_whatsapp(res)
 
     # Paso 4: Normalizar saltos de línea excesivos (máximo 2 saltos consecutivos)
     res = re.sub(r"\n{3,}", "\n\n", res)
 
     return res.strip()
+

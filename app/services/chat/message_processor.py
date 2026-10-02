@@ -1,4 +1,4 @@
-﻿"""Procesador central de mensajes de chat en segundo plano para Nexus Odonto.
+"""Procesador central de mensajes de chat en segundo plano para Nexus Odonto.
 Ejecuta la orquestación del grafo LangGraph, control de TTL de sesión (15 min),
 caché semántico, escalamiento a asesores humanos y auditoría a .NET / Oracle.
 """
@@ -127,8 +127,9 @@ async def _send_outage_notice(numero_paciente: str, reason: str) -> None:
     _OUTAGE_NOTICE_SENT_AT[numero_paciente] = now
     aviso = _outage_message()
     try:
-        await evolution_client.enviar_mensaje(numero_paciente, aviso)
-        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", aviso))
+        send_ok = await evolution_client.enviar_mensaje(numero_paciente, aviso)
+        if send_ok is not None:
+            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", aviso))
         asyncio.create_task(_notify_staff_outage(numero_paciente, reason))
     except Exception as err:
         logger.warning(f"[Processor] No se pudo enviar el aviso de falla a {numero_paciente}: {err}")
@@ -361,10 +362,11 @@ async def reset_conversation(phone_number: str) -> None:
     logger.info(f"[Reset] Memoria e historial reiniciados para {phone_number}")
     # Human persona: never say "asistente virtual" / bot / sistema on WhatsApp.
     reset_msg = reply_variants.pick("reinicio", reply_variants.REINICIO, phone=phone_number)
-    await evolution_client.enviar_mensaje(phone_number, reset_msg)
-    asyncio.create_task(
-        dotnet_client.registrar_mensaje(phone_number, "CHATBOT", reset_msg)
-    )
+    send_ok = await evolution_client.enviar_mensaje(phone_number, reset_msg)
+    if send_ok is not None:
+        asyncio.create_task(
+            dotnet_client.registrar_mensaje(phone_number, "CHATBOT", reset_msg)
+        )
 
 
 _ESCALATION_CACHE: dict[str, tuple[bool, float]] = {}
@@ -488,10 +490,11 @@ async def escalate_conversation(thread_id: str, phone_number: str, message: str)
     msg_escalamiento = reply_variants.pick(
         "escalamiento", reply_variants.ESCALAMIENTO, phone=phone_number
     )
-    await evolution_client.enviar_mensaje(phone_number, msg_escalamiento)
-    asyncio.create_task(
-        dotnet_client.registrar_mensaje(phone_number, "CHATBOT", msg_escalamiento)
-    )
+    send_ok = await evolution_client.enviar_mensaje(phone_number, msg_escalamiento)
+    if send_ok is not None:
+        asyncio.create_task(
+            dotnet_client.registrar_mensaje(phone_number, "CHATBOT", msg_escalamiento)
+        )
     return True
 
 
@@ -595,8 +598,9 @@ async def process_whatsapp_unsupported_media(numero_paciente: str, caption: str 
         msg_medios = reply_variants.pick(
             "medios", reply_variants.MEDIOS_NO_SOPORTADOS, phone=numero_paciente
         )
-        await evolution_client.enviar_mensaje(numero_paciente, msg_medios)
-        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_medios))
+        send_ok = await evolution_client.enviar_mensaje(numero_paciente, msg_medios)
+        if send_ok is not None:
+            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg_medios))
     except Exception as e:
         logger.error(f"[Processor] Error respondiendo medio no soportado a {numero_paciente}: {e}", exc_info=True)
 
@@ -613,8 +617,9 @@ async def process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, r
         audio_info = await extraer_bytes_audio(raw_payload_data, raw_message)
         if not audio_info:
             msg = reply_variants.pick("audio_error", reply_variants.AUDIO_ERROR, phone=numero_paciente)
-            await evolution_client.enviar_mensaje(numero_paciente, msg)
-            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
+            send_ok = await evolution_client.enviar_mensaje(numero_paciente, msg)
+            if send_ok is not None:
+                asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
             return
 
         audio_bytes, mimetype = audio_info
@@ -623,8 +628,9 @@ async def process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, r
             msg = reply_variants.pick(
                 "audio_no_entendido", reply_variants.AUDIO_NO_ENTENDIDO, phone=numero_paciente
             )
-            await evolution_client.enviar_mensaje(numero_paciente, msg)
-            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
+            send_ok = await evolution_client.enviar_mensaje(numero_paciente, msg)
+            if send_ok is not None:
+                asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
             return
 
         logger.info(f"[Audio] Nota de voz de {numero_paciente} transcrita: '{texto_transcrito}'")
@@ -632,8 +638,9 @@ async def process_whatsapp_audio(numero_paciente: str, raw_payload_data: dict, r
     except Exception as e:
         logger.error(f"[Audio] Error procesando audio de {numero_paciente}: {e}", exc_info=True)
         msg = reply_variants.pick("audio_error", reply_variants.AUDIO_ERROR, phone=numero_paciente)
-        await evolution_client.enviar_mensaje(numero_paciente, msg)
-        asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
+        send_ok = await evolution_client.enviar_mensaje(numero_paciente, msg)
+        if send_ok is not None:
+            asyncio.create_task(dotnet_client.registrar_mensaje(numero_paciente, "CHATBOT", msg))
 
 
 async def process_whatsapp_message(
@@ -949,16 +956,31 @@ async def process_whatsapp_message(
         _update_booking_context(numero_paciente, mensajes_resultado, known_cedula, known_nombre)
 
         t_send = time.perf_counter()
-        await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
+        send_result = await evolution_client.enviar_mensaje(numero_paciente, respuesta_texto)
         spans["send"] = time.perf_counter() - t_send
-        asyncio.create_task(
-            dotnet_client.registrar_mensaje(
-                chat_identifier=numero_paciente,
-                rol="CHATBOT",
-                contenido=respuesta_texto,
-                rag_confidence=rag_conf,
+
+        if send_result is not None:
+            asyncio.create_task(
+                dotnet_client.registrar_mensaje(
+                    chat_identifier=numero_paciente,
+                    rol="CHATBOT",
+                    contenido=respuesta_texto,
+                    rag_confidence=rag_conf,
+                )
             )
-        )
+        else:
+            logger.error(
+                f"[Processor] Falló la entrega por WhatsApp a {numero_paciente}. "
+                "No se registra mensaje CHATBOT en BD para evitar respuestas fantasma en la consola del asesor."
+            )
+            # Notificar al personal para que atienda al paciente ante el fallo de entrega
+            asyncio.create_task(
+                dotnet_client.crear_ticket_soporte(
+                    telefono=numero_paciente,
+                    motivo="FALLO_ENTREGA_WHATSAPP",
+                    prioridad="ALTA",
+                )
+            )
 
         inactivity_service.touch(numero_paciente, settings.session_ttl_seconds)
         spans["total"] = time.perf_counter() - t_total
